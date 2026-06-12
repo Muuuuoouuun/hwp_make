@@ -8,7 +8,14 @@ from docx import Document
 from docx.shared import Cm, Pt
 
 from . import storage
-from .exam_templates import ExamTemplate, get_template, resolve_export_title
+from .exam_templates import (
+    ANSWER_SHEET_TITLE,
+    ExamTemplate,
+    explanation_entries,
+    get_template,
+    quick_answer_lines,
+    resolve_export_title,
+)
 
 CIRCLED_NUMBERS = ("①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨")
 QUESTION_PREFIX_RE = re.compile(r"^\s*(?:문제\s*)?(\d{1,3})\s*[\.\)]\s*")
@@ -63,11 +70,36 @@ def _add_masthead(document: Document, title: str, template: ExamTemplate) -> Non
         _set_font(paragraph, 9, False)
 
 
+def _add_answer_sheet(document: Document, problems: list[dict[str, Any]], template: ExamTemplate) -> None:
+    document.add_page_break()
+    heading = document.add_heading(ANSWER_SHEET_TITLE, level=1)
+    _set_font(heading, 14, True)
+
+    paragraph = document.add_paragraph("빠른 정답")
+    _set_font(paragraph, 11, True)
+    for line in quick_answer_lines(problems, template):
+        document.add_paragraph(line)
+
+    entries = explanation_entries(problems, template)
+    if not entries:
+        return
+    document.add_paragraph("")
+    paragraph = document.add_paragraph("해설")
+    _set_font(paragraph, 11, True)
+    for entry_heading, lines in entries:
+        paragraph = document.add_paragraph()
+        run = paragraph.add_run(entry_heading)
+        run.bold = True
+        for line in lines:
+            document.add_paragraph(line)
+
+
 def write_docx(
     path: Path,
     title: str,
     problems: list[dict[str, Any]],
     template_key: str = "basic",
+    include_answer_sheet: bool = False,
 ) -> None:
     template = get_template(template_key)
     title = resolve_export_title(title, template)
@@ -131,5 +163,8 @@ def write_docx(
             document.add_paragraph(f"해설: {explanation}")
         if index != len(problems):
             document.add_paragraph("")
+
+    if include_answer_sheet:
+        _add_answer_sheet(document, problems, template)
 
     document.save(path)

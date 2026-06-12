@@ -110,6 +110,56 @@ if rhwp is not None:
 else:
     print("rhwp not installed; skipping render validation")
 
+# 3c) 정답·해설지 포함 내보내기
+for problem_id in ids:
+    storage.update_problem(
+        problem_id,
+        {
+            "answer": "2",
+            "explanation": "엽록체에서 광합성이 일어난다.",
+            "choices": ["미토콘드리아", "엽록체", "리보솜"],
+        },
+    )
+problems = storage.get_problems_by_ids(ids)
+sheet_path = storage.EXPORT_DIR / "answer_sheet.hwpx"
+hwpx_writer.write_hwpx(
+    sheet_path,
+    "정답지 테스트",
+    problems,
+    template_key=ROUNDTRIP_TEMPLATE_KEY,
+    include_answer_sheet=True,
+)
+result = importers.import_hwpx("answer_sheet.hwpx", sheet_path.read_bytes(), {})
+sheet_text = "\n".join(p["stem"] for p in result["created"])
+print("Answer sheet roundtrip:", len(result["created"]), "problems")
+if "빠른 정답" not in sheet_text or "②" not in sheet_text:
+    failures.append("Answer sheet: quick answers missing from exported HWPX")
+if "엽록체에서 광합성이 일어난다" not in sheet_text:
+    failures.append("Answer sheet: explanation missing from exported HWPX")
+if rhwp is not None:
+    sheet_doc = rhwp.parse(str(sheet_path))
+    if sheet_doc.page_count < 2:
+        failures.append("Answer sheet: expected page break to add a page")
+    else:
+        print(f"Answer sheet pages: {sheet_doc.page_count}")
+
+# 3d) DOCX 정답·해설지
+from app import docx_writer  # noqa: E402
+
+docx_sheet_path = storage.EXPORT_DIR / "answer_sheet.docx"
+docx_writer.write_docx(
+    docx_sheet_path,
+    "정답지 테스트",
+    problems,
+    template_key=ROUNDTRIP_TEMPLATE_KEY,
+    include_answer_sheet=True,
+)
+result = importers.import_docx("answer_sheet.docx", docx_sheet_path.read_bytes(), {})
+docx_text = "\n".join(p["stem"] for p in result["created"])
+if "빠른 정답" not in docx_text or "②" not in docx_text:
+    failures.append("Answer sheet: quick answers missing from exported DOCX")
+print("DOCX answer sheet roundtrip: ok" if "빠른 정답" in docx_text else "DOCX answer sheet roundtrip: MISSING")
+
 # 4) CSV import still fine
 csv_data = "번호,문제,정답\n1,사과는 영어로?,apple\n2,바다는 영어로?,sea\n".encode("utf-8-sig")
 result = importers.import_csv("words.csv", csv_data, {})

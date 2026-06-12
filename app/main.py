@@ -59,6 +59,7 @@ class ExportPayload(BaseModel):
     title: str = exam_templates.DEFAULT_EXPORT_TITLE
     format: Literal["hwpx", "docx"] = "hwpx"
     template_key: str = "basic"
+    include_answer_sheet: bool = False
 
 
 def _safe_export_name(title: str, extension: str) -> str:
@@ -174,7 +175,9 @@ def preview_export(payload: ExportPayload) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="No problems selected")
     title = exam_templates.resolve_export_title(payload.title, template)
     try:
-        result = preview.render_preview(title, problems, template.key)
+        result = preview.render_preview(
+            title, problems, template.key, include_answer_sheet=payload.include_answer_sheet
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"미리보기 실패: {exc}") from exc
     if template.columns > 1:
@@ -195,9 +198,13 @@ def export(payload: ExportPayload) -> FileResponse:
     filename = _safe_export_name(title, payload.format)
     path = storage.EXPORT_DIR / filename
     if payload.format == "docx":
-        docx_writer.write_docx(path, title, problems, template.key)
+        docx_writer.write_docx(
+            path, title, problems, template.key, include_answer_sheet=payload.include_answer_sheet
+        )
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     else:
-        hwpx_writer.write_hwpx(path, title, problems, template.key)
+        hwpx_writer.write_hwpx(
+            path, title, problems, template.key, include_answer_sheet=payload.include_answer_sheet
+        )
         media_type = "application/hwp+zip"
     return FileResponse(path, media_type=media_type, filename=filename)

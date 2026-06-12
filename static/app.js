@@ -38,6 +38,7 @@ const els = {
   exportTitle: document.querySelector("#exportTitle"),
   exportTemplate: document.querySelector("#exportTemplate"),
   exportFormat: document.querySelector("#exportFormat"),
+  exportAnswerSheet: document.querySelector("#exportAnswerSheet"),
   exportButton: document.querySelector("#exportButton"),
   emptyEditor: document.querySelector("#emptyEditor"),
   editorForm: document.querySelector("#editorForm"),
@@ -572,6 +573,7 @@ async function exportSelected() {
         title: els.exportTitle.value.trim() || "문항 모음",
         format: els.exportFormat.value,
         template_key: els.exportTemplate.value || "basic",
+        include_answer_sheet: els.exportAnswerSheet.checked,
       }),
     });
     if (!response.ok) throw new Error(await response.text());
@@ -613,6 +615,7 @@ async function previewExport() {
         title: els.exportTitle.value.trim() || "문항 모음",
         format: "hwpx",
         template_key: els.exportTemplate.value || "basic",
+        include_answer_sheet: els.exportAnswerSheet.checked,
       }),
     });
     els.previewPages.innerHTML = "";

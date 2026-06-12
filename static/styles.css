@@ -121,9 +121,28 @@ textarea:focus {
 
 .export-box {
   display: grid;
-  grid-template-columns: minmax(160px, 250px) minmax(140px, 200px) 92px 92px 112px;
+  grid-template-columns: minmax(160px, 250px) minmax(140px, 200px) 92px auto 92px 112px;
   gap: 8px;
   align-items: center;
+}
+
+.check-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.check-label input {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  margin: 0;
+  accent-color: var(--accent);
 }
 
 .workspace {

@@ -31,12 +31,19 @@ def render_preview(
     problems: list[dict[str, Any]],
     template_key: str = "basic",
     max_pages: int = MAX_PREVIEW_PAGES,
+    include_answer_sheet: bool = False,
 ) -> dict[str, Any]:
     if rhwp is None:
         raise RuntimeError("미리보기 엔진(rhwp-python)이 설치되어 있지 않습니다.")
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "preview.hwpx"
-        hwpx_writer.write_hwpx(path, title, problems, template_key=template_key)
+        hwpx_writer.write_hwpx(
+            path,
+            title,
+            problems,
+            template_key=template_key,
+            include_answer_sheet=include_answer_sheet,
+        )
         doc = rhwp.parse(str(path))
         page_count = int(doc.page_count)
         pages: list[str] = []

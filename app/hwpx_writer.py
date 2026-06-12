@@ -9,7 +9,14 @@ from typing import Any
 
 from PIL import Image
 
-from .exam_templates import ExamTemplate, get_template, resolve_export_title
+from .exam_templates import (
+    ANSWER_SHEET_TITLE,
+    ExamTemplate,
+    explanation_entries,
+    get_template,
+    quick_answer_lines,
+    resolve_export_title,
+)
 from . import storage
 
 
@@ -27,14 +34,21 @@ def _esc(value: Any) -> str:
 CHAR_HEIGHTS = {0: 1000, 1: 1600, 2: 1150, 3: 1250, 4: 900}
 
 
-def _paragraph(text: str, pid: int, char_pr: int = 0, para_pr: int = 0, extra_run: str = "") -> str:
+def _paragraph(
+    text: str,
+    pid: int,
+    char_pr: int = 0,
+    para_pr: int = 0,
+    extra_run: str = "",
+    page_break: bool = False,
+) -> str:
     text = _esc(text)
     if not text:
         text = " "
     height = CHAR_HEIGHTS.get(char_pr, 1000)
     # extra_run: 첫 문단 run에 들어가는 secPr/colPr 컨트롤 (OWPML 표준 위치)
     prefix = f"\n    <hp:run charPrIDRef=\"{char_pr}\">{extra_run}</hp:run>" if extra_run else ""
-    return f"""  <hp:p id="{pid}" paraPrIDRef="{para_pr}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">{prefix}
+    return f"""  <hp:p id="{pid}" paraPrIDRef="{para_pr}" styleIDRef="0" pageBreak="{1 if page_break else 0}" columnBreak="0" merged="0">{prefix}
     <hp:run charPrIDRef="{char_pr}"><hp:t xml:space="preserve">{text}</hp:t></hp:run>
     <hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="{height}" textheight="{height}" baseline="{int(height * 0.85)}" spacing="{int(height * 0.6)}" horzpos="0" horzsize="42520" flags="393216"/></hp:linesegarray>
   </hp:p>"""
@@ -132,17 +146,20 @@ def _build_body(
     image_items: dict[str, dict[str, Any]],
     template: ExamTemplate,
     section_controls: str = "",
+    include_answer_sheet: bool = False,
 ) -> str:
     paragraphs: list[str] = []
     pid = 0
     instance = 0
 
-    def add_text(text: str, char_pr: int = 0, para_pr: int = 0) -> None:
+    def add_text(text: str, char_pr: int = 0, para_pr: int = 0, page_break: bool = False) -> None:
         nonlocal pid
         pid += 1
         # 섹션 설정(secPr/colPr)은 문서 첫 문단의 run에 한 번만 싣는다.
         extra = section_controls if pid == 1 else ""
-        paragraphs.append(_paragraph(text, pid, char_pr, para_pr, extra_run=extra))
+        paragraphs.append(
+            _paragraph(text, pid, char_pr, para_pr, extra_run=extra, page_break=page_break)
+        )
 
     def add_image(image_path: str) -> None:
         nonlocal pid, instance
@@ -196,6 +213,22 @@ def _build_body(
         if template.include_explanations and problem.get("explanation"):
             add_text(f"해설: {problem['explanation']}")
         add_text("")
+
+    if include_answer_sheet:
+        add_text(ANSWER_SHEET_TITLE, 1, 1, page_break=True)
+        add_text("")
+        add_text("빠른 정답", 2)
+        for line in quick_answer_lines(problems, template):
+            add_text(line, 0, 3 if template.compact else 0)
+        entries = explanation_entries(problems, template)
+        if entries:
+            add_text("")
+            add_text("해설", 2)
+            for heading, lines in entries:
+                add_text(heading, 3, 3 if template.compact else 0)
+                for line in lines:
+                    add_text(line, 0, 3 if template.compact else 0)
+                add_text("")
     return "\n".join(paragraphs)
 
 
@@ -315,6 +348,7 @@ def _section_xml(
     problems: list[dict[str, Any]],
     image_items: dict[str, dict[str, Any]],
     template: ExamTemplate,
+    include_answer_sheet: bool = False,
 ) -> str:
     columns = max(1, min(template.columns, 2))
     # OWPML 표준: secPr와 단 설정(ctrl/colPr)은 첫 문단의 run 안에 들어간다.
@@ -326,7 +360,14 @@ def _section_xml(
           <hp:margin header="4252" footer="4252" gutter="0" left="8504" right="8504" top="5668" bottom="4252"/>
         </hp:pagePr>
       </hp:secPr><hp:ctrl><hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="{columns}" sameSz="1" sameGap="{COLUMN_GAP}"/></hp:ctrl>"""
-    body = _build_body(title, problems, image_items, template, section_controls=section_controls)
+    body = _build_body(
+        title,
+        problems,
+        image_items,
+        template,
+        section_controls=section_controls,
+        include_answer_sheet=include_answer_sheet,
+    )
     return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <hs:sec xmlns:hs="{SECTION_NS}" xmlns:hp="{PARA_NS}" xmlns:hc="{CORE_NS}" xmlns:hh="{HEAD_NS}">
 {body}
@@ -432,6 +473,7 @@ def write_hwpx(
     title: str,
     problems: list[dict[str, Any]],
     template_key: str = "basic",
+    include_answer_sheet: bool = False,
 ) -> None:
     template = get_template(template_key)
     title = resolve_export_title(title, template)
@@ -443,7 +485,10 @@ def write_hwpx(
         archive.writestr("version.xml", '<?xml version="1.0" encoding="UTF-8"?><version app="HWP Make" ver="1.0"/>')
         archive.writestr("Contents/content.hpf", _content_hpf(title, image_items))
         archive.writestr("Contents/header.xml", _header_xml(title))
-        archive.writestr("Contents/section0.xml", _section_xml(title, problems, image_items, template))
+        archive.writestr(
+            "Contents/section0.xml",
+            _section_xml(title, problems, image_items, template, include_answer_sheet=include_answer_sheet),
+        )
         archive.writestr("Preview/PrvText.txt", _preview_text(title, problems))
         for image_path, item in image_items.items():
             archive.write(storage.DATA_DIR / image_path, f"BinData/{item['name']}")

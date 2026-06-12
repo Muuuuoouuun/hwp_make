@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, asdict
+from typing import Any
 
 
 DEFAULT_EXPORT_TITLE = "문항 모음"
+ANSWER_SHEET_TITLE = "정답 및 해설"
+CIRCLED_NUMBERS = ("①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨")
 
 
 @dataclass(frozen=True)
@@ -202,3 +206,43 @@ def resolve_export_title(title: str, template: ExamTemplate) -> str:
     if template.key != "basic" and (not clean or clean == DEFAULT_EXPORT_TITLE):
         return template.default_title
     return clean or template.default_title
+
+
+def format_answer(problem: dict[str, Any], template: ExamTemplate) -> str:
+    """정답을 양식에 맞게 표기한다. 원형 선지 양식이면 '3' → '③'."""
+    answer = str(problem.get("answer") or "").strip()
+    if not answer:
+        return ""
+    if template.circled_choices and problem.get("choices") and re.fullmatch(r"[1-9]", answer):
+        return CIRCLED_NUMBERS[int(answer) - 1]
+    return answer
+
+
+def quick_answer_lines(
+    problems: list[dict[str, Any]],
+    template: ExamTemplate,
+    per_line: int = 5,
+) -> list[str]:
+    """빠른 정답표: '1. ③    2. ⑤ ...' 형태로 per_line개씩 묶은 줄 목록."""
+    entries = []
+    for index, problem in enumerate(problems, start=1):
+        label = problem.get("number") or str(index)
+        entries.append(f"{label}. {format_answer(problem, template) or '－'}")
+    return ["    ".join(entries[i : i + per_line]) for i in range(0, len(entries), per_line)]
+
+
+def explanation_entries(
+    problems: list[dict[str, Any]],
+    template: ExamTemplate,
+) -> list[tuple[str, list[str]]]:
+    """해설지 본문: (머리글, 해설 줄 목록) 목록. 해설이 있는 문항만 담는다."""
+    entries: list[tuple[str, list[str]]] = []
+    for index, problem in enumerate(problems, start=1):
+        explanation = str(problem.get("explanation") or "").strip()
+        if not explanation:
+            continue
+        label = problem.get("number") or str(index)
+        answer = format_answer(problem, template)
+        heading = f"{label}. 정답 {answer}" if answer else f"{label}."
+        entries.append((heading, explanation.splitlines()))
+    return entries
