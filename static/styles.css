@@ -450,6 +450,33 @@ textarea:focus {
   background: #f7f7f4;
 }
 
+.image-figure {
+  position: relative;
+}
+
+.image-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  min-height: 26px;
+  width: 26px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--danger);
+  font-size: 12px;
+  padding: 0;
+  line-height: 1;
+}
+
+.image-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.image-actions button {
+  font-size: 13px;
+}
+
 .toast {
   position: fixed;
   right: 18px;

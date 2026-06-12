@@ -49,6 +49,11 @@ class CollectPayload(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class AttachImagePayload(BaseModel):
+    filename: str
+    data_base64: str
+
+
 class ExportPayload(BaseModel):
     ids: list[int]
     title: str = exam_templates.DEFAULT_EXPORT_TITLE
@@ -114,6 +119,20 @@ def update_problem(problem_id: int, payload: ProblemPayload) -> dict[str, Any]:
 def delete_problem(problem_id: int) -> dict[str, Any]:
     storage.delete_problem(problem_id)
     return {"ok": True}
+
+
+@app.post("/api/problems/{problem_id}/images")
+def attach_image(problem_id: int, payload: AttachImagePayload) -> dict[str, Any]:
+    try:
+        problem = storage.get_problem(problem_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Problem not found") from exc
+    data = importers.decode_base64(payload.data_base64)
+    rel_path = importers._save_image_bytes(payload.filename, data)
+    if rel_path is None:
+        raise HTTPException(status_code=400, detail="이미지 파일이 아닙니다.")
+    image_paths = [*problem["image_paths"], rel_path]
+    return {"item": storage.update_problem(problem_id, {"image_paths": image_paths})}
 
 
 IMPORTERS = {

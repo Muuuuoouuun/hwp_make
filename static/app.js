@@ -48,6 +48,8 @@ const els = {
   editSource: document.querySelector("#editSource"),
   editExplanation: document.querySelector("#editExplanation"),
   imagePreview: document.querySelector("#imagePreview"),
+  attachButton: document.querySelector("#attachButton"),
+  attachInput: document.querySelector("#attachInput"),
   toast: document.querySelector("#toast"),
 };
 
@@ -313,11 +315,79 @@ function renderEditor() {
   els.editSource.value = problem.source_name || "";
   els.editExplanation.value = problem.explanation || "";
   els.imagePreview.innerHTML = "";
-  for (const url of problem.image_urls || []) {
+  (problem.image_urls || []).forEach((url, index) => {
+    const figure = document.createElement("div");
+    figure.className = "image-figure";
+
     const image = document.createElement("img");
     image.src = url;
     image.alt = problem.title || "첨부 이미지";
-    els.imagePreview.append(image);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "image-remove";
+    remove.textContent = "✕";
+    remove.title = "이미지 삭제";
+    remove.addEventListener("click", () => removeImage(problem, index));
+
+    figure.append(image, remove);
+    els.imagePreview.append(figure);
+  });
+}
+
+function editorPayload(problem, imagePaths) {
+  return {
+    source_type: problem.source_type || "manual",
+    source_name: els.editSource.value.trim(),
+    source_page: problem.source_page,
+    number: els.editNumber.value.trim(),
+    subject: els.editSubject.value.trim(),
+    unit: els.editUnit.value.trim(),
+    tags: els.editTags.value.trim(),
+    title: els.editTitle.value.trim(),
+    stem: els.editStem.value,
+    choices: els.editChoices.value.split("\n").map((item) => item.trim()).filter(Boolean),
+    answer: els.editAnswer.value.trim(),
+    explanation: els.editExplanation.value,
+    image_paths: imagePaths,
+  };
+}
+
+async function removeImage(problem, index) {
+  const imagePaths = (problem.image_paths || []).filter((_, i) => i !== index);
+  try {
+    await api(`/api/problems/${problem.id}`, {
+      method: "PUT",
+      body: JSON.stringify(editorPayload(problem, imagePaths)),
+    });
+    await loadProblems();
+    toast("이미지를 삭제했습니다.");
+  } catch (error) {
+    toast(`이미지 삭제 실패: ${error.message}`);
+  }
+}
+
+async function attachImages() {
+  const problem = activeProblem();
+  const files = Array.from(els.attachInput.files || []);
+  if (!problem || !files.length) return;
+  try {
+    // 첨부 전에 현재 편집 내용을 먼저 저장해 둔다.
+    await api(`/api/problems/${problem.id}`, {
+      method: "PUT",
+      body: JSON.stringify(editorPayload(problem, problem.image_paths || [])),
+    });
+    for (const file of files) {
+      await api(`/api/problems/${problem.id}/images`, {
+        method: "POST",
+        body: JSON.stringify({ filename: file.name, data_base64: await fileToBase64(file) }),
+      });
+    }
+    els.attachInput.value = "";
+    await loadProblems();
+    toast(`이미지 ${files.length}개를 첨부했습니다.`);
+  } catch (error) {
+    toast(`이미지 첨부 실패: ${error.message}`);
   }
 }
 
@@ -462,24 +532,9 @@ async function saveActive(event) {
   event.preventDefault();
   const problem = activeProblem();
   if (!problem) return;
-  const payload = {
-    source_type: problem.source_type || "manual",
-    source_name: els.editSource.value.trim(),
-    source_page: problem.source_page,
-    number: els.editNumber.value.trim(),
-    subject: els.editSubject.value.trim(),
-    unit: els.editUnit.value.trim(),
-    tags: els.editTags.value.trim(),
-    title: els.editTitle.value.trim(),
-    stem: els.editStem.value,
-    choices: els.editChoices.value.split("\n").map((item) => item.trim()).filter(Boolean),
-    answer: els.editAnswer.value.trim(),
-    explanation: els.editExplanation.value,
-    image_paths: problem.image_paths || [],
-  };
   await api(`/api/problems/${problem.id}`, {
     method: "PUT",
-    body: JSON.stringify(payload),
+    body: JSON.stringify(editorPayload(problem, problem.image_paths || [])),
   });
   await loadProblems();
   toast("저장했습니다.");
@@ -571,6 +626,8 @@ els.collectUrl.addEventListener("keydown", (event) => {
   if (event.key === "Enter") collectFromUrl();
 });
 els.manualButton.addEventListener("click", addManualProblem);
+els.attachButton.addEventListener("click", () => els.attachInput.click());
+els.attachInput.addEventListener("change", attachImages);
 els.editorForm.addEventListener("submit", saveActive);
 els.deleteButton.addEventListener("click", deleteActive);
 els.exportButton.addEventListener("click", exportSelected);
