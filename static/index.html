@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HWP Make</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>HWP Make</h1>
+          <p id="statusText">로컬 DB 준비 중</p>
+        </div>
+        <div class="export-box">
+          <input id="exportTitle" type="text" value="문항 모음" aria-label="문서 제목" />
+          <select id="exportTemplate" aria-label="내보내기 양식">
+            <option value="basic">기본 문항 모음</option>
+          </select>
+          <select id="exportFormat" aria-label="내보내기 형식">
+            <option value="hwpx">HWPX</option>
+            <option value="docx">DOCX</option>
+          </select>
+          <button id="exportButton" class="primary">내보내기</button>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <aside class="sidebar tool-panel">
+          <div class="panel-title">
+            <h2>가져오기</h2>
+          </div>
+          <label class="field-label" for="importKind">소스</label>
+          <select id="importKind">
+            <option value="auto">자동 감지</option>
+            <option value="pdf">PDF</option>
+            <option value="image">이미지</option>
+            <option value="hwp">HWP</option>
+            <option value="hwpx">HWPX</option>
+            <option value="docx">DOCX</option>
+            <option value="csv">CSV</option>
+            <option value="sqlite">SQLite DB</option>
+          </select>
+
+          <label class="dropzone" for="fileInput" id="dropzone">
+            <span>파일 선택 또는 드래그&amp;드롭</span>
+            <strong id="fileName">PDF, 이미지, HWP, HWPX, DOCX, CSV, DB</strong>
+          </label>
+          <input id="fileInput" type="file" multiple />
+
+          <div class="metadata-grid">
+            <input id="metaSubject" type="text" placeholder="과목" />
+            <input id="metaUnit" type="text" placeholder="단원" />
+            <input id="metaTags" type="text" placeholder="태그" />
+          </div>
+          <button id="importButton">가져오기</button>
+
+          <div class="divider"></div>
+
+          <div class="panel-title compact">
+            <h2>웹에서 수집</h2>
+          </div>
+          <input id="collectUrl" type="url" placeholder="https:// 자료 페이지 주소" />
+          <button id="collectButton">URL 수집</button>
+
+          <div class="divider"></div>
+
+          <div class="panel-title compact with-count">
+            <h2>내보내기 목록</h2>
+            <span id="basketBadge">0</span>
+          </div>
+          <p class="hint">문제 DB에서 체크하면 여기 쌓입니다. 끌어서 순서를 바꾸세요.</p>
+          <div id="basketList" class="basket-list"></div>
+
+          <div class="divider"></div>
+
+          <div class="panel-title compact">
+            <h2>직접 입력</h2>
+          </div>
+          <input id="manualTitle" type="text" placeholder="제목" />
+          <textarea id="manualStem" rows="5" placeholder="문제 본문"></textarea>
+          <button id="manualButton">문제 추가</button>
+        </aside>
+
+        <section class="list-panel tool-panel">
+          <div class="panel-title with-count">
+            <h2>문제 DB</h2>
+            <span id="countBadge">0</span>
+          </div>
+          <div class="filters">
+            <input id="searchInput" type="search" placeholder="검색" />
+            <select id="sourceFilter">
+              <option value="">전체</option>
+              <option value="manual">직접</option>
+              <option value="pdf">PDF</option>
+              <option value="image">이미지</option>
+              <option value="hwp">HWP</option>
+              <option value="hwpx">HWPX</option>
+              <option value="docx">DOCX</option>
+              <option value="web">웹</option>
+              <option value="csv">CSV</option>
+              <option value="sqlite">SQLite</option>
+            </select>
+          </div>
+          <div class="bulk-row">
+            <button id="selectAllButton">전체 선택</button>
+            <button id="clearSelectionButton">해제</button>
+            <span id="selectedText">0개 선택</span>
+          </div>
+          <div id="problemList" class="problem-list"></div>
+        </section>
+
+        <section class="editor-panel tool-panel">
+          <div class="panel-title">
+            <h2>편집</h2>
+            <button id="deleteButton" class="danger ghost">삭제</button>
+          </div>
+
+          <div id="emptyEditor" class="empty-editor">문제를 선택하세요.</div>
+
+          <form id="editorForm" class="editor-form hidden">
+            <div class="two-col">
+              <input id="editNumber" type="text" placeholder="번호" />
+              <input id="editTitle" type="text" placeholder="제목" />
+            </div>
+            <div class="two-col">
+              <input id="editSubject" type="text" placeholder="과목" />
+              <input id="editUnit" type="text" placeholder="단원" />
+            </div>
+            <input id="editTags" type="text" placeholder="태그" />
+            <textarea id="editStem" rows="9" placeholder="문제 본문"></textarea>
+            <textarea id="editChoices" rows="5" placeholder="선지: 한 줄에 하나씩"></textarea>
+            <div class="two-col">
+              <input id="editAnswer" type="text" placeholder="정답" />
+              <input id="editSource" type="text" placeholder="출처" />
+            </div>
+            <textarea id="editExplanation" rows="5" placeholder="해설"></textarea>
+            <div id="imagePreview" class="image-preview"></div>
+            <button class="primary" type="submit">저장</button>
+          </form>
+        </section>
+      </section>
+    </main>
+    <div id="toast" class="toast hidden"></div>
+    <script src="/static/app.js" type="module"></script>
+  </body>
+</html>
