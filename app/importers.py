@@ -29,6 +29,11 @@ except Exception:
     pytesseract = None
     HAS_OCR = False
 
+try:  # rhwp(러스트 HWP 엔진)는 선택 사항: 있으면 HWP 텍스트 추출에 우선 사용
+    import rhwp
+except Exception:
+    rhwp = None
+
 
 SAFE_NAME_RE = re.compile(r"[^0-9A-Za-z가-힣._ -]+")
 QUESTION_START_RE = re.compile(
@@ -585,26 +590,38 @@ def import_hwp(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[
         if flags & 0x2:
             return {"created": [], "notices": ["암호가 걸린 HWP는 가져올 수 없습니다."]}
 
-        # 본문 텍스트: BodyText/Section* 레코드 파싱
-        section_names = sorted(
-            (entry for entry in ole.listdir() if len(entry) == 2 and entry[0] == "BodyText"),
-            key=lambda entry: int(re.sub(r"\D", "", entry[1]) or 0),
-        )
+        # 본문 텍스트 1순위: rhwp 엔진 (설치된 경우)
         paragraphs: list[tuple[str, list[str]]] = []
-        for entry in section_names:
-            raw = ole.openstream(entry).read()
-            if compressed:
-                try:
-                    raw = zlib.decompress(raw, -15)
-                except Exception as exc:
-                    notices.append(f"{'/'.join(entry)} 압축 해제 실패: {exc}")
-                    continue
-            for tag, record in _hwp_iter_records(raw):
-                if tag != HWPTAG_PARA_TEXT:
-                    continue
-                text = _hwp_decode_text(record)
-                for line in text.split("\n"):
-                    paragraphs.append((line.strip(), []))
+        if rhwp is not None:
+            try:
+                doc = rhwp.Document.from_bytes(payload)
+                for para_text in doc.paragraphs():
+                    for line in para_text.splitlines() or [""]:
+                        paragraphs.append((line.strip(), []))
+            except Exception:
+                paragraphs = []
+
+        # 2순위: BodyText/Section* 레코드 직접 파싱
+        if not any(text for text, _ in paragraphs):
+            paragraphs = []
+            section_names = sorted(
+                (entry for entry in ole.listdir() if len(entry) == 2 and entry[0] == "BodyText"),
+                key=lambda entry: int(re.sub(r"\D", "", entry[1]) or 0),
+            )
+            for entry in section_names:
+                raw = ole.openstream(entry).read()
+                if compressed:
+                    try:
+                        raw = zlib.decompress(raw, -15)
+                    except Exception as exc:
+                        notices.append(f"{'/'.join(entry)} 압축 해제 실패: {exc}")
+                        continue
+                for tag, record in _hwp_iter_records(raw):
+                    if tag != HWPTAG_PARA_TEXT:
+                        continue
+                    text = _hwp_decode_text(record)
+                    for line in text.split("\n"):
+                        paragraphs.append((line.strip(), []))
 
         # PrvText 보조: 본문 파싱이 실패했을 때 미리보기 텍스트라도 사용
         if not any(text for text, _ in paragraphs) and ole.exists("PrvText"):

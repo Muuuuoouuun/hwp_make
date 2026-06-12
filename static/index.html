@@ -22,6 +22,7 @@
             <option value="hwpx">HWPX</option>
             <option value="docx">DOCX</option>
           </select>
+          <button id="previewButton">미리보기</button>
           <button id="exportButton" class="primary">내보내기</button>
         </div>
       </header>
@@ -146,6 +147,16 @@
         </section>
       </section>
     </main>
+    <div id="previewModal" class="preview-modal hidden">
+      <div class="preview-dialog">
+        <div class="preview-head">
+          <h2>내보내기 미리보기</h2>
+          <span id="previewNote" class="hint"></span>
+          <button id="previewClose" type="button">닫기</button>
+        </div>
+        <div id="previewPages" class="preview-pages"></div>
+      </div>
+    </div>
     <div id="toast" class="toast hidden"></div>
     <script src="/static/app.js" type="module"></script>
   </body>

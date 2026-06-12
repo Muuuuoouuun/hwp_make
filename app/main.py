@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import collector, docx_writer, exam_templates, hwpx_writer, importers, storage
+from . import collector, docx_writer, exam_templates, hwpx_writer, importers, preview, storage
 
 
 STATIC_DIR = storage.PROJECT_ROOT / "static"
@@ -75,7 +75,7 @@ def index() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    return {"ok": True, "data_dir": str(storage.DATA_DIR)}
+    return {"ok": True, "data_dir": str(storage.DATA_DIR), "preview_available": preview.available()}
 
 
 @app.get("/api/export-templates")
@@ -162,6 +162,24 @@ def collect(payload: CollectPayload) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"수집 실패: {exc}") from exc
     return {"ok": True, **result}
+
+
+@app.post("/api/preview")
+def preview_export(payload: ExportPayload) -> dict[str, Any]:
+    if not preview.available():
+        raise HTTPException(status_code=501, detail="미리보기 엔진(rhwp-python)이 설치되어 있지 않습니다.")
+    template = exam_templates.get_template(payload.template_key)
+    problems = storage.get_problems_by_ids(payload.ids)
+    if not problems:
+        raise HTTPException(status_code=400, detail="No problems selected")
+    title = exam_templates.resolve_export_title(payload.title, template)
+    try:
+        result = preview.render_preview(title, problems, template.key)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"미리보기 실패: {exc}") from exc
+    if template.columns > 1:
+        result["note"] = "미리보기 엔진이 다단 배치를 아직 1단으로 보여줍니다. 실제 한글에서는 설정된 단 수로 표시됩니다."
+    return result
 
 
 @app.post("/api/export")

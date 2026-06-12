@@ -30,6 +30,11 @@ const els = {
   clearSelectionButton: document.querySelector("#clearSelectionButton"),
   basketList: document.querySelector("#basketList"),
   basketBadge: document.querySelector("#basketBadge"),
+  previewButton: document.querySelector("#previewButton"),
+  previewModal: document.querySelector("#previewModal"),
+  previewPages: document.querySelector("#previewPages"),
+  previewNote: document.querySelector("#previewNote"),
+  previewClose: document.querySelector("#previewClose"),
   exportTitle: document.querySelector("#exportTitle"),
   exportTemplate: document.querySelector("#exportTemplate"),
   exportFormat: document.querySelector("#exportFormat"),
@@ -591,6 +596,45 @@ async function exportSelected() {
   }
 }
 
+async function previewExport() {
+  const ids = state.basket.map((entry) => entry.id);
+  if (!ids.length && state.activeId) ids.push(state.activeId);
+  if (!ids.length) {
+    toast("미리 볼 문제를 선택하세요.");
+    return;
+  }
+  els.previewButton.disabled = true;
+  els.previewButton.textContent = "렌더링...";
+  try {
+    const result = await api("/api/preview", {
+      method: "POST",
+      body: JSON.stringify({
+        ids,
+        title: els.exportTitle.value.trim() || "문항 모음",
+        format: "hwpx",
+        template_key: els.exportTemplate.value || "basic",
+      }),
+    });
+    els.previewPages.innerHTML = "";
+    for (const src of result.pages || []) {
+      const image = document.createElement("img");
+      image.src = src;
+      image.alt = "미리보기 페이지";
+      els.previewPages.append(image);
+    }
+    const notes = [];
+    if (result.truncated) notes.push(`전체 ${result.page_count}쪽 중 ${result.pages.length}쪽만 표시`);
+    if (result.note) notes.push(result.note);
+    els.previewNote.textContent = notes.join(" · ");
+    els.previewModal.classList.remove("hidden");
+  } catch (error) {
+    toast(`미리보기 실패: ${error.message}`);
+  } finally {
+    els.previewButton.disabled = false;
+    els.previewButton.textContent = "미리보기";
+  }
+}
+
 function debounce(fn, delay = 250) {
   let timer;
   return (...args) => {
@@ -631,6 +675,11 @@ els.attachInput.addEventListener("change", attachImages);
 els.editorForm.addEventListener("submit", saveActive);
 els.deleteButton.addEventListener("click", deleteActive);
 els.exportButton.addEventListener("click", exportSelected);
+els.previewButton.addEventListener("click", previewExport);
+els.previewClose.addEventListener("click", () => els.previewModal.classList.add("hidden"));
+els.previewModal.addEventListener("click", (event) => {
+  if (event.target === els.previewModal) els.previewModal.classList.add("hidden");
+});
 els.exportTemplate.addEventListener("change", syncExportTitleToTemplate);
 els.searchInput.addEventListener("input", debounce(loadProblems));
 els.sourceFilter.addEventListener("change", loadProblems);

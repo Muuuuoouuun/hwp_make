@@ -121,7 +121,7 @@ textarea:focus {
 
 .export-box {
   display: grid;
-  grid-template-columns: minmax(180px, 260px) minmax(150px, 210px) 100px 112px;
+  grid-template-columns: minmax(160px, 250px) minmax(140px, 200px) 92px 92px 112px;
   gap: 8px;
   align-items: center;
 }
@@ -475,6 +475,59 @@ textarea:focus {
 
 .image-actions button {
   font-size: 13px;
+}
+
+.preview-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: rgba(16, 28, 24, 0.55);
+  padding: 24px;
+}
+
+.preview-dialog {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  width: min(900px, 100%);
+  max-height: calc(100vh - 48px);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 16px;
+}
+
+.preview-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.preview-head h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.preview-head .hint {
+  flex: 1;
+  margin: 0;
+}
+
+.preview-pages {
+  display: grid;
+  gap: 14px;
+  overflow: auto;
+  background: #e8ebe8;
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.preview-pages img {
+  width: 100%;
+  background: #fff;
+  box-shadow: 0 4px 18px rgba(34, 44, 38, 0.18);
 }
 
 .toast {

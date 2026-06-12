@@ -23,13 +23,20 @@ def _esc(value: Any) -> str:
     return html.escape(str(value or ""), quote=True)
 
 
-def _paragraph(text: str, pid: int, char_pr: int = 0, para_pr: int = 0) -> str:
+# header.xml의 charPr id별 글자 크기 (lineseg 계산용)
+CHAR_HEIGHTS = {0: 1000, 1: 1600, 2: 1150, 3: 1250, 4: 900}
+
+
+def _paragraph(text: str, pid: int, char_pr: int = 0, para_pr: int = 0, extra_run: str = "") -> str:
     text = _esc(text)
     if not text:
         text = " "
-    return f"""  <hp:p id="{pid}" paraPrIDRef="{para_pr}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">
+    height = CHAR_HEIGHTS.get(char_pr, 1000)
+    # extra_run: 첫 문단 run에 들어가는 secPr/colPr 컨트롤 (OWPML 표준 위치)
+    prefix = f"\n    <hp:run charPrIDRef=\"{char_pr}\">{extra_run}</hp:run>" if extra_run else ""
+    return f"""  <hp:p id="{pid}" paraPrIDRef="{para_pr}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">{prefix}
     <hp:run charPrIDRef="{char_pr}"><hp:t xml:space="preserve">{text}</hp:t></hp:run>
-    <hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000" baseline="850" spacing="600" horzpos="0" horzsize="42520" flags="393216"/></hp:linesegarray>
+    <hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="{height}" textheight="{height}" baseline="{int(height * 0.85)}" spacing="{int(height * 0.6)}" horzpos="0" horzsize="42520" flags="393216"/></hp:linesegarray>
   </hp:p>"""
 
 
@@ -124,6 +131,7 @@ def _build_body(
     problems: list[dict[str, Any]],
     image_items: dict[str, dict[str, Any]],
     template: ExamTemplate,
+    section_controls: str = "",
 ) -> str:
     paragraphs: list[str] = []
     pid = 0
@@ -132,7 +140,9 @@ def _build_body(
     def add_text(text: str, char_pr: int = 0, para_pr: int = 0) -> None:
         nonlocal pid
         pid += 1
-        paragraphs.append(_paragraph(text, pid, char_pr, para_pr))
+        # 섹션 설정(secPr/colPr)은 문서 첫 문단의 run에 한 번만 싣는다.
+        extra = section_controls if pid == 1 else ""
+        paragraphs.append(_paragraph(text, pid, char_pr, para_pr, extra_run=extra))
 
     def add_image(image_path: str) -> None:
         nonlocal pid, instance
@@ -306,19 +316,19 @@ def _section_xml(
     image_items: dict[str, dict[str, Any]],
     template: ExamTemplate,
 ) -> str:
-    body = _build_body(title, problems, image_items, template)
     columns = max(1, min(template.columns, 2))
+    # OWPML 표준: secPr와 단 설정(ctrl/colPr)은 첫 문단의 run 안에 들어간다.
+    section_controls = f"""<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="1" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">
+        <hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0" strtnum="0"/>
+        <hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/>
+        <hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>
+        <hp:pagePr landscape="WIDELY" width="59528" height="84188" gutterType="LEFT_ONLY">
+          <hp:margin header="4252" footer="4252" gutter="0" left="8504" right="8504" top="5668" bottom="4252"/>
+        </hp:pagePr>
+      </hp:secPr><hp:ctrl><hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="{columns}" sameSz="1" sameGap="{COLUMN_GAP}"/></hp:ctrl>"""
+    body = _build_body(title, problems, image_items, template, section_controls=section_controls)
     return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <hs:sec xmlns:hs="{SECTION_NS}" xmlns:hp="{PARA_NS}" xmlns:hc="{CORE_NS}" xmlns:hh="{HEAD_NS}">
-  <hp:secPr id="0" textDirection="HORIZONTAL" spaceColumns="{columns - 1}" tabStop="8000" tabStopVal="80">
-    <hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/>
-    <hp:startNum pageStartsOn="BOTH" page="1" pic="1" tbl="1" equation="1"/>
-    <hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>
-    <hp:pagePr landscape="0" width="59528" height="84188" gutterType="LEFT_ONLY">
-      <hp:margin header="4252" footer="4252" gutter="0" left="8504" right="8504" top="5668" bottom="4252"/>
-    </hp:pagePr>
-    <hp:colPr type="NEWSPAPER" layout="LEFT" colCount="{columns}" sameSz="1" sameGap="1200"/>
-  </hp:secPr>
 {body}
 </hs:sec>"""
 

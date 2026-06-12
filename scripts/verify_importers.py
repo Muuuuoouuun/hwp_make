@@ -94,6 +94,22 @@ texts = "\n".join(p["stem"] for p in result["created"])
 if "광합성" not in texts or "세포 호흡" not in texts:
     failures.append("HWPX roundtrip: text lost")
 
+# 3b) rhwp 엔진으로 생성 HWPX 구조 검증 + 렌더링 (설치된 경우)
+try:
+    import rhwp
+except Exception:
+    rhwp = None
+if rhwp is not None:
+    doc = rhwp.parse(str(export_path))
+    rendered = bytes(doc.render_png(0))
+    print(f"rhwp validation: pages={doc.page_count}, render={len(rendered)} bytes")
+    if doc.page_count < 1 or not rendered:
+        failures.append("rhwp: generated HWPX failed to parse/render")
+    if "광합성" not in doc.extract_text():
+        failures.append("rhwp: text not extractable from generated HWPX")
+else:
+    print("rhwp not installed; skipping render validation")
+
 # 4) CSV import still fine
 csv_data = "번호,문제,정답\n1,사과는 영어로?,apple\n2,바다는 영어로?,sea\n".encode("utf-8-sig")
 result = importers.import_csv("words.csv", csv_data, {})
