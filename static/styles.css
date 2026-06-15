@@ -153,6 +153,17 @@ button.ghost:hover {
   border-color: var(--line);
 }
 
+button:disabled {
+  opacity: 0.5;
+  cursor: progress;
+  pointer-events: none;
+}
+
+button:disabled:hover {
+  transform: none;
+  border-color: var(--line-strong);
+}
+
 /* ---------- Inputs ---------- */
 input,
 select,
@@ -731,6 +742,15 @@ textarea:focus {
   overflow-y: auto;
   align-content: start;
   padding-right: var(--s1);
+}
+
+/* Keep the save action reachable while a long form scrolls */
+.editor-form button[type="submit"] {
+  position: sticky;
+  bottom: 0;
+  margin-top: var(--s1);
+  /* panel-colored band masks content scrolling through the gap above */
+  box-shadow: 0 -10px 0 8px var(--panel);
 }
 
 .hidden {
