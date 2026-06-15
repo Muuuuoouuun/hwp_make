@@ -14,10 +14,23 @@ from . import collector, docx_writer, exam_templates, hwpx_writer, importers, pr
 
 STATIC_DIR = storage.PROJECT_ROOT / "static"
 
+
+class NoCacheStaticFiles(StaticFiles):
+    """정적 UI 파일은 항상 다시 확인하게 한다(앱 업데이트 후 stale JS/CSS 방지)."""
+
+    def is_not_modified(self, response_headers, request_headers) -> bool:
+        return False
+
+    async def get_response(self, path: str, scope: Any) -> Any:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return response
+
+
 app = FastAPI(title="HWP Make", version="0.1.0")
 storage.init_db()
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/files", StaticFiles(directory=storage.DATA_DIR), name="files")
 
 
@@ -82,6 +95,18 @@ def health() -> dict[str, Any]:
 @app.get("/api/export-templates")
 def export_templates() -> dict[str, Any]:
     return {"items": [template.export_option() for template in exam_templates.TEMPLATES]}
+
+
+@app.get("/api/exports")
+def list_exports() -> dict[str, Any]:
+    return {"items": storage.list_exports()}
+
+
+@app.delete("/api/exports/{name}")
+def delete_export(name: str) -> dict[str, Any]:
+    if not storage.delete_export(name):
+        raise HTTPException(status_code=404, detail="Export not found")
+    return {"ok": True}
 
 
 @app.get("/api/problems")

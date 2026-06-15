@@ -3,6 +3,7 @@ const state = {
   basket: [], // 내보내기 순서를 유지하는 [{id, label}] 목록
   activeId: null,
   templates: [],
+  exports: [], // 내보내기 기록 [{name, size, modified, format, url}]
   lastDefaultTitle: "문항 모음",
 };
 
@@ -30,6 +31,8 @@ const els = {
   clearSelectionButton: document.querySelector("#clearSelectionButton"),
   basketList: document.querySelector("#basketList"),
   basketBadge: document.querySelector("#basketBadge"),
+  historyList: document.querySelector("#historyList"),
+  historyBadge: document.querySelector("#historyBadge"),
   previewButton: document.querySelector("#previewButton"),
   previewModal: document.querySelector("#previewModal"),
   previewPages: document.querySelector("#previewPages"),
@@ -244,6 +247,86 @@ function renderBasket() {
     row.append(handle, label, up, down, remove);
     els.basketList.append(row);
   });
+}
+
+// --- 내보내기 기록 -----------------------------------------------------------
+
+function humanSize(bytes) {
+  if (!bytes) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / 1024 ** index;
+  return `${value >= 10 || index === 0 ? Math.round(value) : value.toFixed(1)} ${units[index]}`;
+}
+
+function formatExportTime(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+async function loadExportHistory() {
+  try {
+    const data = await api("/api/exports");
+    state.exports = data.items || [];
+  } catch {
+    state.exports = [];
+  }
+  renderHistory();
+}
+
+function renderHistory() {
+  const items = state.exports || [];
+  els.historyBadge.textContent = String(items.length);
+  els.historyList.innerHTML = "";
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "basket-empty";
+    empty.textContent = "아직 없음";
+    els.historyList.append(empty);
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "history-row";
+
+    const link = document.createElement("a");
+    link.className = "history-link";
+    link.href = item.url;
+    link.download = item.name;
+    link.title = item.name;
+
+    const name = document.createElement("span");
+    name.className = "history-name";
+    name.textContent = item.name;
+
+    const meta = document.createElement("span");
+    meta.className = "history-meta";
+    meta.innerHTML = `<b class="source-pill">${(item.format || "").toUpperCase()}</b> ${humanSize(item.size)} · ${formatExportTime(item.modified)}`;
+
+    link.append(name, meta);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "basket-btn danger";
+    remove.textContent = "✕";
+    remove.title = "기록 삭제";
+    remove.addEventListener("click", () => deleteExport(item.name));
+
+    row.append(link, remove);
+    els.historyList.append(row);
+  }
+}
+
+async function deleteExport(name) {
+  try {
+    await api(`/api/exports/${encodeURIComponent(name)}`, { method: "DELETE" });
+    await loadExportHistory();
+    toast("기록을 삭제했습니다.");
+  } catch (error) {
+    toast(`삭제 실패: ${error.message}`);
+  }
 }
 
 // --- 문제 목록 ---------------------------------------------------------------
@@ -590,6 +673,7 @@ async function exportSelected() {
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
+    await loadExportHistory();
     toast(`${ids.length}개 문항을 내보냈습니다.`);
   } catch (error) {
     toast(`내보내기 실패: ${error.message}`);
@@ -701,6 +785,7 @@ els.clearSelectionButton.addEventListener("click", () => {
   await loadExportTemplates();
   syncExportTitleToTemplate();
   await loadProblems();
+  await loadExportHistory();
 })().catch((error) => {
   els.statusText.textContent = "서버 연결 실패";
   toast(error.message);

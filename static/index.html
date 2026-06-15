@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>HWP Make</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=2" />
   </head>
   <body>
     <main class="app-shell">
@@ -33,59 +33,70 @@
 
       <section class="workspace">
         <aside class="sidebar tool-panel">
-          <div class="panel-title">
-            <h2>가져오기</h2>
+          <div class="sb-block">
+            <div class="panel-title compact">
+              <h2>가져오기</h2>
+            </div>
+            <label class="field-label" for="importKind">소스</label>
+            <select id="importKind">
+              <option value="auto">자동 감지</option>
+              <option value="pdf">PDF</option>
+              <option value="image">이미지</option>
+              <option value="hwp">HWP</option>
+              <option value="hwpx">HWPX</option>
+              <option value="docx">DOCX</option>
+              <option value="csv">CSV</option>
+              <option value="sqlite">SQLite DB</option>
+            </select>
+
+            <label class="dropzone" for="fileInput" id="dropzone">
+              <span>파일 선택 또는 드래그&amp;드롭</span>
+              <strong id="fileName">PDF, 이미지, HWP, HWPX, DOCX, CSV, DB</strong>
+            </label>
+            <input id="fileInput" type="file" multiple />
+
+            <div class="metadata-grid">
+              <input id="metaSubject" type="text" placeholder="과목" />
+              <input id="metaUnit" type="text" placeholder="단원" />
+              <input id="metaTags" type="text" placeholder="태그" />
+            </div>
+            <button id="importButton" class="primary">가져오기</button>
           </div>
-          <label class="field-label" for="importKind">소스</label>
-          <select id="importKind">
-            <option value="auto">자동 감지</option>
-            <option value="pdf">PDF</option>
-            <option value="image">이미지</option>
-            <option value="hwp">HWP</option>
-            <option value="hwpx">HWPX</option>
-            <option value="docx">DOCX</option>
-            <option value="csv">CSV</option>
-            <option value="sqlite">SQLite DB</option>
-          </select>
 
-          <label class="dropzone" for="fileInput" id="dropzone">
-            <span>파일 선택 또는 드래그&amp;드롭</span>
-            <strong id="fileName">PDF, 이미지, HWP, HWPX, DOCX, CSV, DB</strong>
-          </label>
-          <input id="fileInput" type="file" multiple />
-
-          <div class="metadata-grid">
-            <input id="metaSubject" type="text" placeholder="과목" />
-            <input id="metaUnit" type="text" placeholder="단원" />
-            <input id="metaTags" type="text" placeholder="태그" />
+          <div class="sb-block">
+            <div class="panel-title compact">
+              <h2>웹에서 수집</h2>
+            </div>
+            <input id="collectUrl" type="url" placeholder="https:// 자료 페이지 주소" />
+            <button id="collectButton">URL 수집</button>
           </div>
-          <button id="importButton">가져오기</button>
 
-          <div class="divider"></div>
-
-          <div class="panel-title compact">
-            <h2>웹에서 수집</h2>
+          <div class="sb-block">
+            <div class="panel-title compact with-count">
+              <h2>내보내기 목록</h2>
+              <span id="basketBadge">0</span>
+            </div>
+            <p class="hint">문제 DB에서 체크하면 여기 쌓입니다. 끌어서 순서를 바꾸세요.</p>
+            <div id="basketList" class="basket-list"></div>
           </div>
-          <input id="collectUrl" type="url" placeholder="https:// 자료 페이지 주소" />
-          <button id="collectButton">URL 수집</button>
 
-          <div class="divider"></div>
-
-          <div class="panel-title compact with-count">
-            <h2>내보내기 목록</h2>
-            <span id="basketBadge">0</span>
+          <div class="sb-block">
+            <div class="panel-title compact with-count">
+              <h2>내보내기 기록</h2>
+              <span id="historyBadge">0</span>
+            </div>
+            <p class="hint">최근 만든 문서입니다. 눌러서 다시 받거나 ✕로 지웁니다.</p>
+            <div id="historyList" class="history-list"></div>
           </div>
-          <p class="hint">문제 DB에서 체크하면 여기 쌓입니다. 끌어서 순서를 바꾸세요.</p>
-          <div id="basketList" class="basket-list"></div>
 
-          <div class="divider"></div>
-
-          <div class="panel-title compact">
-            <h2>직접 입력</h2>
+          <div class="sb-block">
+            <div class="panel-title compact">
+              <h2>직접 입력</h2>
+            </div>
+            <input id="manualTitle" type="text" placeholder="제목" />
+            <textarea id="manualStem" rows="5" placeholder="문제 본문"></textarea>
+            <button id="manualButton">문제 추가</button>
           </div>
-          <input id="manualTitle" type="text" placeholder="제목" />
-          <textarea id="manualStem" rows="5" placeholder="문제 본문"></textarea>
-          <button id="manualButton">문제 추가</button>
         </aside>
 
         <section class="list-panel tool-panel">
@@ -162,6 +173,6 @@
       </div>
     </div>
     <div id="toast" class="toast hidden"></div>
-    <script src="/static/app.js" type="module"></script>
+    <script src="/static/app.js?v=2" type="module"></script>
   </body>
 </html>

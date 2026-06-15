@@ -302,3 +302,43 @@ def get_problems_by_ids(ids: list[int]) -> list[dict[str, Any]]:
     problems.sort(key=lambda item: order.get(item["id"], 0))
     return problems
 
+
+# --- 내보내기 기록 -----------------------------------------------------------
+
+
+def list_exports() -> list[dict[str, Any]]:
+    """data/exports/에 저장된 내보내기 결과를 최신순으로 나열한다."""
+    ensure_dirs()
+    items: list[dict[str, Any]] = []
+    for path in EXPORT_DIR.iterdir():
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        items.append(
+            {
+                "name": path.name,
+                "size": stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+                "modified_ts": stat.st_mtime,
+                "format": path.suffix.lstrip(".").lower(),
+                "url": f"/files/exports/{path.name}",
+            }
+        )
+    items.sort(key=lambda item: item["modified_ts"], reverse=True)
+    for item in items:
+        item.pop("modified_ts")
+    return items
+
+
+def delete_export(name: str) -> bool:
+    """내보내기 파일을 삭제한다. 경로 탈출을 막고 EXPORT_DIR 직속 파일만 허용한다."""
+    if not name or "/" in name or "\\" in name:
+        return False
+    target = (EXPORT_DIR / name).resolve()
+    if target.parent != EXPORT_DIR.resolve() or not target.is_file():
+        return False
+    target.unlink()
+    return True
+
