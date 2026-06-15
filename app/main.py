@@ -48,6 +48,7 @@ class ProblemPayload(BaseModel):
     answer: str = ""
     explanation: str = ""
     image_paths: list[str] = Field(default_factory=list)
+    tables: list[list[list[str]]] = Field(default_factory=list)
 
 
 class ImportPayload(BaseModel):

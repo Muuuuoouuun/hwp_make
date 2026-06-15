@@ -39,6 +39,11 @@ def hwpx_text(path: Path) -> str:
     return html.unescape("".join(re.findall(r"<hp:t[^>]*>(.*?)</hp:t>", xml, re.S)))
 
 
+def hwpx_section_xml(path: Path) -> str:
+    with zipfile.ZipFile(path) as archive:
+        return archive.read("Contents/section0.xml").decode("utf-8")
+
+
 def docx_text(path: Path) -> str:
     from docx import Document as DocxDocument
 
@@ -64,6 +69,11 @@ def make_docx() -> bytes:
     doc = Document()
     doc.add_paragraph("1. 다음 중 광합성이 일어나는 장소는?")
     doc.add_paragraph("① 미토콘드리아  ② 엽록체  ③ 리보솜")
+    table = doc.add_table(rows=2, cols=2)
+    table.rows[0].cells[0].text = "세포소기관"
+    table.rows[0].cells[1].text = "기능"
+    table.rows[1].cells[0].text = "엽록체"
+    table.rows[1].cells[1].text = "광합성"
     image_path = Path(tempfile.mkdtemp()) / "t.png"
     image_path.write_bytes(make_png())
     doc.add_picture(str(image_path))
@@ -86,6 +96,10 @@ if not created[0]["image_paths"]:
     failures.append("DOCX: first problem missing image")
 if "광합성" not in created[0]["stem"]:
     failures.append("DOCX: stem text wrong")
+if not created[0].get("tables"):
+    failures.append("DOCX: table not captured into tables model")
+elif "세포소기관" not in str(created[0]["tables"]):
+    failures.append("DOCX: table content wrong")
 
 # 2) image import
 result = importers.import_image("pic.png", make_png(), {})
@@ -109,7 +123,13 @@ for problem_id in ids:
             "choices": ["미토콘드리아", "엽록체", "리보솜"],
         },
     )
+# 표 출력 검증용: 첫 문항에 자료 표를 붙인다.
+storage.update_problem(
+    ids[0], {"tables": [[["구분", "결과물"], ["광합성", "포도당"], ["호흡", "에너지"]]]}
+)
 problems = storage.get_problems_by_ids(ids)
+if not problems[0].get("tables"):
+    failures.append("Tables: not persisted/round-tripped through storage")
 storage.ensure_dirs()
 
 # 3a) 기본 HWPX 내보내기 → 출력 파일을 직접 검사(임포터/중복검사와 분리해 출력 충실도 검증)
@@ -119,6 +139,13 @@ body_text = hwpx_text(export_path)
 print(f"HWPX export ({ROUNDTRIP_TEMPLATE_KEY} template): {len(body_text)} chars in body")
 if "광합성" not in body_text or "세포 호흡" not in body_text:
     failures.append("HWPX export: stem text missing from section XML")
+
+# 3a-2) 표(hp:tbl) 출력 검증: 구조 태그 + 셀 텍스트가 본문에 살아있는지
+section_xml = hwpx_section_xml(export_path)
+if "<hp:tbl" not in section_xml or "<hp:tc" not in section_xml:
+    failures.append("HWPX export: hp:tbl/hp:tc structure missing")
+if "구분" not in body_text or "포도당" not in body_text:
+    failures.append("HWPX export: table cell text missing from section XML")
 
 # 3b) rhwp 엔진으로 생성 HWPX 구조 검증 + 렌더링 (설치된 경우)
 try:
@@ -169,6 +196,11 @@ roundtrip_text = "\n".join(p["stem"] for p in result["created"])
 print("HWPX importer roundtrip:", len(result["created"]), "problems")
 if "광합성" not in roundtrip_text or "세포 호흡" not in roundtrip_text:
     failures.append("HWPX roundtrip: text lost on re-import")
+roundtrip_tables = [p.get("tables") for p in result["created"] if p.get("tables")]
+if not roundtrip_tables:
+    failures.append("HWPX roundtrip: table lost on re-import")
+elif "포도당" not in str(roundtrip_tables):
+    failures.append("HWPX roundtrip: table cell text lost on re-import")
 
 # 4) CSV import still fine
 csv_data = "번호,문제,정답\n1,사과는 영어로?,apple\n2,바다는 영어로?,sea\n".encode("utf-8-sig")

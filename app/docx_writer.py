@@ -47,6 +47,17 @@ def _format_choice(index: int, choice: str, template: ExamTemplate) -> str:
     return f"{_choice_label(index, template)} {clean}".rstrip()
 
 
+def _add_table(document: Document, rows: list[list[str]]) -> None:
+    if not rows or not any(rows):
+        return
+    col_cnt = max(len(row) for row in rows)
+    table = document.add_table(rows=len(rows), cols=col_cnt)
+    table.style = "Table Grid"
+    for r, row in enumerate(rows):
+        for c in range(col_cnt):
+            table.rows[r].cells[c].text = str(row[c]) if c < len(row) else ""
+
+
 def _add_masthead(document: Document, title: str, template: ExamTemplate) -> None:
     heading = document.add_heading(template.masthead_title or title, level=1)
     _set_font(heading, 16, True)
@@ -142,6 +153,9 @@ def write_docx(
             if stem:
                 for line in stem_lines:
                     document.add_paragraph(line)
+
+        for table_rows in problem.get("tables") or []:
+            _add_table(document, table_rows)
 
         for image_path in problem.get("image_paths") or []:
             full_path = storage.DATA_DIR / image_path

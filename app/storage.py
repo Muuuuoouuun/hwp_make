@@ -49,6 +49,7 @@ def init_db() -> None:
                 answer TEXT NOT NULL DEFAULT '',
                 explanation TEXT NOT NULL DEFAULT '',
                 image_paths_json TEXT NOT NULL DEFAULT '[]',
+                tables_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -56,6 +57,8 @@ def init_db() -> None:
         )
         # 중복 감지용 콘텐츠 해시 (기존 DB에는 없을 수 있어 마이그레이션한다).
         columns = {row[1] for row in conn.execute("PRAGMA table_info(problems)")}
+        if "tables_json" not in columns:
+            conn.execute("ALTER TABLE problems ADD COLUMN tables_json TEXT NOT NULL DEFAULT '[]'")
         if "content_hash" not in columns:
             conn.execute("ALTER TABLE problems ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''")
             for row in conn.execute("SELECT id, stem, choices_json, answer FROM problems").fetchall():
@@ -134,6 +137,7 @@ def row_to_problem(row: sqlite3.Row) -> dict[str, Any]:
     item.pop("content_hash", None)
     item["choices"] = json.loads(item.pop("choices_json") or "[]")
     item["image_paths"] = json.loads(item.pop("image_paths_json") or "[]")
+    item["tables"] = json.loads(item.pop("tables_json") or "[]")
     item["image_urls"] = [f"/files/{path}" for path in item["image_paths"]]
     return item
 
@@ -154,6 +158,7 @@ def create_problem(data: dict[str, Any]) -> dict[str, Any]:
         "answer": data.get("answer") or "",
         "explanation": data.get("explanation") or "",
         "image_paths_json": _json_list(data.get("image_paths")),
+        "tables_json": _json_list(data.get("tables")),
         "content_hash": _content_hash(data),
         "created_at": stamp,
         "updated_at": stamp,
@@ -164,12 +169,12 @@ def create_problem(data: dict[str, Any]) -> dict[str, Any]:
             INSERT INTO problems (
                 source_type, source_name, source_page, number, subject, unit, tags,
                 title, stem, choices_json, answer, explanation, image_paths_json,
-                content_hash, created_at, updated_at
+                tables_json, content_hash, created_at, updated_at
             )
             VALUES (
                 :source_type, :source_name, :source_page, :number, :subject, :unit, :tags,
                 :title, :stem, :choices_json, :answer, :explanation, :image_paths_json,
-                :content_hash, :created_at, :updated_at
+                :tables_json, :content_hash, :created_at, :updated_at
             )
             """,
             values,
@@ -230,6 +235,9 @@ def update_problem(problem_id: int, data: dict[str, Any]) -> dict[str, Any]:
     if "image_paths" in data:
         assignments.append("image_paths_json = :image_paths_json")
         values["image_paths_json"] = _json_list(data.get("image_paths"))
+    if "tables" in data:
+        assignments.append("tables_json = :tables_json")
+        values["tables_json"] = _json_list(data.get("tables"))
     if any(key in data for key in ("stem", "choices", "answer")):
         current = get_problem(problem_id)
         assignments.append("content_hash = :content_hash")

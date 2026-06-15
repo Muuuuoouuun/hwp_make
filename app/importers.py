@@ -368,27 +368,36 @@ def _save_image_bytes(name: str, payload: bytes) -> str | None:
     return save_upload(name, payload)
 
 
-def _paragraphs_to_chunks(paragraphs: list[tuple[str, list[str]]]) -> list[dict[str, Any]]:
-    """(문단 텍스트, 이미지 경로들) 목록을 문항 번호 기준으로 묶는다."""
+def _paragraphs_to_chunks(
+    blocks: list[tuple[str, list[str], list[list[list[str]]]]],
+) -> list[dict[str, Any]]:
+    """(문단 텍스트, 이미지 경로들, 표들) 목록을 문항 번호 기준으로 묶는다."""
     chunks: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
-    for text, images in paragraphs:
+    for text, images, tables in blocks:
         if QUESTION_LINE_RE.match(text):
-            current = {"text": [text], "images": list(images)}
+            current = {"text": [text], "images": list(images), "tables": list(tables)}
             chunks.append(current)
             continue
         if current is None:
-            current = {"text": [text] if text else [], "images": list(images)}
+            current = {
+                "text": [text] if text else [],
+                "images": list(images),
+                "tables": list(tables),
+            }
             chunks.append(current)
             continue
         if text:
             current["text"].append(text)
         current["images"].extend(images)
+        current["tables"].extend(tables)
     result = []
     for chunk in chunks:
         body = _clean_text("\n".join(chunk["text"]))
-        if body or chunk["images"]:
-            result.append({"text": body, "images": chunk["images"]})
+        if body or chunk["images"] or chunk["tables"]:
+            result.append(
+                {"text": body, "images": chunk["images"], "tables": chunk["tables"]}
+            )
     return result
 
 
@@ -413,6 +422,7 @@ def _create_from_chunks(
                 "title": title,
                 "stem": text,
                 "image_paths": chunk["images"],
+                "tables": chunk.get("tables") or [],
             }
         )
     return sink
@@ -428,34 +438,43 @@ def import_docx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
     except Exception as exc:
         return {"created": [], "notices": [f"DOCX를 열 수 없습니다: {exc}"]}
 
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
     blip_ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
     embed_attr = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
-    paragraphs: list[tuple[str, list[str]]] = []
+    blocks: list[tuple[str, list[str], list[list[list[str]]]]] = []
     image_count = 0
-    for para in document.paragraphs:
-        images: list[str] = []
-        for blip in para._p.iter(blip_ns):
-            rel_id = blip.get(embed_attr)
-            try:
-                part = document.part.rels[rel_id].target_part if rel_id in document.part.rels else None
-                if part is None:
+    # 문단과 표를 문서 순서대로 훑어 표를 해당 문항에 정확히 붙인다.
+    for child in document.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            para = Paragraph(child, document)
+            images: list[str] = []
+            for blip in para._p.iter(blip_ns):
+                rel_id = blip.get(embed_attr)
+                try:
+                    part = (
+                        document.part.rels[rel_id].target_part
+                        if rel_id in document.part.rels
+                        else None
+                    )
+                    if part is None:
+                        continue
+                    rel_path = _save_image_bytes(Path(part.partname).name, part.blob)
+                except Exception:
                     continue
-                rel_path = _save_image_bytes(Path(part.partname).name, part.blob)
-            except Exception:
-                continue
-            if rel_path:
-                images.append(rel_path)
-                image_count += 1
-        paragraphs.append((para.text.strip(), images))
-    # 표 안의 텍스트도 본문 뒤에 덧붙인다.
-    for table in document.tables:
-        for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells]
-            line = " | ".join(part for part in cells if part)
-            if line:
-                paragraphs.append((line, []))
+                if rel_path:
+                    images.append(rel_path)
+                    image_count += 1
+            blocks.append((para.text.strip(), images, []))
+        elif child.tag == qn("w:tbl"):
+            table = Table(child, document)
+            rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+            if any(any(cell for cell in row) for row in rows):
+                blocks.append(("", [], [rows]))
 
-    chunks = _paragraphs_to_chunks(paragraphs)
+    chunks = _paragraphs_to_chunks(blocks)
     if not chunks:
         return {"created": [], "notices": ["DOCX에서 내용을 찾지 못했습니다."]}
     sink = _create_from_chunks(chunks, "docx", filename, metadata)
@@ -468,6 +487,23 @@ def import_docx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
 def _local_name(element: Any) -> str:
     tag = element.tag
     return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _hwpx_table_rows(tbl: Any) -> list[list[str]]:
+    """hp:tbl 엘리먼트에서 행×열 셀 텍스트를 뽑아 2차원 배열로 돌려준다."""
+    rows: list[list[str]] = []
+    for tr in tbl:
+        if _local_name(tr) != "tr":
+            continue
+        cells: list[str] = []
+        for tc in tr:
+            if _local_name(tc) != "tc":
+                continue
+            texts = [node.text for node in tc.iter() if _local_name(node) == "t" and node.text]
+            cells.append("".join(texts).strip())
+        if cells:
+            rows.append(cells)
+    return rows
 
 
 def _hwpx_manifest_map(archive: zipfile.ZipFile) -> dict[str, str]:
@@ -507,7 +543,7 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
             return {"created": [], "notices": ["HWPX 안에서 section XML을 찾지 못했습니다."]}
         bin_map = _hwpx_manifest_map(archive)
         saved_bins: dict[str, str | None] = {}
-        paragraphs: list[tuple[str, list[str]]] = []
+        paragraphs: list[tuple[str, list[str], list[list[list[str]]]]] = []
         image_count = 0
         for section_name in sections:
             try:
@@ -515,8 +551,17 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
             except Exception as exc:
                 notices.append(f"{section_name} 분석 실패: {exc}")
                 continue
-            for para in root.iter():
+            # 본문 문단(hp:p)만 직접 순회한다(셀 안의 중첩 문단은 표로 따로 처리).
+            for para in root:
                 if _local_name(para) != "p":
+                    continue
+                tables = [
+                    _hwpx_table_rows(node) for node in para.iter() if _local_name(node) == "tbl"
+                ]
+                tables = [rows for rows in tables if rows]
+                if tables:
+                    # 표가 든 문단은 셀 텍스트를 본문에 중복으로 넣지 않는다.
+                    paragraphs.append(("", [], tables))
                     continue
                 texts: list[str] = []
                 images: list[str] = []
@@ -538,7 +583,7 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
                         if saved_bins[ref]:
                             images.append(saved_bins[ref])
                             image_count += 1
-                paragraphs.append((" ".join(texts).strip(), images))
+                paragraphs.append((" ".join(texts).strip(), images, []))
 
     chunks = _paragraphs_to_chunks(paragraphs)
     if not chunks:
@@ -618,18 +663,18 @@ def import_hwp(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[
             return {"created": [], "notices": ["암호가 걸린 HWP는 가져올 수 없습니다."]}
 
         # 본문 텍스트 1순위: rhwp 엔진 (설치된 경우)
-        paragraphs: list[tuple[str, list[str]]] = []
+        paragraphs: list[tuple[str, list[str], list[list[list[str]]]]] = []
         if rhwp is not None:
             try:
                 doc = rhwp.Document.from_bytes(payload)
                 for para_text in doc.paragraphs():
                     for line in para_text.splitlines() or [""]:
-                        paragraphs.append((line.strip(), []))
+                        paragraphs.append((line.strip(), [], []))
             except Exception:
                 paragraphs = []
 
         # 2순위: BodyText/Section* 레코드 직접 파싱
-        if not any(text for text, _ in paragraphs):
+        if not any(text for text, _, _ in paragraphs):
             paragraphs = []
             section_names = sorted(
                 (entry for entry in ole.listdir() if len(entry) == 2 and entry[0] == "BodyText"),
@@ -648,12 +693,12 @@ def import_hwp(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[
                         continue
                     text = _hwp_decode_text(record)
                     for line in text.split("\n"):
-                        paragraphs.append((line.strip(), []))
+                        paragraphs.append((line.strip(), [], []))
 
         # PrvText 보조: 본문 파싱이 실패했을 때 미리보기 텍스트라도 사용
-        if not any(text for text, _ in paragraphs) and ole.exists("PrvText"):
+        if not any(text for text, _, _ in paragraphs) and ole.exists("PrvText"):
             preview = ole.openstream("PrvText").read().decode("utf-16-le", errors="ignore")
-            paragraphs = [(line.strip(), []) for line in preview.splitlines()]
+            paragraphs = [(line.strip(), [], []) for line in preview.splitlines()]
             notices.append("본문 레코드 대신 미리보기 텍스트를 사용했습니다.")
 
         # 첨부 이미지: BinData 스토리지 전체 추출

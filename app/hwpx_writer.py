@@ -101,6 +101,67 @@ def _pic_paragraph(pid: int, item: dict[str, Any], instance: int) -> str:
   </hp:p>"""
 
 
+# 표(hp:tbl) 설정. 셀 테두리는 header.xml의 borderFill id=1(SOLID) 사용.
+TABLE_BORDER_FILL = 1
+TABLE_ROW_HEIGHT = 2400  # 셀 기본 높이(HWPUNIT)
+CELL_MARGIN = (510, 510, 141, 141)  # left, right, top, bottom
+
+
+def _cell_paragraph(text: str, cell_id: int, text_width: int) -> str:
+    """표 셀(hp:subList) 안에 들어가는 문단."""
+    text = _esc(text)
+    if not text:
+        text = " "
+    return f"""<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">
+          <hp:p id="{cell_id}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">
+            <hp:run charPrIDRef="0"><hp:t xml:space="preserve">{text}</hp:t></hp:run>
+            <hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000" baseline="850" spacing="600" horzpos="0" horzsize="{max(text_width, 1000)}" flags="393216"/></hp:linesegarray>
+          </hp:p>
+        </hp:subList>"""
+
+
+def _table_paragraph(pid: int, instance: int, rows: list[list[str]], total_width: int) -> str:
+    """2차원 문자열 배열을 실제 한컴 호환 hp:tbl 인라인 표로 직렬화한다."""
+    row_cnt = len(rows)
+    col_cnt = max(len(row) for row in rows)
+    col_width = max(total_width // col_cnt, 1000)
+    table_width = col_width * col_cnt
+    table_height = TABLE_ROW_HEIGHT * row_cnt
+    left, right, top, bottom = CELL_MARGIN
+    cell_text_width = col_width - left - right
+
+    tr_parts: list[str] = []
+    for r, row in enumerate(rows):
+        tc_parts: list[str] = []
+        for c in range(col_cnt):
+            value = row[c] if c < len(row) else ""
+            cell_id = 1500000000 + instance * 10000 + r * col_cnt + c
+            sublist = _cell_paragraph(value, cell_id, cell_text_width)
+            tc_parts.append(f"""<hp:tc name="" header="0" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="{TABLE_BORDER_FILL}">
+        {sublist}
+        <hp:cellAddr colAddr="{c}" rowAddr="{r}"/>
+        <hp:cellSpan colSpan="1" rowSpan="1"/>
+        <hp:cellSz width="{col_width}" height="{TABLE_ROW_HEIGHT}"/>
+        <hp:cellMargin left="{left}" right="{right}" top="{top}" bottom="{bottom}"/>
+      </hp:tc>""")
+        tr_parts.append("<hp:tr>\n      " + "\n      ".join(tc_parts) + "\n    </hp:tr>")
+    rows_xml = "\n    ".join(tr_parts)
+
+    return f"""  <hp:p id="{pid}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">
+    <hp:run charPrIDRef="0">
+      <hp:tbl id="{1000000000 + instance}" zOrder="{instance}" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="0" rowCnt="{row_cnt}" colCnt="{col_cnt}" cellSpacing="0" borderFillIDRef="{TABLE_BORDER_FILL}" noAdjust="0">
+        <hp:sz width="{table_width}" widthRelTo="ABSOLUTE" height="{table_height}" heightRelTo="ABSOLUTE" protect="0"/>
+        <hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>
+        <hp:outMargin left="0" right="0" top="0" bottom="0"/>
+        <hp:inMargin left="0" right="0" top="0" bottom="0"/>
+    {rows_xml}
+      </hp:tbl>
+      <hp:t/>
+    </hp:run>
+    <hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="{table_height}" textheight="{table_height}" baseline="{int(table_height * 0.85)}" spacing="600" horzpos="0" horzsize="{table_width}" flags="393216"/></hp:linesegarray>
+  </hp:p>"""
+
+
 def _strip_question_prefix(text: str, label: str) -> str:
     match = QUESTION_PREFIX_RE.match(text)
     if match and match.group(1) == str(label):
@@ -147,6 +208,7 @@ def _build_body(
     template: ExamTemplate,
     section_controls: str = "",
     include_answer_sheet: bool = False,
+    content_width: int = MAX_IMAGE_WIDTH,
 ) -> str:
     paragraphs: list[str] = []
     pid = 0
@@ -171,6 +233,14 @@ def _build_body(
         instance += 1
         paragraphs.append(_pic_paragraph(pid, item, instance))
 
+    def add_table(rows: list[list[str]]) -> None:
+        nonlocal pid, instance
+        if not rows or not any(rows):
+            return
+        pid += 1
+        instance += 1
+        paragraphs.append(_table_paragraph(pid, instance, rows, content_width))
+
     _add_masthead(add_text, title, template)
     for index, problem in enumerate(problems, start=1):
         label = problem.get("number") or str(index)
@@ -194,6 +264,9 @@ def _build_body(
             add_text(heading, 2, 0)
             for line in stem_lines or [""]:
                 add_text(line)
+
+        for table in problem.get("tables") or []:
+            add_table(table)
 
         for image_path in problem.get("image_paths") or []:
             add_image(image_path)
@@ -247,7 +320,7 @@ def _header_xml(title: str) -> str:
       <hh:fontface lang="SYMBOL" fontCnt="1"><hh:font id="0" face="Symbol" type="TTF"/></hh:fontface>
       <hh:fontface lang="USER" fontCnt="1"><hh:font id="0" face="Arial" type="TTF"/></hh:fontface>
     </hh:fontfaces>
-    <hh:borderFills itemCnt="1">
+    <hh:borderFills itemCnt="2">
       <hh:borderFill id="0" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0">
         <hh:slash type="NONE" Crooked="0" isCounter="0"/>
         <hh:backSlash type="NONE" Crooked="0" isCounter="0"/>
@@ -257,6 +330,16 @@ def _header_xml(title: str) -> str:
         <hh:bottomBorder type="NONE" width="0.1 mm" color="#000000"/>
         <hh:diagonal type="NONE" width="0.1 mm" color="#000000"/>
         <hh:fillBrush><hc:winBrush faceColor="#FFFFFF" hatchColor="#000000" alpha="0"/></hh:fillBrush>
+      </hh:borderFill>
+      <hh:borderFill id="1" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0">
+        <hh:slash type="NONE" Crooked="0" isCounter="0"/>
+        <hh:backSlash type="NONE" Crooked="0" isCounter="0"/>
+        <hh:leftBorder type="SOLID" width="0.12 mm" color="#000000"/>
+        <hh:rightBorder type="SOLID" width="0.12 mm" color="#000000"/>
+        <hh:topBorder type="SOLID" width="0.12 mm" color="#000000"/>
+        <hh:bottomBorder type="SOLID" width="0.12 mm" color="#000000"/>
+        <hh:diagonal type="NONE" width="0.1 mm" color="#000000"/>
+        <hh:fillBrush><hc:winBrush faceColor="none" hatchColor="#000000" alpha="0"/></hh:fillBrush>
       </hh:borderFill>
     </hh:borderFills>
     <hh:charProperties itemCnt="5">
@@ -351,6 +434,11 @@ def _section_xml(
     include_answer_sheet: bool = False,
 ) -> str:
     columns = max(1, min(template.columns, 2))
+    content_width = (
+        (MAX_IMAGE_WIDTH - COLUMN_GAP * (columns - 1)) // columns
+        if columns > 1
+        else MAX_IMAGE_WIDTH
+    )
     # OWPML 표준: secPr와 단 설정(ctrl/colPr)은 첫 문단의 run 안에 들어간다.
     section_controls = f"""<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="1" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">
         <hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0" strtnum="0"/>
@@ -367,6 +455,7 @@ def _section_xml(
         template,
         section_controls=section_controls,
         include_answer_sheet=include_answer_sheet,
+        content_width=content_width,
     )
     return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <hs:sec xmlns:hs="{SECTION_NS}" xmlns:hp="{PARA_NS}" xmlns:hc="{CORE_NS}" xmlns:hh="{HEAD_NS}">
