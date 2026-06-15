@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,13 +54,65 @@ def init_db() -> None:
             )
             """
         )
+        # 중복 감지용 콘텐츠 해시 (기존 DB에는 없을 수 있어 마이그레이션한다).
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(problems)")}
+        if "content_hash" not in columns:
+            conn.execute("ALTER TABLE problems ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''")
+            for row in conn.execute("SELECT id, stem, choices_json, answer FROM problems").fetchall():
+                digest = _content_hash(
+                    {
+                        "stem": row["stem"],
+                        "choices": row["choices_json"],
+                        "answer": row["answer"],
+                    }
+                )
+                if digest:
+                    conn.execute(
+                        "UPDATE problems SET content_hash = ? WHERE id = ?", (digest, row["id"])
+                    )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_problems_source ON problems(source_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_problems_subject ON problems(subject)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_problems_tags ON problems(tags)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_problems_hash ON problems(content_hash)")
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _as_choice_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return [value]
+        return [str(item) for item in parsed] if isinstance(parsed, list) else [value]
+    return [str(value)]
+
+
+def _content_hash(data: dict[str, Any]) -> str:
+    """본문·선지·정답을 정규화한 콘텐츠 지문. 식별 텍스트가 없으면 빈 문자열(중복 검사 제외)."""
+    parts = [str(data.get("stem") or "")]
+    parts.extend(_as_choice_list(data.get("choices")))
+    parts.append(str(data.get("answer") or ""))
+    normalized = re.sub(r"\s+", " ", "\n".join(parts)).strip().lower()
+    if not normalized:
+        return ""
+    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+
+
+def hash_exists(content_hash: str) -> bool:
+    if not content_hash:
+        return False
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM problems WHERE content_hash = ? LIMIT 1", (content_hash,)
+        ).fetchone()
+    return row is not None
 
 
 def _json_list(value: Any) -> str:
@@ -77,6 +131,7 @@ def _json_list(value: Any) -> str:
 
 def row_to_problem(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
+    item.pop("content_hash", None)
     item["choices"] = json.loads(item.pop("choices_json") or "[]")
     item["image_paths"] = json.loads(item.pop("image_paths_json") or "[]")
     item["image_urls"] = [f"/files/{path}" for path in item["image_paths"]]
@@ -99,6 +154,7 @@ def create_problem(data: dict[str, Any]) -> dict[str, Any]:
         "answer": data.get("answer") or "",
         "explanation": data.get("explanation") or "",
         "image_paths_json": _json_list(data.get("image_paths")),
+        "content_hash": _content_hash(data),
         "created_at": stamp,
         "updated_at": stamp,
     }
@@ -108,18 +164,36 @@ def create_problem(data: dict[str, Any]) -> dict[str, Any]:
             INSERT INTO problems (
                 source_type, source_name, source_page, number, subject, unit, tags,
                 title, stem, choices_json, answer, explanation, image_paths_json,
-                created_at, updated_at
+                content_hash, created_at, updated_at
             )
             VALUES (
                 :source_type, :source_name, :source_page, :number, :subject, :unit, :tags,
                 :title, :stem, :choices_json, :answer, :explanation, :image_paths_json,
-                :created_at, :updated_at
+                :content_hash, :created_at, :updated_at
             )
             """,
             values,
         )
         conn.commit()
         return get_problem(int(cursor.lastrowid))
+
+
+def create_problem_unique(
+    data: dict[str, Any], seen: set[str] | None = None
+) -> dict[str, Any] | None:
+    """중복(동일 콘텐츠 해시)이면 만들지 않고 None을 돌려준다.
+
+    seen에는 이번 가져오기 안에서 이미 만든 해시를 모아 한 파일 내 중복도 막는다.
+    식별 텍스트가 없는(빈 해시) 문항은 항상 새로 만든다(이미지 전용 등)."""
+    digest = _content_hash(data)
+    if digest:
+        if seen is not None and digest in seen:
+            return None
+        if hash_exists(digest):
+            return None
+        if seen is not None:
+            seen.add(digest)
+    return create_problem(data)
 
 
 def get_problem(problem_id: int) -> dict[str, Any]:
@@ -156,6 +230,16 @@ def update_problem(problem_id: int, data: dict[str, Any]) -> dict[str, Any]:
     if "image_paths" in data:
         assignments.append("image_paths_json = :image_paths_json")
         values["image_paths_json"] = _json_list(data.get("image_paths"))
+    if any(key in data for key in ("stem", "choices", "answer")):
+        current = get_problem(problem_id)
+        assignments.append("content_hash = :content_hash")
+        values["content_hash"] = _content_hash(
+            {
+                "stem": data.get("stem", current["stem"]),
+                "choices": data["choices"] if "choices" in data else current["choices"],
+                "answer": data.get("answer", current["answer"]),
+            }
+        )
     if not assignments:
         return get_problem(problem_id)
     assignments.append("updated_at = :updated_at")

@@ -13,7 +13,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from lxml import html as lxml_html
 
-from . import importers, storage
+from . import importers
 
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) HWPMake/0.2 (local collection tool)"
@@ -138,23 +138,22 @@ def collect_url(url: str, metadata: dict[str, Any]) -> dict[str, Any]:
     if not chunks:
         return {"created": [], "notices": ["페이지에서 가져올 내용을 찾지 못했습니다.", *notices]}
 
-    created: list[dict[str, Any]] = []
+    sink = importers._Sink()
     has_numbers = len(chunks) > 1
     base_title = page_title or urlparse(url).netloc
     for sequence, chunk in enumerate(chunks, start=1):
         number = importers._extract_number(chunk["text"], sequence) if has_numbers else ""
-        created.append(
-            storage.create_problem(
-                {
-                    **metadata,
-                    "source_type": "web",
-                    "source_name": url,
-                    "number": number,
-                    "title": f"{base_title} #{number}" if number else base_title,
-                    "stem": chunk["text"],
-                    "image_paths": chunk["images"],
-                }
-            )
+        sink.add(
+            {
+                **metadata,
+                "source_type": "web",
+                "source_name": url,
+                "number": number,
+                "title": f"{base_title} #{number}" if number else base_title,
+                "stem": chunk["text"],
+                "image_paths": chunk["images"],
+            }
         )
-    notices.insert(0, f"'{base_title}'에서 {len(created)}개 문항을 수집했습니다.")
-    return {"created": created, "notices": notices}
+    notices.extend(importers._dedup_notices(sink))
+    notices.insert(0, f"'{base_title}'에서 {len(sink.created)}개 문항을 수집했습니다.")
+    return {"created": sink.created, "notices": notices}

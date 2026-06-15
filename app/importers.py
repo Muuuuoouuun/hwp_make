@@ -41,6 +41,29 @@ QUESTION_START_RE = re.compile(
 )
 
 
+class _Sink:
+    """가져오기 중 문항을 만들며 중복은 건너뛰고 그 수를 센다."""
+
+    __slots__ = ("created", "skipped", "_seen")
+
+    def __init__(self) -> None:
+        self.created: list[dict[str, Any]] = []
+        self.skipped = 0
+        self._seen: set[str] = set()
+
+    def add(self, data: dict[str, Any]) -> dict[str, Any] | None:
+        problem = storage.create_problem_unique(data, self._seen)
+        if problem is None:
+            self.skipped += 1
+        else:
+            self.created.append(problem)
+        return problem
+
+
+def _dedup_notices(sink: _Sink) -> list[str]:
+    return [f"중복 {sink.skipped}개는 이미 있는 문항이라 건너뛰었습니다."] if sink.skipped else []
+
+
 def safe_filename(filename: str) -> str:
     name = Path(filename or "upload").name.strip() or "upload"
     name = SAFE_NAME_RE.sub("_", name)
@@ -87,7 +110,7 @@ def _extract_number(text: str, fallback: int) -> str:
 def import_pdf(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
     rel_path = save_upload(filename, payload)
     pdf_path = storage.DATA_DIR / rel_path
-    created: list[dict[str, Any]] = []
+    sink = _Sink()
     notices: list[str] = []
     try:
         reader = PdfReader(str(pdf_path))
@@ -121,18 +144,16 @@ def import_pdf(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[
         chunks = _split_questions(page_text)
         if not chunks:
             if page_images:
-                created.append(
-                    storage.create_problem(
-                        {
-                            **metadata,
-                            "source_type": "pdf",
-                            "source_name": filename,
-                            "source_page": page_index,
-                            "title": f"{Path(filename).stem} {page_index}쪽 이미지",
-                            "stem": "",
-                            "image_paths": page_images,
-                        }
-                    )
+                sink.add(
+                    {
+                        **metadata,
+                        "source_type": "pdf",
+                        "source_name": filename,
+                        "source_page": page_index,
+                        "title": f"{Path(filename).stem} {page_index}쪽 이미지",
+                        "stem": "",
+                        "image_paths": page_images,
+                    }
                 )
                 total_pdf_images += len(page_images)
             else:
@@ -140,38 +161,36 @@ def import_pdf(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[
             continue
         for chunk_index, chunk in enumerate(chunks):
             number = _extract_number(chunk, sequence)
-            created.append(
-                storage.create_problem(
-                    {
-                        **metadata,
-                        "source_type": "pdf",
-                        "source_name": filename,
-                        "source_page": page_index,
-                        "number": number,
-                        "title": f"{Path(filename).stem} #{number}",
-                        "stem": chunk,
-                        # 페이지 내 위치를 알 수 없어 페이지 첫 문항에 모아 붙인다.
-                        "image_paths": page_images if chunk_index == 0 else [],
-                    }
-                )
+            sink.add(
+                {
+                    **metadata,
+                    "source_type": "pdf",
+                    "source_name": filename,
+                    "source_page": page_index,
+                    "number": number,
+                    "title": f"{Path(filename).stem} #{number}",
+                    "stem": chunk,
+                    # 페이지 내 위치를 알 수 없어 페이지 첫 문항에 모아 붙인다.
+                    "image_paths": page_images if chunk_index == 0 else [],
+                }
             )
             sequence += 1
         total_pdf_images += len(page_images)
     if total_pdf_images:
         notices.append(f"PDF 이미지 {total_pdf_images}개를 페이지별 첫 문항에 첨부했습니다. 필요하면 편집에서 옮기세요.")
-    if not created:
-        created.append(
-            storage.create_problem(
-                {
-                    **metadata,
-                    "source_type": "pdf",
-                    "source_name": filename,
-                    "title": Path(filename).stem,
-                    "stem": "스캔 PDF이거나 텍스트를 추출하지 못했습니다. 이미지로 등록하거나 본문을 직접 입력하세요.",
-                }
-            )
+    notices.extend(_dedup_notices(sink))
+    # 새로 만든 것도, 건너뛴 중복도 없을 때만 스캔 PDF 안내용 빈 문항을 만든다.
+    if not sink.created and not sink.skipped:
+        sink.add(
+            {
+                **metadata,
+                "source_type": "pdf",
+                "source_name": filename,
+                "title": Path(filename).stem,
+                "stem": "스캔 PDF이거나 텍스트를 추출하지 못했습니다. 이미지로 등록하거나 본문을 직접 입력하세요.",
+            }
         )
-    return {"created": created, "notices": notices}
+    return {"created": sink.created, "notices": notices}
 
 
 def import_image(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -187,27 +206,31 @@ def import_image(filename: str, payload: bytes, metadata: dict[str, Any]) -> dic
         notices.append(f"이미지 확인 실패: {exc}")
 
     stem = metadata.get("stem") or ""
+    has_real_text = bool(stem)
     if not stem and HAS_OCR:
         try:
             with Image.open(full_path) as image:
                 ocr_text = pytesseract.image_to_string(image, lang="kor+eng")
             stem = _clean_text(ocr_text)
             if stem:
+                has_real_text = True
                 notices.append("OCR로 본문을 추출했습니다. 내용을 확인하세요.")
         except Exception as exc:
             notices.append(f"OCR 실패: {exc}")
     if not stem:
+        # 식별 텍스트가 없으면 같은 안내 문구가 서로 중복으로 잡히지 않도록 중복 검사에서 뺀다.
         stem = "이미지 문항입니다. 본문이 필요하면 오른쪽 편집 영역에서 입력하세요."
-    problem = storage.create_problem(
-        {
-            **metadata,
-            "source_type": "image",
-            "source_name": filename,
-            "title": metadata.get("title") or Path(filename).stem,
-            "stem": stem,
-            "image_paths": [rel_path],
-        }
-    )
+    data = {
+        **metadata,
+        "source_type": "image",
+        "source_name": filename,
+        "title": metadata.get("title") or Path(filename).stem,
+        "stem": stem,
+        "image_paths": [rel_path],
+    }
+    problem = storage.create_problem_unique(data) if has_real_text else storage.create_problem(data)
+    if problem is None:
+        return {"created": [], "notices": ["이미 같은 본문의 문항이 있어 건너뛰었습니다.", *notices]}
     if width and height:
         notices.append(f"이미지 크기: {width}x{height}")
     return {"created": [problem], "notices": notices}
@@ -279,12 +302,15 @@ def import_csv(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[
     sample = text[:2048]
     dialect = csv.Sniffer().sniff(sample) if "," in sample or "\t" in sample else csv.excel
     reader = csv.DictReader(io.StringIO(text), dialect=dialect)
-    created: list[dict[str, Any]] = []
+    sink = _Sink()
     for row in reader:
         problem_data = _problem_from_row(row, "csv", filename)
         if problem_data:
-            created.append(storage.create_problem({**metadata, **problem_data}))
-    return {"created": created, "notices": [f"{len(created)}개 문항을 가져왔습니다."]}
+            sink.add({**metadata, **problem_data})
+    return {
+        "created": sink.created,
+        "notices": [f"{len(sink.created)}개 문항을 가져왔습니다.", *_dedup_notices(sink)],
+    }
 
 
 def _sqlite_tables(conn: sqlite3.Connection) -> list[str]:
@@ -299,7 +325,7 @@ def import_sqlite(filename: str, payload: bytes, metadata: dict[str, Any]) -> di
     src = storage.DATA_DIR / rel_path
     temp = storage.DATA_DIR / f"tmp_{uuid.uuid4().hex}.sqlite3"
     shutil.copyfile(src, temp)
-    created: list[dict[str, Any]] = []
+    sink = _Sink()
     notices: list[str] = []
     try:
         conn = sqlite3.connect(temp)
@@ -315,7 +341,7 @@ def import_sqlite(filename: str, payload: bytes, metadata: dict[str, Any]) -> di
             for row in rows:
                 problem_data = _problem_from_row(dict(row), "sqlite", f"{filename}:{table}")
                 if problem_data:
-                    created.append(storage.create_problem({**metadata, **problem_data}))
+                    sink.add({**metadata, **problem_data})
             notices.append(f"{table}: {len(rows)}행 확인")
     finally:
         try:
@@ -323,9 +349,10 @@ def import_sqlite(filename: str, payload: bytes, metadata: dict[str, Any]) -> di
         except Exception:
             pass
         temp.unlink(missing_ok=True)
-    if not created:
+    if not sink.created:
         notices.append("가져올 수 있는 question/stem/body/title 컬럼을 찾지 못했습니다.")
-    return {"created": created, "notices": notices}
+    notices.extend(_dedup_notices(sink))
+    return {"created": sink.created, "notices": notices}
 
 
 QUESTION_LINE_RE = re.compile(r"^\s*(?:문제\s*)?(\d{1,3})\s*[\.\)]")
@@ -370,27 +397,25 @@ def _create_from_chunks(
     source_type: str,
     filename: str,
     metadata: dict[str, Any],
-) -> list[dict[str, Any]]:
-    created: list[dict[str, Any]] = []
+) -> _Sink:
+    sink = _Sink()
     has_numbers = len(chunks) > 1
     for sequence, chunk in enumerate(chunks, start=1):
         text = chunk["text"]
         number = _extract_number(text, sequence) if has_numbers else ""
         title = f"{Path(filename).stem} #{number}" if number else Path(filename).stem
-        created.append(
-            storage.create_problem(
-                {
-                    **metadata,
-                    "source_type": source_type,
-                    "source_name": filename,
-                    "number": number,
-                    "title": title,
-                    "stem": text,
-                    "image_paths": chunk["images"],
-                }
-            )
+        sink.add(
+            {
+                **metadata,
+                "source_type": source_type,
+                "source_name": filename,
+                "number": number,
+                "title": title,
+                "stem": text,
+                "image_paths": chunk["images"],
+            }
         )
-    return created
+    return sink
 
 
 def import_docx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -433,10 +458,11 @@ def import_docx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
     chunks = _paragraphs_to_chunks(paragraphs)
     if not chunks:
         return {"created": [], "notices": ["DOCX에서 내용을 찾지 못했습니다."]}
-    created = _create_from_chunks(chunks, "docx", filename, metadata)
+    sink = _create_from_chunks(chunks, "docx", filename, metadata)
     if image_count:
         notices.append(f"이미지 {image_count}개를 함께 가져왔습니다.")
-    return {"created": created, "notices": notices}
+    notices.extend(_dedup_notices(sink))
+    return {"created": sink.created, "notices": notices}
 
 
 def _local_name(element: Any) -> str:
@@ -517,10 +543,11 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
     chunks = _paragraphs_to_chunks(paragraphs)
     if not chunks:
         return {"created": [], "notices": ["HWPX에서 내용을 찾지 못했습니다."]}
-    created = _create_from_chunks(chunks, "hwpx", filename, metadata)
+    sink = _create_from_chunks(chunks, "hwpx", filename, metadata)
     if image_count:
         notices.append(f"이미지 {image_count}개를 함께 가져왔습니다.")
-    return {"created": created, "notices": notices}
+    notices.extend(_dedup_notices(sink))
+    return {"created": sink.created, "notices": notices}
 
 
 # --- HWP(5.0 바이너리) 텍스트 추출 -------------------------------------------
@@ -650,6 +677,7 @@ def import_hwp(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[
     if images:
         chunks[0]["images"] = [*images, *chunks[0]["images"]]
         notices.append(f"이미지 {len(images)}개는 위치를 알 수 없어 첫 문항에 첨부했습니다.")
-    created = _create_from_chunks(chunks, "hwp", filename, metadata)
-    return {"created": created, "notices": notices}
+    sink = _create_from_chunks(chunks, "hwp", filename, metadata)
+    notices.extend(_dedup_notices(sink))
+    return {"created": sink.created, "notices": notices}
 
