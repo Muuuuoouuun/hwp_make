@@ -256,16 +256,54 @@ textarea:focus {
   display: grid;
   grid-template-columns: 308px minmax(360px, 1fr) minmax(420px, 560px);
   gap: var(--s4);
-  align-items: start;
+  align-items: stretch;
+  height: calc(100vh - 140px);
+  min-height: 560px;
 }
 
 .tool-panel {
-  min-height: 680px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
   background: var(--panel);
   box-shadow: var(--shadow-sm);
   padding: var(--s5);
+}
+
+/* Sidebar: whole column scrolls internally */
+.sidebar {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Subtle scrollbars for scroll panes */
+.sidebar::-webkit-scrollbar,
+.problem-list::-webkit-scrollbar,
+.editor-form::-webkit-scrollbar,
+.basket-list::-webkit-scrollbar,
+.history-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.sidebar::-webkit-scrollbar-thumb,
+.problem-list::-webkit-scrollbar-thumb,
+.editor-form::-webkit-scrollbar-thumb,
+.basket-list::-webkit-scrollbar-thumb,
+.history-list::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: var(--r-pill);
+  background-clip: padding-box;
+  background-color: var(--line-strong);
+}
+
+.sidebar::-webkit-scrollbar-thumb:hover,
+.problem-list::-webkit-scrollbar-thumb:hover,
+.editor-form::-webkit-scrollbar-thumb:hover {
+  background-color: #b3bdb6;
 }
 
 .panel-title {
@@ -576,9 +614,11 @@ textarea:focus {
 .problem-list {
   display: grid;
   gap: var(--s2);
-  max-height: 585px;
+  flex: 1;
+  min-height: 0;
   overflow: auto;
   padding-right: var(--s1);
+  align-content: start;
 }
 
 .problem-row {
@@ -686,6 +726,11 @@ textarea:focus {
 .editor-form {
   display: grid;
   gap: var(--s3);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  align-content: start;
+  padding-right: var(--s1);
 }
 
 .hidden {
@@ -695,7 +740,8 @@ textarea:focus {
 .empty-editor {
   display: grid;
   place-items: center;
-  min-height: 540px;
+  flex: 1;
+  min-height: 0;
   border: 1.5px dashed var(--line-strong);
   border-radius: var(--r);
   background: var(--surface-2);
@@ -843,6 +889,33 @@ textarea:focus {
 @media (max-width: 1180px) {
   .workspace {
     grid-template-columns: 280px 1fr;
+    height: auto;
+    min-height: 0;
+  }
+
+  .tool-panel {
+    height: auto;
+    min-height: 560px;
+    overflow: visible;
+  }
+
+  .sidebar {
+    overflow: visible;
+  }
+
+  .problem-list {
+    flex: none;
+    max-height: 60vh;
+  }
+
+  .empty-editor {
+    flex: none;
+    min-height: 480px;
+  }
+
+  .editor-form {
+    flex: none;
+    overflow: visible;
   }
 
   .editor-panel {
