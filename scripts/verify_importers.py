@@ -386,6 +386,15 @@ if hwpx_writer._hancom_eqn_script(recognized_vector) != "vec {a}+vec {AB}":
 recognized_wide_vector = math_text.normalize_recognized_math_text("\ue06d\ue06ea+\ue06d\ue06eAB")
 if recognized_wide_vector != r"\vec{a}+\vec{AB}":
     failures.append(f"Recognized math normalization: wide vector accent PUA failed {recognized_wide_vector!r}")
+recognized_trailing_vector = math_text.normalize_recognized_math_text("BC\ue046\ue06d\ue06e")
+if recognized_trailing_vector != r"\vec{BC}":
+    failures.append(
+        f"Recognized math normalization: trailing vector accent PUA failed {recognized_trailing_vector!r}"
+    )
+if hwpx_writer._hancom_eqn_script(recognized_trailing_vector) != "vec {BC}":
+    failures.append(
+        f"HWPX native math: trailing vector accent PUA conversion failed {recognized_trailing_vector!r}"
+    )
 recognized_radical = math_text.normalize_recognized_math_text("\ue05c\ue06d\ue036")
 if recognized_radical != "√3":
     failures.append(f"Recognized math normalization: radical filler PUA failed {recognized_radical!r}")
@@ -501,6 +510,11 @@ if "×2^{\\frac{1}{2}}" not in stacked_previous_exponent:
 stacked_delayed_base_exponent = math_text.normalize_recognized_math_layout_text("-\\frac{1}{2}\n× 3")
 if "× 3^{-\\frac{1}{2}}" not in stacked_delayed_base_exponent:
     failures.append(f"Recognized math layout normalization: delayed exponent base repair failed {stacked_delayed_base_exponent!r}")
+split_nth_root_exponent = math_text.normalize_recognized_math_layout_text("1. \u221a\n1\n3\ue06d5\u00d7 25\ue06d3")
+if "\\sqrt[3]{5}\u00d7 25^{\\frac{1}{3}}" not in split_nth_root_exponent:
+    failures.append(
+        f"Recognized math layout normalization: split nth-root exponent failed {split_nth_root_exponent!r}"
+    )
 stacked_exponent_text_guard = math_text.normalize_recognized_math_layout_text("\uc9c1\uc120 y=3\ue06d13\n2\ub85c")
 if "^{\\frac{2}{13}}" in stacked_exponent_text_guard:
     failures.append(f"Recognized math layout normalization: text line was over-converted to exponent {stacked_exponent_text_guard!r}")

@@ -99,10 +99,21 @@ def _looks_like_footer_band_line(line: dict[str, Any], height_px: float) -> bool
     return False
 
 
+def _span_text(span: dict[str, Any]) -> str:
+    if "text" in span:
+        return str(span.get("text") or "")
+    chars = span.get("chars") or []
+    return "".join(
+        str(char.get("c") or "")
+        for char in chars
+        if isinstance(char, dict)
+    )
+
+
 def _line_text(line: dict[str, Any]) -> str:
     spans = line.get("spans") or []
     return "".join(
-        str(span.get("text") or "")
+        _span_text(span)
         for span in spans
         if isinstance(span, dict)
     ).strip()
@@ -273,13 +284,92 @@ def _scaled_drawing_box(bbox: Any, scale: float) -> Box | None:
     return Box.from_points(left, top, right, bottom)
 
 
+def _box_payload(box: Box) -> list[float]:
+    return [box.left, box.top, box.right, box.bottom]
+
+
+def _line_char_payload(line: dict[str, Any], scale: float) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for span_index, span in enumerate(line.get("spans") or []):
+        if not isinstance(span, dict):
+            continue
+        font = str(span.get("font") or "")
+        size = span.get("size")
+        flags = span.get("flags")
+        for char_index, char in enumerate(span.get("chars") or []):
+            if not isinstance(char, dict):
+                continue
+            value = str(char.get("c") or "")
+            if not value:
+                continue
+            box = _scaled_box(char.get("bbox"), scale)
+            if box is None:
+                continue
+            item: dict[str, Any] = {
+                "c": value,
+                "bbox": _box_payload(box),
+                "span": span_index,
+                "index": char_index,
+            }
+            if font:
+                item["font"] = font
+            if isinstance(size, (int, float)):
+                item["size"] = float(size)
+            if isinstance(flags, int):
+                item["flags"] = flags
+            payload.append(item)
+    return payload
+
+
+def _line_span_payload(line: dict[str, Any], scale: float) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for span_index, span in enumerate(line.get("spans") or []):
+        if not isinstance(span, dict):
+            continue
+        text = _span_text(span)
+        if not text:
+            continue
+        box = _scaled_box(span.get("bbox"), scale)
+        item: dict[str, Any] = {
+            "text": text,
+            "index": span_index,
+        }
+        if box is not None:
+            item["bbox"] = _box_payload(box)
+        font = str(span.get("font") or "")
+        if font:
+            item["font"] = font
+        size = span.get("size")
+        if isinstance(size, (int, float)):
+            item["size"] = float(size)
+        flags = span.get("flags")
+        if isinstance(flags, int):
+            item["flags"] = flags
+        payload.append(item)
+    return payload
+
+
+def _line_geometry_payload(line: dict[str, Any], scale: float) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    chars = _line_char_payload(line, scale)
+    if chars:
+        payload["pdf_line_chars"] = chars
+    spans = _line_span_payload(line, scale)
+    if spans:
+        payload["pdf_line_spans"] = spans
+    return payload
+
+
 def _extract_text_lines(page: Any, scale: float) -> list[dict[str, Any]]:
     """페이지의 모든 (비어있지 않은) 텍스트 라인 → {box, text} (픽셀 좌표)."""
     lines: list[dict[str, Any]] = []
     try:
-        data = page.get_text("dict")
+        data = page.get_text("rawdict")
     except Exception:
-        return lines
+        try:
+            data = page.get_text("dict")
+        except Exception:
+            return lines
     for block in data.get("blocks") or []:
         if not isinstance(block, dict):
             continue
@@ -292,7 +382,9 @@ def _extract_text_lines(page: Any, scale: float) -> list[dict[str, Any]]:
             box = _scaled_box(line.get("bbox"), scale)
             if box is None:
                 continue
-            lines.append({"box": box, "text": text})
+            item = {"box": box, "text": text}
+            item.update(_line_geometry_payload(line, scale))
+            lines.append(item)
     lines.sort(key=lambda item: (item["box"].top, item["box"].left))
     return lines
 
@@ -750,6 +842,13 @@ def _segment_page(
             "marker_text": marker_text,
             "display_title": f"{number}.",
         }
+        problem_meta.update(
+            {
+                key: value
+                for key, value in marker_line.items()
+                if key in {"pdf_line_chars", "pdf_line_spans"} and value
+            }
+        )
 
         # 자식 STEM/CHOICE 블록(선택). 마커 라인 자신은 제외.
         child_ids: list[str] = []
@@ -767,6 +866,19 @@ def _segment_page(
             block_type = classify_text_block(child_text)
             block_seq += 1
             child_id = f"{page_id}-block-{block_seq:03d}"
+            child_metadata = {
+                "segmenter": "pdf-text-markers",
+                "parent_block_id": title_id,
+                "problem_number": number,
+                "column_index": desc["column_index"],
+            }
+            child_metadata.update(
+                {
+                    key: value
+                    for key, value in line.items()
+                    if key in {"pdf_line_chars", "pdf_line_spans"} and value
+                }
+            )
             child_blocks.append(
                 ContentBlock(
                     block_id=child_id,
@@ -775,12 +887,7 @@ def _segment_page(
                     reading_order=0,  # 임시, 아래에서 리스트 순서대로 재부여
                     text=child_text,
                     confidence=1.0,
-                    metadata={
-                        "segmenter": "pdf-text-markers",
-                        "parent_block_id": title_id,
-                        "problem_number": number,
-                        "column_index": desc["column_index"],
-                    },
+                    metadata=child_metadata,
                 )
             )
             child_ids.append(child_id)

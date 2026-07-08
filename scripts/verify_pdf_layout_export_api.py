@@ -4,7 +4,9 @@ import base64
 import os
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -30,6 +32,8 @@ from app.main import app  # noqa: E402
 from scripts.verify_pdf_layout_hwpx import verify  # noqa: E402
 
 _failures: list[str] = []
+HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
+HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -69,6 +73,76 @@ def make_pdf() -> bytes:
     return doc.tobytes()
 
 
+def _inspect_flow_style(path: Path) -> dict[str, object]:
+    with zipfile.ZipFile(path) as archive:
+        header = ET.fromstring(archive.read("Contents/header.xml"))
+        section = ET.fromstring(archive.read("Contents/section0.xml"))
+    faces = {font.get("face") for font in header.findall(f".//{HH}font") if font.get("face")}
+    char_metric_ok = False
+    for char_pr in header.findall(f".//{HH}charPr"):
+        ratio = char_pr.find(f"{HH}ratio")
+        spacing = char_pr.find(f"{HH}spacing")
+        if ratio is None or spacing is None:
+            continue
+        if (
+            ratio.get("hangul") == "95"
+            and ratio.get("latin") == "95"
+            and spacing.get("hangul") == "-5"
+            and spacing.get("latin") == "-5"
+        ):
+            char_metric_ok = True
+            break
+
+    para_165_ids = set()
+    for para_pr in header.findall(f".//{HH}paraPr"):
+        line_spacing = para_pr.find(f".//{HH}lineSpacing")
+        if line_spacing is not None and line_spacing.get("type") == "PERCENT" and line_spacing.get("value") == "165":
+            para_id = para_pr.get("id")
+            if para_id:
+                para_165_ids.add(para_id)
+    uses_165 = any((para.get("paraPrIDRef") or "") in para_165_ids for para in section.findall(f".//{HP}p"))
+
+    border_by_id = {border.get("id") or "": border for border in header.findall(f".//{HH}borderFill")}
+    divider_refs = {cell.get("borderFillIDRef") or "" for cell in section.findall(f".//{HP}tc")}
+    divider_ok = False
+    for ref in divider_refs:
+        border = border_by_id.get(ref)
+        if border is None:
+            continue
+        right = border.find(f"{HH}rightBorder")
+        left = border.find(f"{HH}leftBorder")
+        top = border.find(f"{HH}topBorder")
+        bottom = border.find(f"{HH}bottomBorder")
+        if (
+            right is not None
+            and right.get("type") == "SOLID"
+            and right.get("width") == "0.12 mm"
+            and all(
+                item is not None and (item.get("type") or "").upper() == "NONE"
+                for item in (left, top, bottom)
+            )
+        ):
+            divider_ok = True
+            break
+    margin_ok = False
+    for cell in section.findall(f".//{HP}tc"):
+        margin = cell.find(f"{HP}cellMargin")
+        if cell.get("hasMargin") == "1" and margin is not None:
+            try:
+                if int(margin.get("left") or "0") > 0 or int(margin.get("right") or "0") > 0:
+                    margin_ok = True
+                    break
+            except ValueError:
+                pass
+    return {
+        "faces": faces,
+        "char_metric_ok": char_metric_ok,
+        "uses_165": uses_165,
+        "divider_ok": divider_ok,
+        "margin_ok": margin_ok,
+    }
+
+
 def main() -> int:
     try:
         client = TestClient(app)
@@ -104,6 +178,13 @@ def main() -> int:
         if output_path.is_file():
             issues = verify(output_path, render=False)
             check("HWPX structure", not issues, "; ".join(issues[:5]))
+            style = _inspect_flow_style(output_path)
+            faces = style["faces"]
+            check("flow font faces", {"신명 중명조", "Times New Roman", "돋움"}.issubset(faces), repr(sorted(faces)))
+            check("flow char ratio/spacing", bool(style["char_metric_ok"]))
+            check("flow line spacing 165", bool(style["uses_165"]))
+            check("flow middle divider", bool(style["divider_ok"]))
+            check("flow cell margins", bool(style["margin_ok"]))
         return 1 if _failures else 0
     finally:
         tmp.cleanup()

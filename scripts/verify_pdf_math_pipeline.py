@@ -27,6 +27,8 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("HWP_MAKE_DATA_DIR", str(ROOT / "data" / "pdf_math_qa"))
 
 from app import hwpx_writer, hwpx_writer_v2, importers, math_text, storage  # noqa: E402
+from app.recognition.pdf_segment import segment_pdf  # noqa: E402
+from app.recognition.schema import Subject  # noqa: E402
 from scripts.qa_hwp_math_samples import _render_hwpx  # noqa: E402
 from scripts.verify_hwpx_native_math import (  # noqa: E402
     _equation_object_issues,
@@ -380,6 +382,26 @@ def run() -> int:
 
     failures: list[str] = []
     _create_pdf(PDF_PATH)
+    segmented_pages = segment_pdf(PDF_PATH.read_bytes(), subject=Subject.MATH)
+    geometry_blocks = [
+        block
+        for page in segmented_pages
+        for block in page.blocks
+        if block.metadata.get("pdf_line_chars")
+    ]
+    if not geometry_blocks:
+        failures.append("PDF segmenter did not preserve raw line character geometry metadata")
+    else:
+        first_chars = geometry_blocks[0].metadata.get("pdf_line_chars") or []
+        first_char_box = first_chars[0].get("bbox") if first_chars else None
+        if not (
+            isinstance(first_char_box, list)
+            and len(first_char_box) == 4
+            and all(isinstance(value, (int, float)) for value in first_char_box)
+        ):
+            failures.append(
+                f"PDF segmenter raw character geometry has an invalid bbox: {first_char_box!r}"
+            )
     result, importer_warnings = _import_pdf_with_warnings(PDF_PATH)
     items = list(result.get("created") or [])
     numbers = [str(item.get("number") or "") for item in items]

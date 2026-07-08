@@ -139,6 +139,12 @@ def _bold_for_span(span: dict[str, Any]) -> bool:
 
 
 _PDF_FONT_FACES = (
+    "신명 중명조",
+    "한양신명조",
+    "HY신명조",
+    "돋움",
+    "중고딕",
+    "신명 중고딕",
     "HYSinMyeongJo-Medium",
     "HYMyeongJo-Extra",
     "HYGraphic-Medium",
@@ -149,6 +155,10 @@ _PDF_FONT_FACES = (
     "GulimChe",
     "HCR Batang",
 )
+
+_FLOW_CHAR_RATIO = 95
+_FLOW_CHAR_SPACING = -5
+_FLOW_BODY_LINE_SPACING = 165
 
 
 def _ensure_pdf_font_faces(header: Any) -> None:
@@ -200,6 +210,80 @@ def _ensure_header_font_face(header: Any, face: str) -> None:
         fontfaces.set("itemCnt", str(len(fontfaces.findall(_hh("fontface")))))
     if changed:
         header.mark_dirty()
+
+
+def _ensure_char_metric_child(char_pr: Any, local_name: str) -> Any:
+    child = char_pr.find(_hh(local_name))
+    if child is not None:
+        return child
+    child = char_pr.makeelement(_hh(local_name), {})
+    order = ["fontRef", "ratio", "spacing", "relSz", "offset"]
+    insert_at = 0
+    if local_name in order:
+        target_index = order.index(local_name)
+        for index, existing in enumerate(list(char_pr)):
+            existing_local = etree.QName(existing).localname
+            if existing_local in order and order.index(existing_local) < target_index:
+                insert_at = index + 1
+    char_pr.insert(insert_at, child)
+    return child
+
+
+def _apply_char_metrics(header: Any, char_pr_ids: list[str], *, ratio: int, spacing: int) -> None:
+    changed = False
+    lang_attrs = ("hangul", "latin", "hanja", "japanese", "other", "symbol", "user")
+    for char_pr_id in sorted(set(str(value) for value in char_pr_ids if value is not None)):
+        char_pr = header.element.find(f".//{_hh('charPr')}[@id='{char_pr_id}']")
+        if char_pr is None:
+            continue
+        for local_name, value in (("ratio", ratio), ("spacing", spacing)):
+            child = _ensure_char_metric_child(char_pr, local_name)
+            safe_value = str(int(value))
+            for attr in lang_attrs:
+                if child.get(attr) != safe_value:
+                    child.set(attr, safe_value)
+                    changed = True
+    if changed:
+        header.mark_dirty()
+
+
+def _latin_ratio(text: str) -> float:
+    meaningful = [ch for ch in text if ch.isalpha() or "\uac00" <= ch <= "\ud7a3"]
+    if not meaningful:
+        return 0.0
+    latin = sum(1 for ch in meaningful if ("A" <= ch <= "Z") or ("a" <= ch <= "z"))
+    return latin / len(meaningful)
+
+
+def _flow_font_for_span(span: dict[str, Any]) -> str:
+    text = str(span.get("text") or "")
+    font = str(span.get("font") or "")
+    recovered = _recover_pdf_font_name(font)
+    if _latin_ratio(text) >= 0.55 or "Times" in font or "NewRoman" in font:
+        return "Times New Roman"
+    if _bold_for_span(span):
+        return "돋움"
+    if any(token in recovered for token in ("고딕", "그래픽", "굴림")):
+        return "돋움"
+    if any(token in recovered for token in ("명조", "바탕")):
+        return "신명 중명조"
+    return "신명 중명조"
+
+
+def _flow_size_for_span(span: dict[str, Any]) -> float:
+    try:
+        size = float(span.get("size") or 10.0)
+    except (TypeError, ValueError):
+        size = 10.0
+    if size <= 8.6:
+        return 9.0
+    if size <= 11.2:
+        return 11.0
+    if size <= 12.8:
+        return 11.5
+    if size <= 15.0:
+        return 13.0
+    return min(16.0, round(size, 1))
 
 
 def _add_text_box(
@@ -711,13 +795,14 @@ def _ensure_char_pr(
     styles: dict[tuple[str, float, bool], str],
     span: dict[str, Any],
 ) -> str:
-    size = round(float(span.get("size") or 10.0), 2)
-    font = _font_for_span(span)
+    size = _flow_size_for_span(span)
+    font = _flow_font_for_span(span)
     bold = _bold_for_span(span)
     key = (font, size, bold)
     char_pr = styles.get(key)
     if char_pr is None:
         char_pr = doc.ensure_run_style(font=font, size=size, bold=bold)
+        _apply_char_metrics(doc.headers[0], [char_pr], ratio=_FLOW_CHAR_RATIO, spacing=_FLOW_CHAR_SPACING)
         styles[key] = char_pr
     return char_pr
 
@@ -989,6 +1074,61 @@ def _ensure_box_border_fill(header: Any) -> str:
     return str(next_id)
 
 
+def _ensure_column_divider_border_fill(header: Any) -> str:
+    border_fills = header.element.find(f".//{_hh('borderFills')}")
+    if border_fills is None:
+        ref_list = header.element.find(f".//{_hh('refList')}")
+        if ref_list is None:
+            return _ensure_no_border_fill(header)
+        border_fills = ref_list.makeelement(_hh("borderFills"), {"itemCnt": "0"})
+        ref_list.append(border_fills)
+    for border_fill in border_fills.findall(_hh("borderFill")):
+        right = border_fill.find(_hh("rightBorder"))
+        left = border_fill.find(_hh("leftBorder"))
+        top = border_fill.find(_hh("topBorder"))
+        bottom = border_fill.find(_hh("bottomBorder"))
+        if (
+            right is not None
+            and right.get("type") == "SOLID"
+            and right.get("width") == "0.12 mm"
+            and all(
+                border is not None and (border.get("type") or "").upper() == "NONE"
+                for border in (left, top, bottom)
+            )
+        ):
+            return str(border_fill.get("id") or "0")
+    next_id = 1
+    for border_fill in border_fills.findall(_hh("borderFill")):
+        try:
+            next_id = max(next_id, int(border_fill.get("id") or 0) + 1)
+        except ValueError:
+            continue
+    element = border_fills.makeelement(
+        _hh("borderFill"),
+        {
+            "id": str(next_id),
+            "threeD": "0",
+            "shadow": "0",
+            "centerLine": "NONE",
+            "breakCellSeparateLine": "0",
+        },
+    )
+    for child_name, attrs in (
+        ("slash", {"type": "NONE", "Crooked": "0", "isCounter": "0"}),
+        ("backSlash", {"type": "NONE", "Crooked": "0", "isCounter": "0"}),
+        ("leftBorder", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
+        ("rightBorder", {"type": "SOLID", "width": "0.12 mm", "color": "#404040"}),
+        ("topBorder", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
+        ("bottomBorder", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
+        ("diagonal", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
+    ):
+        element.append(element.makeelement(_hh(child_name), attrs))
+    border_fills.append(element)
+    border_fills.set("itemCnt", str(len(border_fills.findall(_hh("borderFill")))))
+    header.mark_dirty()
+    return str(next_id)
+
+
 def _pt_to_mm(value_pt: float) -> float:
     return float(value_pt) * 25.4 / 72.0
 
@@ -1018,6 +1158,34 @@ def _clear_cell_paragraphs(cell: Any) -> None:
         return
     for paragraph in list(sub.findall(_q("p"))):
         sub.remove(paragraph)
+
+
+def _set_cell_margin(
+    cell: Any,
+    *,
+    left_mm: float = 0.0,
+    right_mm: float = 0.0,
+    top_mm: float = 0.0,
+    bottom_mm: float = 0.0,
+) -> None:
+    margin = cell.element.find(_q("cellMargin"))
+    if margin is None:
+        margin = cell.element.makeelement(_q("cellMargin"), {})
+        cell.element.append(margin)
+    for name, value in {
+        "left": left_mm,
+        "right": right_mm,
+        "top": top_mm,
+        "bottom": bottom_mm,
+    }.items():
+        margin.set(name, str(max(0, _mm_to_hwp(value))))
+    cell.element.set("hasMargin", "1")
+    cell.table.mark_dirty()
+
+
+def _set_cell_border_fill(cell: Any, border_fill_id_ref: str) -> None:
+    cell.element.set("borderFillIDRef", str(border_fill_id_ref))
+    cell.table.mark_dirty()
 
 
 def _append_cell_line(
@@ -1885,8 +2053,13 @@ def _append_flow_block(
         border_fill_id_ref=border_fill_id_ref,
     )
     nested = table.cell(0, 0)
-    nested.set_text("\n".join(_line_text(line) for line in lines), split_paragraphs=True)
-    return len(lines)
+    _set_cell_margin(nested, left_mm=1.0, right_mm=1.0, top_mm=0.6, bottom_mm=0.6)
+    _clear_cell_paragraphs(nested)
+    count = 0
+    for line in lines:
+        if _append_cell_line(doc, nested, line, styles=styles, para_pr_id_ref=para_pr_id_ref):
+            count += 1
+    return count
 
 
 def write_pdf_flow_hwpx(
@@ -1906,9 +2079,15 @@ def write_pdf_flow_hwpx(
     _ensure_pdf_font_faces(header)
     no_border_fill = _ensure_no_border_fill(header)
     box_border_fill = _ensure_box_border_fill(header)
+    column_divider_border_fill = _ensure_column_divider_border_fill(header)
     compact_para = header.ensure_paragraph_format(
         alignment="LEFT",
         line_spacing_percent=100,
+        margins={"prev": 0, "next": 0},
+    )
+    body_para = header.ensure_paragraph_format(
+        alignment="LEFT",
+        line_spacing_percent=_FLOW_BODY_LINE_SPACING,
         margins={"prev": 0, "next": 0},
     )
 
@@ -2018,6 +2197,11 @@ def write_pdf_flow_hwpx(
             )
             for column in (0, 1):
                 _clear_cell_paragraphs(table.cell(0, column))
+            left_cell = table.cell(0, 0)
+            right_cell = table.cell(0, 1)
+            _set_cell_border_fill(left_cell, column_divider_border_fill)
+            _set_cell_margin(left_cell, left_mm=0.4, right_mm=2.3, top_mm=0.0, bottom_mm=0.0)
+            _set_cell_margin(right_cell, left_mm=2.3, right_mm=0.4, top_mm=0.0, bottom_mm=0.0)
 
             boxes = _flow_box_rects(page) if boxed_passages else []
             columns = _flow_column_blocks(page, body_items, boxes)
@@ -2031,7 +2215,7 @@ def write_pdf_flow_hwpx(
                         cell,
                         block,
                         styles=styles,
-                        para_pr_id_ref=compact_para,
+                        para_pr_id_ref=body_para,
                         cell_width=cell_width,
                         border_fill_id_ref=box_border_fill,
                         image_border_fill_id_ref=no_border_fill,

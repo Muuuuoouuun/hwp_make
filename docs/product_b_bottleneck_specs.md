@@ -100,12 +100,16 @@ HWP 추출 수식에서 `sqrt5`, `sqrt(n)`, `sqrt{a_{n}...}`, `sqrt{{x+1} over {
 - **원본 레이아웃 HWPX 경로:** PDF 한 부를 그대로 편집 가능한 HWPX로 재생성한다. 텍스트는 문단/표 셀로 넣고, 전체 페이지 이미지 폴백은 금지한다. 표·도표·그림처럼 구조화가 위험한 일부 영역만 지역 이미지로 보존한다.
 - **HWP 템플릿 캘리브레이션:** `scripts/analyze_hwp_templates.py`로 실제 `.hwp` 샘플을 HWPX로 export 후 header/section 스타일을 분석한다. 2026-07-08 실행 결과, 평가원 양식은 본문 `신명 중명조`/영어 `Times New Roman`, 장평 95, 자간 -5 계열이 반복 확인됐다. 교육청 국어 샘플은 `한컴바탕`, 장평 95, 자간 -3 계열이라 평가원 양식과 별도 profile로 다뤄야 한다.
 - **앱 진입점:** 파일 업로드 영역에서 `가져와서 편집`은 DB 입력, `PDF 원본 레이아웃 HWPX`는 직접 HWPX 복원으로 동작한다.
+- **2026-07-08 세부 적용:** `pdf_layout_writer.write_pdf_flow_hwpx()`도 평가원 profile을 따른다. 라틴 중심 span은 `Times New Roman`, 한글 본문은 `신명 중명조`, 굵은 번호/헤더성 span은 `돋움`으로 매핑하고, 생성 charPr에 장평 95/자간 -5를 강제한다. 본문 paragraph는 165% line spacing을 쓰며, 2단 body table의 왼쪽 셀에는 `0.12 mm` right border를 넣어 중간 분할선을 만든다. 좌우 셀에는 분할선 쪽 여백을 추가해 텍스트와 선지가 가운데 선에 붙거나 겹치지 않게 한다.
+- **PDF 수식 좌표 보존:** `pdf_segment.segment_pdf()`는 PyMuPDF `rawdict`를 우선 사용해 각 라인의 span/char bbox를 `ContentBlock.metadata.pdf_line_chars` 및 `pdf_line_spans`에 보존한다. 지금은 회귀와 진단 기반이고, 다음 단계에서 분수선/루트/첨자 재조립에 이 좌표를 사용한다.
+- **현재 수식 복원 룰:** HyhwpEQ `BC-□⃗`류 trailing vector accent는 `\vec{BC}`로 복원한다. 2025 수능 1번처럼 `√ / 1 / 3□5×25□3`으로 갈라진 세제곱근+분수지수 구조는 `\sqrt[3]{5}×25^{\frac{1}{3}}` 형태로 재조립한다.
 
 **검증 관문**
 
 - `scripts/verify_pdf_layout_export_api.py`: 앱 API에서 PDF 원본 레이아웃 HWPX를 생성하고 기존 HWPX 구조 검증기를 통과해야 한다.
 - `scripts/verify_pdf_layout_hwpx.py --render`: 결과 HWPX가 rhwp 렌더링 가능하고 full-page raster fallback이 없어야 한다.
 - `scripts/probe_hwp_open.ps1`: 설치된 한글 `HWPFrame.HwpObject` COM으로 결과물을 직접 열 수 있어야 한다.
+- `scripts/verify_pdf_layout_export_api.py`는 직접 PDF 복원 결과의 font face, 장평/자간, 165% 줄간격, 중간 분할선 border, 셀 여백까지 XML 레벨에서 확인한다.
 
 ---
 

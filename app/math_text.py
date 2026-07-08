@@ -126,6 +126,9 @@ HANCOM_MATH_PLACEHOLDER_CHARS = "\u25a1\u25a2"
 HANCOM_VECTOR_ACCENT_RE = re.compile(
     rf"[{HANCOM_MATH_PLACEHOLDER_CHARS}\s]*\u20d7\s*([A-Za-zα-ωΑ-Ω]{{1,3}}(?:['′″])?)"
 )
+HANCOM_TRAILING_VECTOR_ACCENT_RE = re.compile(
+    rf"(?P<base>[A-Z]{{1,3}})\s*-\s*[{HANCOM_MATH_PLACEHOLDER_CHARS}\s]*\u20d7"
+)
 HANCOM_RADICAL_FILLER_RE = re.compile(
     rf"(\u221a)\s*[{HANCOM_MATH_PLACEHOLDER_CHARS}]+"
 )
@@ -159,6 +162,12 @@ STACKED_BASE_AFTER_EXPONENT_RE = re.compile(
     rf"^(?P<prefix>\s*[×*]\s*)(?P<base>[A-Za-z0-9{GREEK_RANGE}]+)\s*$"
 )
 P_OVER_Q_CONTEXT_RE = re.compile(r"p\s*\+\s*q|\bp\s*,\s*q\b|p\s*와\s*q")
+SPLIT_NTH_ROOT_EXPONENT_RE = re.compile(
+    rf"^(?P<root_index>\d{{1,2}})[{HANCOM_MATH_PLACEHOLDER_CHARS}]"
+    rf"(?P<radicand>[A-Za-z0-9{GREEK_RANGE}]+)"
+    rf"(?P<middle>.*?)(?P<base>\d{{1,4}})[{HANCOM_MATH_PLACEHOLDER_CHARS}]"
+    rf"(?P<denominator>\d{{1,3}})\s*$"
+)
 P_OVER_Q_PLACEHOLDER_RE = re.compile(rf"[{HANCOM_MATH_PLACEHOLDER_CHARS}]p(?![A-Za-z0-9{GREEK_RANGE}])")
 UNIT_NUMERATOR_FRACTION_RE = re.compile(
     rf"(?P<prefix>^|[=(:,+\-*/<>\u2264\u2265]\s*)"
@@ -401,6 +410,7 @@ def normalize_recognized_math_text(text: str) -> str:
         prev_unknown_pua = False
     value = "".join(out)
     value = HANCOM_RADICAL_FILLER_RE.sub(r"\1", value)
+    value = HANCOM_TRAILING_VECTOR_ACCENT_RE.sub(r"\\vec{\g<base>}", value)
     value = HANCOM_VECTOR_ACCENT_RE.sub(r"\\vec{\1}", value)
     value = HANCOM_XBAR_RE.sub(r"\\overline{\1}", value)
     return HANCOM_SEGMENT_OVERLINE_RE.sub(r"\\overline{\1}", value)
@@ -426,6 +436,38 @@ def _looks_like_stacked_fraction_denominator(value: str) -> bool:
     if not stripped or len(stripped) > 80 or KOREAN_TEXT_RE.search(stripped):
         return False
     return bool(STACKED_FRACTION_DENOMINATOR_RE.match(stripped))
+
+
+def _repair_split_nth_root_exponents(value: str) -> str:
+    lines = str(value or "").splitlines()
+    if len(lines) < 3:
+        return str(value or "")
+
+    repaired: list[str] = []
+    index = 0
+    while index < len(lines):
+        current = lines[index].rstrip()
+        if current.endswith("\u221a") and index + 2 < len(lines):
+            numerator = lines[index + 1].strip()
+            match = SPLIT_NTH_ROOT_EXPONENT_RE.match(lines[index + 2].strip())
+            if (
+                numerator.isdigit()
+                and match
+                and not KOREAN_TEXT_RE.search(match.group("middle"))
+            ):
+                prefix = current[:-1].rstrip()
+                spacer = " " if prefix else ""
+                formula = (
+                    rf"\sqrt[{match.group('root_index')}]{{{match.group('radicand')}}}"
+                    rf"{match.group('middle')}{match.group('base')}"
+                    rf"^{{\frac{{{numerator}}}{{{match.group('denominator')}}}}}"
+                )
+                repaired.append(f"{prefix}{spacer}{formula}".rstrip())
+                index += 3
+                continue
+        repaired.append(lines[index])
+        index += 1
+    return "\n".join(repaired)
 
 
 def _repair_stacked_limit_fractions(value: str) -> str:
@@ -651,7 +693,8 @@ def _cleanup_unresolved_layout_placeholders(value: str) -> str:
 
 def normalize_recognized_math_layout_text(text: str) -> str:
     """Recover known glyphs plus simple PDF line-layout math structures."""
-    value = _repair_stacked_limit_fractions(normalize_recognized_math_text(text))
+    value = _repair_split_nth_root_exponents(normalize_recognized_math_text(text))
+    value = _repair_stacked_limit_fractions(value)
     value = _repair_stacked_fraction_exponents(value)
     value = _repair_stacked_simple_fractions_and_cases(value)
     value = _repair_p_over_q_placeholders(value)
