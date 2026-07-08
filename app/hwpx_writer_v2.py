@@ -59,6 +59,7 @@ PT_BODY = 10.0     # char 0 (1000)
 PT_SMALL = 9.0     # char 4 (900)
 
 _IMG_FORMATS = {".jpg": "jpeg", ".jpeg": "jpeg", ".png": "png", ".gif": "gif", ".bmp": "bmp"}
+_HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
 _HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 _SECTION_PART_RE = re.compile(r"^Contents/section\d+\.xml$")
 _PARAGRAPH_XML_RE = re.compile(r"<hp:p\b[\s\S]*?</hp:p>")
@@ -82,6 +83,38 @@ _STYLE_LINE_HEIGHTS = {
     "small": int(PT_SMALL * 125),
 }
 
+_KICE_FONT_FACES = (
+    "신명 중명조",
+    "한양신명조",
+    "HY신명조",
+    "Times New Roman",
+    "돋움",
+    "중고딕",
+    "신명 중고딕",
+    "HancomEQN",
+)
+
+_KICE_STYLE_SPECS = {
+    "title": {"size": 16.0, "bold": True, "font": "돋움"},
+    "meta": {"size": 11.0, "font": "돋움"},
+    "heading": {"size": 11.0, "bold": True, "font": "돋움"},
+    "body": {"size": 11.0, "font": "신명 중명조"},
+    "small": {"size": 9.5, "font": "돋움"},
+}
+
+_KICE_ENGLISH_STYLE_SPECS = {
+    **_KICE_STYLE_SPECS,
+    "body": {"size": 11.0, "font": "Times New Roman"},
+}
+
+_KICE_STYLE_LINE_HEIGHTS = {
+    "title": int(16.0 * 165),
+    "meta": int(11.0 * 165),
+    "heading": int(11.0 * 165),
+    "body": int(11.0 * 165),
+    "small": int(9.5 * 165),
+}
+
 # rhwp-verified flow budget for native-math two-column KICE exports.
 #
 # The physical A4 body is about 65762 HWPUNIT, but equations and tables render
@@ -92,6 +125,99 @@ KICE_MATH_COLUMN_BODY_HEIGHT = 46000
 
 def _local_name(tag: Any) -> str:
     return str(tag).rsplit("}", 1)[-1]
+
+
+def _is_kice_template(template: ExamTemplate) -> bool:
+    return str(template.key or "").startswith("kice_")
+
+
+def _style_specs_for_template(template: ExamTemplate) -> dict[str, dict[str, Any]]:
+    if not _is_kice_template(template):
+        return _STYLE_SPECS
+    if template.key == "kice_english":
+        return _KICE_ENGLISH_STYLE_SPECS
+    return _KICE_STYLE_SPECS
+
+
+def _style_line_heights_for_template(template: ExamTemplate) -> dict[str, int]:
+    return _KICE_STYLE_LINE_HEIGHTS if _is_kice_template(template) else _STYLE_LINE_HEIGHTS
+
+
+def _ensure_header_font_face(header: Any, face: str) -> None:
+    changed = False
+    for fontface in header.element.findall(f".//{_HH}fontface"):
+        fonts = fontface.findall(f"{_HH}font")
+        if any(font.get("face") == face for font in fonts):
+            continue
+        next_id = 0
+        for font in fonts:
+            try:
+                next_id = max(next_id, int(font.get("id") or 0) + 1)
+            except ValueError:
+                continue
+        new_font = fontface.makeelement(
+            f"{_HH}font",
+            {
+                "id": str(next_id),
+                "face": face,
+                "type": "TTF",
+                "isEmbedded": "0",
+            },
+        )
+        fontface.append(new_font)
+        fontface.set("fontCnt", str(len(fontface.findall(f"{_HH}font"))))
+        changed = True
+    fontfaces = header.element.find(f".//{_HH}fontfaces")
+    if fontfaces is not None:
+        fontfaces.set("itemCnt", str(len(fontfaces.findall(f"{_HH}fontface"))))
+    if changed:
+        header.mark_dirty()
+
+
+def _ensure_kice_font_faces(header: Any) -> None:
+    for face in _KICE_FONT_FACES:
+        _ensure_header_font_face(header, face)
+
+
+def _ensure_char_metric_child(char_pr: Any, local_name: str) -> Any:
+    child = char_pr.find(f"{_HH}{local_name}")
+    if child is not None:
+        return child
+    child = char_pr.makeelement(f"{_HH}{local_name}", {})
+    order = ["fontRef", "ratio", "spacing", "relSz", "offset"]
+    target_index = order.index(local_name)
+    insert_at = 0
+    for index, existing in enumerate(list(char_pr)):
+        existing_local = _local_name(existing.tag)
+        if existing_local in order and order.index(existing_local) < target_index:
+            insert_at = index + 1
+    char_pr.insert(insert_at, child)
+    return child
+
+
+def _apply_char_metrics(header: Any, char_pr_ids: list[str], *, ratio: int, spacing: int) -> None:
+    changed = False
+    lang_attrs = ("hangul", "latin", "hanja", "japanese", "other", "symbol", "user")
+    for char_pr_id in sorted(set(str(value) for value in char_pr_ids if value is not None)):
+        char_pr = header.element.find(f".//{_HH}charPr[@id='{char_pr_id}']")
+        if char_pr is None:
+            continue
+        for local_name, value in (("ratio", ratio), ("spacing", spacing)):
+            child = _ensure_char_metric_child(char_pr, local_name)
+            for attr in lang_attrs:
+                safe_value = str(int(value))
+                if child.get(attr) != safe_value:
+                    child.set(attr, safe_value)
+                    changed = True
+    if changed:
+        header.mark_dirty()
+
+
+def _math_style_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    math_spec = {key: value for key, value in spec.items() if key != "font"}
+    math_spec["font"] = "HancomEQN"
+    math_spec["color"] = "#111111"
+    return math_spec
 
 
 def _set_paragraph_lineseg(paragraph: Any, height: int) -> None:
@@ -480,16 +606,24 @@ def write_hwpx(
 
     doc = HwpxDocument.new()
     header = doc.headers[0]
+    if _is_kice_template(template):
+        _ensure_kice_font_faces(header)
+    style_specs = _style_specs_for_template(template)
+    style_line_heights = _style_line_heights_for_template(template)
 
     # paraPr(정렬) / charPr(크기) 참조를 한 번씩만 만들어 재사용한다.
-    pr_left = header.ensure_paragraph_alignment("LEFT")
-    pr_center = header.ensure_paragraph_alignment("CENTER")
-    pr_right = header.ensure_paragraph_alignment("RIGHT")
-    cp = {name: doc.ensure_run_style(**spec) for name, spec in _STYLE_SPECS.items()}
-    math_cp = {
-        name: doc.ensure_run_style(font="HancomEQN", color="#111111", **spec)
-        for name, spec in _STYLE_SPECS.items()
-    }
+    if _is_kice_template(template):
+        pr_left = header.ensure_paragraph_format(alignment="LEFT", line_spacing_percent=165)
+        pr_center = header.ensure_paragraph_format(alignment="CENTER", line_spacing_percent=165)
+        pr_right = header.ensure_paragraph_format(alignment="RIGHT", line_spacing_percent=165)
+    else:
+        pr_left = header.ensure_paragraph_alignment("LEFT")
+        pr_center = header.ensure_paragraph_alignment("CENTER")
+        pr_right = header.ensure_paragraph_alignment("RIGHT")
+    cp = {name: doc.ensure_run_style(**spec) for name, spec in style_specs.items()}
+    math_cp = {name: doc.ensure_run_style(**_math_style_spec(spec)) for name, spec in style_specs.items()}
+    if _is_kice_template(template):
+        _apply_char_metrics(header, list(cp.values()), ratio=95, spacing=-5)
     equation_counter = [0]
     flow_y = 0
     pending_column_break = False
@@ -511,7 +645,7 @@ def write_hwpx(
         **attrs: str,
     ) -> None:
         nonlocal flow_y, pending_column_break
-        para_height = _STYLE_LINE_HEIGHTS.get(style, 1000)
+        para_height = style_line_heights.get(style, 1000)
         if native_math and math_enabled:
             para_height = max(para_height, _native_math_height(str(text or "")))
         if (
@@ -549,7 +683,7 @@ def write_hwpx(
             math_char_pr_id_ref=math_cp[style],
             native_math=native_math and math_enabled,
             equation_counter=equation_counter,
-            min_line_height=_STYLE_LINE_HEIGHTS.get(style, 1000),
+            min_line_height=style_line_heights.get(style, 1000),
         )
         flow_y += para_height
 
@@ -753,7 +887,7 @@ def write_hwpx(
         return False
 
     def estimate_single_para_height(text: str, style: str = "body", *, math_enabled: bool = True) -> int:
-        height = _STYLE_LINE_HEIGHTS.get(style, 1000)
+        height = style_line_heights.get(style, 1000)
         if native_math and math_enabled:
             height = max(height, _native_math_height(str(text or "")))
         return height
@@ -928,7 +1062,7 @@ def write_hwpx(
                     native_math=native_math,
                     equation_counter=equation_counter,
                     cell_para_pr_id_ref=pr_left,
-                    min_line_height=_STYLE_LINE_HEIGHTS["body"],
+                    min_line_height=style_line_heights["body"],
                     cell_line_limit=24,
                 )
 
@@ -1186,7 +1320,7 @@ def write_hwpx(
                 native_math=native_math,
                 equation_counter=equation_counter,
                 cell_para_pr_id_ref=pr_left,
-                min_line_height=_STYLE_LINE_HEIGHTS["body"],
+                min_line_height=style_line_heights["body"],
                 content_width=content_width,
                 height=table_height,
                 paragraph_attrs=reserve_object_height(table_height),

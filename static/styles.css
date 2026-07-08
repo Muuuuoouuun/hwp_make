@@ -628,6 +628,10 @@ textarea:hover {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
+.import-actions .wide-action {
+  grid-column: 1 / -1;
+}
+
 .common-metadata {
   border: 1px solid var(--line);
   border-radius: var(--r);

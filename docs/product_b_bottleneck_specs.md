@@ -61,6 +61,52 @@ HWP 추출 수식에서 `sqrt5`, `sqrt(n)`, `sqrt{a_{n}...}`, `sqrt{{x+1} over {
 
 ---
 
+## #3a 평가원/학평 폰트·간격 기준 — 📌 지침 추가
+
+**목표:** HWP/PDF → HWPX 변환 결과가 “텍스트가 들어간 문서”가 아니라 실제 평가원·교육청 시험지 편집본처럼 보이도록, 폰트/크기/줄간격/장평/자간을 템플릿 기준값으로 관리한다. 수식 구현과 레이아웃 겹침 검증은 이 타이포그래피 기준을 전제로 다시 캘리브레이션해야 한다.
+
+- **한글 본문(국어·탐구·수학 지문):** 기본값은 `신명조` 또는 `HY신명조`. 일반 바탕체나 함초롬바탕은 폭과 획감이 달라 원본 대체값으로 보지 않는다. 폰트가 없는 환경의 preview fallback은 허용하되, HWPX 내부 스타일명은 원본 계열을 유지한다.
+- **영어 지문 및 영문 표기:** `Times New Roman`을 기본값으로 한다. 영어 과목 지문, 선택지 내 영문, 타 과목의 영문 단위/기호 표기에 적용한다.
+- **수학 과목 및 수식:** 변수(`x`, `y`, `n`, `a`, `f` 등)는 `Times New Roman` 이탤릭체 기준. 그 외 연산자·괄호·분수·루트·첨자·기호는 한글 수식 편집기 기본 수식 폰트 체계를 우선한다. 즉, 일반 텍스트 스타일로 수식을 흉내 내지 않고 `hp:equation`/Hancom EQN의 네이티브 수식으로 유지한다.
+- **문항 번호·타이틀·안내 문구:** 문항 번호, 과목명, 상단 안내, 구역 제목은 `돋움` 또는 `중고딕` 계열을 기본값으로 한다. 본문 명조 계열과 섞일 때 번호/타이틀만 고딕으로 분리되어야 한다.
+- **평가원/교육청 차이:** 과거 일부 교육청 편집본은 바탕체 또는 시스템 기본 서체 흔적이 있을 수 있으나, 현재 목표 템플릿은 평가원 시각 기준에 맞춘 `신명조` + `Times New Roman` 조합으로 통일한다.
+- **초기 실무값:** 본문 크기 10~11pt, 줄간격 160~170%, 자간/장평은 HWP 샘플에서 추출한 값으로 보정한다. 장평은 특히 신명조의 좁은 폭감을 재현하는 핵심이므로, 임의 기본값으로 고정하지 않는다.
+
+**구현 메모**
+
+- ✅ `scripts/analyze_hwp_templates.py` 추가: 원본 `.hwp`를 `rhwp.export_hwpx()`로 풀고 `header.xml`/`section0.xml`에서 font face, charPr, paraPr, 줄간격, 장평, 자간, 수식 EQN 패턴, 표/그림/컬럼 정보를 리포트한다.
+- ✅ `hwpx_writer_v2.py` KICE writer 반영: `kice_*` 템플릿은 `신명 중명조`/`한양신명조`/`HY신명조`/`Times New Roman`/`돋움`/`중고딕`/`HancomEQN` font face를 header에 보장하고, 본문 11pt, 장평 95, 자간 -5, 줄간격 165%를 적용한다. `kice_english` 본문은 `Times New Roman`을 우선한다.
+- ✅ `scripts/verify_kice_typography.py` 추가: 생성 HWPX의 font face, charPr 장평/자간, 165% paraPr, native equation `HancomEQN`을 XML 레벨에서 검증한다.
+- HWP 샘플 분석 스크립트는 문단/글자 모양에서 font family, point size, line spacing, char scale(장평), letter spacing(자간), `raw_style_id`를 같이 뽑아야 한다.
+- writer 쪽에는 `kice_math`, `kice_korean`, `kice_english`, `kice_social_science` 같은 템플릿별 style map을 두고, 본문/영문/수식/번호/타이틀의 폰트 역할을 분리한다.
+- 레이아웃 높이 추정기는 줄간격 160~170%와 실제 장평/자간을 반영한 뒤 다시 조정한다. 지금처럼 수식/선택지 싱크가 맞아도 폰트 폭이 달라지면 줄바꿈과 column overflow가 다시 변할 수 있다.
+- HWP 샘플을 “까는” 다음 단계에서는 텍스트만 추출하지 말고, `rhwp.to_ir()` 기반으로 표/셀/문단/스타일/수식 EQN/이미지의 구조와 스타일을 함께 비교한다.
+
+**검증 관문**
+
+- 샘플 HWP 4종 분석 리포트에 본문/번호/타이틀/영문/수식별 font family, size, line spacing, 장평, 자간 요약을 출력한다.
+- 생성 HWPX를 다시 열어 같은 항목을 추출하고, 샘플 기준과 diff를 낸다.
+- 수식 회귀 테스트는 `hp:equation` 개수와 EQN 문자열뿐 아니라 수식 주변 줄바꿈, 선택지 위치, column overflow 0을 같이 확인한다.
+
+---
+
+## #3b 인식-입력 알고리즘 병합 기준 — 🔧진행중
+
+**현재 결론:** PDF/HWP 입력은 목적이 다른 두 경로를 명확히 분리해서 병합한다. 문제은행 편집용은 기존 `/api/import` → recognition/storage → `hwpx_writer_v2` 경로를 유지하고, 실물 시험지 싱크용은 `/api/pdf-layout-export` → `pdf_layout_writer.write_pdf_flow_hwpx()` 경로로 바로 HWPX를 만든다. 두 경로를 한 버튼에 섞으면 “문항 DB 편집”과 “원본 시험지 복원”의 성공 기준이 달라져 회귀 원인을 추적하기 어렵다.
+
+- **문제 인식/DB 입력 경로:** PDF를 문항 단위로 분리해 stem/choice/image/layout metadata를 저장한다. 이후 사용자가 문항을 골라 새 시험지를 재구성한다.
+- **원본 레이아웃 HWPX 경로:** PDF 한 부를 그대로 편집 가능한 HWPX로 재생성한다. 텍스트는 문단/표 셀로 넣고, 전체 페이지 이미지 폴백은 금지한다. 표·도표·그림처럼 구조화가 위험한 일부 영역만 지역 이미지로 보존한다.
+- **HWP 템플릿 캘리브레이션:** `scripts/analyze_hwp_templates.py`로 실제 `.hwp` 샘플을 HWPX로 export 후 header/section 스타일을 분석한다. 2026-07-08 실행 결과, 평가원 양식은 본문 `신명 중명조`/영어 `Times New Roman`, 장평 95, 자간 -5 계열이 반복 확인됐다. 교육청 국어 샘플은 `한컴바탕`, 장평 95, 자간 -3 계열이라 평가원 양식과 별도 profile로 다뤄야 한다.
+- **앱 진입점:** 파일 업로드 영역에서 `가져와서 편집`은 DB 입력, `PDF 원본 레이아웃 HWPX`는 직접 HWPX 복원으로 동작한다.
+
+**검증 관문**
+
+- `scripts/verify_pdf_layout_export_api.py`: 앱 API에서 PDF 원본 레이아웃 HWPX를 생성하고 기존 HWPX 구조 검증기를 통과해야 한다.
+- `scripts/verify_pdf_layout_hwpx.py --render`: 결과 HWPX가 rhwp 렌더링 가능하고 full-page raster fallback이 없어야 한다.
+- `scripts/probe_hwp_open.ps1`: 설치된 한글 `HWPFrame.HwpObject` COM으로 결과물을 직접 열 수 있어야 한다.
+
+---
+
 ## #4 혼합문서 부분폴백 부재 (파일단위 all-or-nothing) — ✅완료(결정론 이미지 폴백)
 
 **근본원인:** `pipeline.py:227` `any_problems=any(...)` + `importers.py:191` `if not result.found: return None`(found=문항>0). 혼합문서면 인식이 파일 전체 소유 → `pipeline.py:246` `if not page.problems: continue`에서 마커 없는 페이지 콘텐츠 통째 소실(레거시도 인식도 처리 안 함). `empty_page_numbers`엔 판정만 기록.

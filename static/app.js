@@ -25,6 +25,7 @@ const els = {
   dropzone: document.querySelector("#dropzone"),
   importButton: document.querySelector("#importButton"),
   quickImportButton: document.querySelector("#quickImportButton"),
+  layoutExportButton: document.querySelector("#layoutExportButton"),
   collectUrl: document.querySelector("#collectUrl"),
   collectButton: document.querySelector("#collectButton"),
   quickCollectButton: document.querySelector("#quickCollectButton"),
@@ -953,13 +954,17 @@ function setImportButtonsDisabled(buttons, disabled) {
   for (const button of buttons.filter(Boolean)) button.disabled = disabled;
 }
 
+function isPdfFile(file) {
+  return file?.type === "application/pdf" || /\.pdf$/i.test(file?.name || "");
+}
+
 async function importFiles({ quick = false } = {}) {
   const files = Array.from(els.fileInput.files || []);
   if (!files.length) {
     toast("파일을 선택하세요.");
     return;
   }
-  setImportButtonsDisabled([els.importButton, els.quickImportButton], true);
+  setImportButtonsDisabled([els.importButton, els.quickImportButton, els.layoutExportButton], true);
   try {
     let total = 0;
     const notices = [];
@@ -997,7 +1002,50 @@ async function importFiles({ quick = false } = {}) {
   } catch (error) {
     toast(`가져오기 실패: ${error.message}`);
   } finally {
-    setImportButtonsDisabled([els.importButton, els.quickImportButton], false);
+    setImportButtonsDisabled([els.importButton, els.quickImportButton, els.layoutExportButton], false);
+  }
+}
+
+async function exportPdfLayoutFiles() {
+  const files = Array.from(els.fileInput.files || []);
+  if (!files.length) {
+    toast("PDF 파일을 선택하세요.");
+    return;
+  }
+  const pdfFiles = files.filter(isPdfFile);
+  if (!pdfFiles.length) {
+    toast("PDF 파일만 원본 레이아웃 HWPX로 만들 수 있습니다.");
+    return;
+  }
+
+  setImportButtonsDisabled([els.importButton, els.quickImportButton, els.layoutExportButton], true);
+  try {
+    const results = [];
+    for (const file of pdfFiles) {
+      const result = await api("/api/pdf-layout-export", {
+        method: "POST",
+        body: JSON.stringify({
+          filename: file.name,
+          data_base64: await fileToBase64(file),
+          boxed_passages: true,
+        }),
+      });
+      results.push(result);
+      if (result.export?.url) {
+        const link = document.createElement("a");
+        link.href = result.export.url;
+        link.download = result.export.name || `${file.name}.hwpx`;
+        document.body.append(link);
+        link.click();
+        link.remove();
+      }
+    }
+    await loadExportHistory();
+    toast(`${results.length}개 PDF를 원본 레이아웃 HWPX로 만들었습니다.`);
+  } catch (error) {
+    toast(`원본 레이아웃 변환 실패: ${error.message}`);
+  } finally {
+    setImportButtonsDisabled([els.importButton, els.quickImportButton, els.layoutExportButton], false);
   }
 }
 
@@ -1261,6 +1309,7 @@ els.dropzone.addEventListener("drop", (event) => {
 });
 els.importButton.addEventListener("click", () => importFiles({ quick: false }));
 els.quickImportButton.addEventListener("click", () => importFiles({ quick: true }));
+els.layoutExportButton.addEventListener("click", exportPdfLayoutFiles);
 els.collectButton.addEventListener("click", () => collectFromUrl({ quick: false }));
 els.quickCollectButton.addEventListener("click", () => collectFromUrl({ quick: true }));
 els.collectUrl.addEventListener("keydown", (event) => {

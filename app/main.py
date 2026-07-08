@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import collector, docx_writer, exam_templates, hwpx_writer_v2, importers, preview, storage
+from . import collector, docx_writer, exam_templates, hwpx_writer_v2, importers, pdf_layout_writer, preview, storage
 
 
 STATIC_DIR = storage.PROJECT_ROOT / "static"
@@ -61,6 +61,13 @@ class ImportPayload(BaseModel):
     filename: str
     data_base64: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PdfLayoutExportPayload(BaseModel):
+    filename: str
+    data_base64: str
+    max_pages: int | None = Field(default=None, ge=1, le=200)
+    boxed_passages: bool = True
 
 
 class TextInputPayload(BaseModel):
@@ -114,6 +121,16 @@ def _unique_export_path(filename: str) -> Path:
         if not candidate.exists():
             return candidate
     return path
+
+
+def _export_file_item(path: Path) -> dict[str, Any]:
+    stat = path.stat()
+    return {
+        "name": path.name,
+        "size": stat.st_size,
+        "format": path.suffix.lstrip(".").lower(),
+        "url": f"/files/exports/{path.name}",
+    }
 
 
 @app.get("/")
@@ -219,6 +236,43 @@ def import_file(payload: ImportPayload) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - 임포터 라이브러리별 오류를 500으로 감싼다
         raise HTTPException(status_code=500, detail=f"가져오기 중 오류가 발생했습니다: {exc}") from exc
     return {"ok": True, **result}
+
+
+@app.post("/api/pdf-layout-export")
+def export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
+    """Create an editable HWPX that follows the original PDF page layout."""
+    try:
+        data = importers.decode_base64(payload.data_base64)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"PDF 데이터 디코딩 실패: {exc}") from exc
+    if not data.startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail="PDF 파일만 원본 레이아웃 HWPX로 만들 수 있습니다.")
+
+    storage.ensure_dirs()
+    rel_path = importers.save_upload(payload.filename, data)
+    source_path = (storage.DATA_DIR / rel_path).resolve()
+    title = f"{Path(payload.filename).stem or 'PDF'}_원본_레이아웃"
+    output_path = _unique_export_path(_safe_export_name(title, "hwpx"))
+    try:
+        stats = pdf_layout_writer.write_pdf_flow_hwpx(
+            source_path,
+            output_path,
+            max_pages=payload.max_pages,
+            boxed_passages=payload.boxed_passages,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"PDF 레이아웃 변환 실패: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - PDF/HWPX 변환 오류를 API 오류로 감싼다.
+        raise HTTPException(status_code=500, detail=f"PDF 레이아웃 HWPX 생성 중 오류가 발생했습니다: {exc}") from exc
+
+    return {
+        "ok": True,
+        "mode": "pdf_flow_hwpx",
+        "source": {"name": payload.filename, "path": rel_path},
+        "export": _export_file_item(output_path),
+        "stats": stats,
+        "notices": ["텍스트는 편집 가능한 문단/표로 넣고, 표·그림 영역만 지역 이미지로 보존했습니다."],
+    }
 
 
 @app.post("/api/import-text")
