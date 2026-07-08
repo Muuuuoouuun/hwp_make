@@ -413,11 +413,18 @@ stacked_previous_fraction = math_text.normalize_recognized_math_layout_text("3t2
 if "x=t3-\\frac{3t2-6t}{2}" not in stacked_previous_fraction:
     failures.append(f"Recognized math layout normalization: previous-line numerator fraction failed {stacked_previous_fraction!r}")
 previous_text_guard = math_text.normalize_recognized_math_layout_text("\ubb38\uc7a5\nP(A)=\ue06d5")
-if "\\frac" in previous_text_guard:
-    failures.append(f"Recognized math layout normalization: text previous line was over-converted {previous_text_guard!r}")
+if "\ubb38\uc7a5" not in previous_text_guard or r"P(A)=\frac{1}{5}" not in previous_text_guard:
+    failures.append(f"Recognized math layout normalization: text previous line guard failed {previous_text_guard!r}")
 previous_choice_guard = math_text.normalize_recognized_math_layout_text("\u2460\nx=\ue06d2")
-if "\\frac" in previous_choice_guard:
-    failures.append(f"Recognized math layout normalization: choice previous line was over-converted {previous_choice_guard!r}")
+if "\u2460\n" not in previous_choice_guard or r"x=\frac{1}{2}" not in previous_choice_guard:
+    failures.append(f"Recognized math layout normalization: choice previous line guard failed {previous_choice_guard!r}")
+unit_fraction_candidate = math_text.normalize_recognized_math_layout_text(
+    "P(A)=\ue06d5\ncos(x)=-\ue06d3\nx\\to0\ue06d"
+)
+if r"P(A)=\frac{1}{5}" not in unit_fraction_candidate or r"cos(x)=-\frac{1}{3}" not in unit_fraction_candidate:
+    failures.append(f"Recognized math layout normalization: unit numerator fractions failed {unit_fraction_candidate!r}")
+if "x\\to0□" in unit_fraction_candidate or "x\\to0\ue06d" in unit_fraction_candidate:
+    failures.append(f"Recognized math layout normalization: limit trailing placeholder cleanup failed {unit_fraction_candidate!r}")
 choice_fraction_stem, choice_fraction_choices = importers._split_stem_and_choices(
     "\ubb38\uc81c\n7\n3\n4\n17\n9\n\u2460\ue06d\n\u2463\ue06d\n\u2464\ue06d\n\u2461\ue06d4\n\u2462\ue06d5\n10\n20\n10"
 )
@@ -436,6 +443,41 @@ if len(choice_fraction_guard_choices) == 5 and any(r"\frac" in choice for choice
     failures.append(
         "PDF choice fraction repair over-converted an incomplete numerator block "
         f"{choice_fraction_guard_choices!r} stem={choice_fraction_guard_stem!r}"
+    )
+choice_exponent_source = math_text.normalize_recognized_math_layout_text(
+    "문제\n13\n7\n5\n8\n17\n①2\ue06d\n⑤2\ue06d\n②2\ue06d3\n③2\ue06d2\n④2\ue06d3\n6\n6"
+)
+if "④2^{\\frac{6}{3}}" in choice_exponent_source:
+    failures.append(f"Choice exponent guard: math_text pre-converted a grouped choice row {choice_exponent_source!r}")
+choice_exponent_stem, choice_exponent_choices = importers._split_stem_and_choices(choice_exponent_source)
+if choice_exponent_choices != [
+    r"2^{\frac{13}{6}}",
+    r"2^{\frac{7}{3}}",
+    r"2^{\frac{5}{2}}",
+    r"2^{\frac{8}{3}}",
+    r"2^{\frac{17}{6}}",
+]:
+    failures.append(f"PDF choice exponent-fraction repair failed {choice_exponent_choices!r} stem={choice_exponent_stem!r}")
+choice_forward_fraction_stem, choice_forward_fraction_choices = importers._split_stem_and_choices(
+    "문제\n②\ue06d\n③\ue06d\n①\ue06d\n√3(3+8ln2)\n√3(5+12ln2)\n√3(1+12ln2)\n16\n24\n16"
+)
+if choice_forward_fraction_choices != [
+    r"\frac{√3(1+12ln2)}{16}",
+    r"\frac{√3(3+8ln2)}{16}",
+    r"\frac{√3(5+12ln2)}{24}",
+]:
+    failures.append(
+        f"PDF choice forward fraction repair failed {choice_forward_fraction_choices!r} "
+        f"stem={choice_forward_fraction_stem!r}"
+    )
+choice_unit_fraction_source = math_text.normalize_recognized_math_layout_text(
+    "문제\n①\ue06d5\n②-\ue06d3\n③2\ue06d3"
+)
+choice_unit_fraction_stem, choice_unit_fraction_choices = importers._split_stem_and_choices(choice_unit_fraction_source)
+if choice_unit_fraction_choices != [r"\frac{1}{5}", r"-\frac{1}{3}", "2□3"]:
+    failures.append(
+        f"PDF choice unit fraction repair failed {choice_unit_fraction_choices!r} "
+        f"stem={choice_unit_fraction_stem!r}"
     )
 p_over_q_placeholder = math_text.normalize_recognized_math_layout_text(
     "\ud655\ub960\uc740 \ue06dp\np+q\uc758 \uac12\uc744 \uad6c\ud558\uc2dc\uc624. (\ub2e8, p\uc640 q\ub294 \uc11c\ub85c\uc18c)"

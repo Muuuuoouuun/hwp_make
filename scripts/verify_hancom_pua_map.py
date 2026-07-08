@@ -52,6 +52,7 @@ def main() -> int:
     # 폰트 스코프
     check("폰트 스코프 HyhwpEQ=참, Arial=거짓", is_hancom_eq_font("ABCDEE+HyhwpEQ") and not is_hancom_eq_font("Arial"))
     check("recover_pua_char 미매핑→None", recover_pua_char("") is None and recover_pua_char("A") is None)
+    check("케이스 하단 구조조각 E07A 제거", recover_pua_char(chr(0xE07A)) == "")
     check("표 크기(문자52+숫자10+기타)", len(m) >= 71, f"len={len(m)}")
 
     # 커버리지(실물 PDF 있을 때만, informational)

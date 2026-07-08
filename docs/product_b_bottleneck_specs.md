@@ -40,6 +40,8 @@
 
 - ✅ **매핑표 완료:** 실물 평가원 PDF 18부(사용자 제공)에서 각 E0xx 글리프를 렌더·육안 확정 → `app/hancom_pua_map.py`(신규). 인코딩이 완전 순차적(대문자 A–Z=U+E000+offset, 소문자 a–z=U+E0E5+offset, 숫자 1–9=E034–E03C·0=E03D)임을 확인 → **문서 독립 100% 결정론**. `scripts/verify_hancom_pua_map.py`가 매핑 + 실물 커버리지(**12025/13097 = 91.8%**)를 검증.
 - ✅ **배선 완료:** `math_text.py`에서 `SYMBOL_PUA_MAP = {**_symbol_pua_map(), **HANCOM_PUA_MAP}` 한 곳 병합 → `is_recoverable_pua_math_char`/정규화 전 함수에 자동 전파(단일 지점). 실물 `26-6월 수학` 재검증: **before 문항46/수식0/이미지46 → after 문항46/수식185/이미지25/reopen=True**(21문항이 이미지→편집텍스트, 복원 수식이 hp:equation 185개로 방출).
+- ✅ **2026-07-08 추가 보강:** `E07A`는 케이스 큰 중괄호 하단 구조 조각으로 확인되어 텍스트에서는 제거 처리. `E06D`는 분수선/근호/윗줄 구조 힌트로 유지하되, 선택지 전용 재조립을 추가했다. 지원 패턴: `분자열 → ①2□/②2□3... → 분모열` 지수분수, `①□/②□ → 분자열 → 분모열` 분수, 선택지 단독 `□n`/`-□n` → `\frac{1}{n}`. `math_text` 쪽은 선택지 라인을 개별 지수로 선변환하지 않도록 가드해 그룹 복원이 우선된다.
+- ✅ **실물 PDF QA 현재값:** `scripts/verify_real_pdf_math_samples.py` 기준 4종 모두 문항 46개, overflow 0, native equation malformed 0. 남은 `□`는 stem의 복잡한 2D 구조(큰 분수/극한/도형식) 중심이며 choice 잔여는 `25수능 10`, `26-6월 12`, `수학 2교시 2`, `2025 홀수형 0`까지 축소.
 - 🔧 **후속(2D 구조 복원):** 선형 치환이라 위/아래첨자·분수·근호는 평탄화(x²→x2, 삼각·방정식·부등식은 100% 정확). 글리프 bbox y-offset으로 super/subscript·fraction 재구성이 다음 단계(pdf_segment의 bbox 활용).
 
 ### 곁다리: 그리스문자 커버리지 4곳 동기화 — ✅완료

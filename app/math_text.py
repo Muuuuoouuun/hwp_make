@@ -160,6 +160,15 @@ STACKED_BASE_AFTER_EXPONENT_RE = re.compile(
 )
 P_OVER_Q_CONTEXT_RE = re.compile(r"p\s*\+\s*q|\bp\s*,\s*q\b|p\s*와\s*q")
 P_OVER_Q_PLACEHOLDER_RE = re.compile(rf"[{HANCOM_MATH_PLACEHOLDER_CHARS}]p(?![A-Za-z0-9{GREEK_RANGE}])")
+UNIT_NUMERATOR_FRACTION_RE = re.compile(
+    rf"(?P<prefix>^|[=(:,+\-*/<>\u2264\u2265]\s*)"
+    rf"[{HANCOM_MATH_PLACEHOLDER_CHARS}](?P<den>[0-9]{{1,3}})(?![0-9])",
+    re.MULTILINE,
+)
+LIMIT_TRAILING_PLACEHOLDER_RE = re.compile(
+    rf"(?P<script>[A-Za-z0-9{GREEK_RANGE}]+\s*(?:\u2192|->|\\to)\s*[-+\u221eA-Za-z0-9{GREEK_RANGE}]+)"
+    rf"[{HANCOM_MATH_PLACEHOLDER_CHARS}]+"
+)
 STACKED_FRACTION_HEAD_OPERATORS = set("=+-−*/×÷(<[{,:")
 MATH_CONNECTOR_RE = re.compile(
     r"^\s*(?:(?:->|=>)|\\(?:to|leq|geq|neq|approx|times|div|cdot|pm|mp|in|notin|cup|cap|subset|supset|subseteq|supseteq|circ)(?![A-Za-z])|[+\-*\/=<>≤≥≠≈×÷±∈∉∪∩⊂⊃⊆⊇∘^_()[\]{}|!])+\s*$"
@@ -469,9 +478,20 @@ def _looks_like_stacked_fraction_numerator(value: str) -> bool:
     return bool(STACKED_FRACTION_DENOMINATOR_RE.match(stripped))
 
 
+def _safe_stacked_fraction_suffix(value: str) -> bool:
+    stripped = str(value or "").strip()
+    if not stripped:
+        return True
+    if stripped[:1] in "([{":
+        return False
+    return not any(ch in stripped for ch in HANCOM_MATH_PLACEHOLDER_CHARS)
+
+
 def _can_repair_stacked_fraction_exponent_head(head: str) -> bool:
     stripped = str(head or "").rstrip()
     if not stripped or KOREAN_TEXT_RE.search(stripped):
+        return False
+    if stripped[:1] in "①②③④⑤":
         return False
     if _can_repair_simple_fraction_head(stripped):
         return False
@@ -572,6 +592,7 @@ def _repair_stacked_simple_fractions_and_cases(value: str) -> str:
                     and not KOREAN_TEXT_RE.search(head)
                     and _looks_like_stacked_fraction_numerator(previous)
                     and denominator
+                    and _safe_stacked_fraction_suffix(suffix)
                     and not (has_p_over_q_context and denominator == "p")
                 ):
                     repaired[-1] = f"{head}\\frac{{{previous}}}{{{denominator}}}{suffix}".rstrip()
@@ -589,6 +610,7 @@ def _repair_stacked_simple_fractions_and_cases(value: str) -> str:
                 if (
                     numerator
                     and denominator
+                    and _safe_stacked_fraction_suffix(suffix)
                     and not KOREAN_TEXT_RE.search(numerator)
                     and not (has_p_over_q_context and denominator == "p")
                 ):
@@ -615,12 +637,25 @@ def _repair_p_over_q_placeholders(value: str) -> str:
     return P_OVER_Q_PLACEHOLDER_RE.sub(replace, text)
 
 
+def _repair_unit_numerator_fractions(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        return f"{match.group('prefix')}\\frac{{1}}{{{match.group('den')}}}"
+
+    return UNIT_NUMERATOR_FRACTION_RE.sub(replace, str(value or ""))
+
+
+def _cleanup_unresolved_layout_placeholders(value: str) -> str:
+    text = LIMIT_TRAILING_PLACEHOLDER_RE.sub(r"\g<script>", str(value or ""))
+    return _repair_unit_numerator_fractions(text)
+
+
 def normalize_recognized_math_layout_text(text: str) -> str:
     """Recover known glyphs plus simple PDF line-layout math structures."""
     value = _repair_stacked_limit_fractions(normalize_recognized_math_text(text))
     value = _repair_stacked_fraction_exponents(value)
     value = _repair_stacked_simple_fractions_and_cases(value)
-    return _repair_p_over_q_placeholders(value)
+    value = _repair_p_over_q_placeholders(value)
+    return _cleanup_unresolved_layout_placeholders(value)
 
 
 @dataclass(slots=True)

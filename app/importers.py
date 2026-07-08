@@ -54,7 +54,17 @@ PDF_CHOICE_FRACTION_RE = re.compile(
     rf"^\s*(?P<label>[{PDF_CHOICE_FRACTION_LABELS}])\s*(?P<sign>-?)"
     rf"\s*[{PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS}](?P<den>[A-Za-z0-9α-ωΑ-Ωπ∞+\-.]+)?\s*$"
 )
-PDF_CHOICE_FRACTION_PART_RE = re.compile(r"^[A-Za-z0-9α-ωΑ-Ωπ∞+\-./]+$")
+PDF_CHOICE_EXPONENT_FRACTION_RE = re.compile(
+    rf"^\s*(?P<label>[{PDF_CHOICE_FRACTION_LABELS}])\s*"
+    rf"(?P<base>[A-Za-z0-9α-ωΑ-Ωπ∞+\-.]+)"
+    rf"\s*[{PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS}](?P<den>[A-Za-z0-9α-ωΑ-Ωπ∞+\-.]+)?\s*$"
+)
+PDF_CHOICE_UNIT_FRACTION_RE = re.compile(
+    rf"^\s*(?P<sign>-?)\s*[{PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS}](?P<den>[0-9]{{1,3}})\s*$"
+)
+PDF_CHOICE_FRACTION_PART_RE = re.compile(
+    r"^[A-Za-z0-9α-ωΑ-Ωπ∞√∑∫+\-./*(){}\[\]\\_=^]+$"
+)
 ANSWER_LINE_RE = re.compile(r"^\s*(?:정답|답)(?:\s*[:：]|\s+)(?P<value>.+?)\s*$")
 EXPLANATION_LINE_RE = re.compile(r"^\s*(?:해설|풀이)(?:(?:\s*[:：]|\s+)(?P<value>.*))?\s*$")
 SCORE_MARKER_RE = re.compile(r"\[\s*\d+\s*점\s*\]")
@@ -586,7 +596,7 @@ def _choice_line_body(
 
 def _pdf_choice_fraction_part(value: str) -> bool:
     stripped = str(value or "").strip()
-    if not stripped or len(stripped) > 40:
+    if not stripped or len(stripped) > 80:
         return False
     if any(marker in stripped for marker in PDF_CHOICE_FRACTION_LABELS + PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS):
         return False
@@ -595,63 +605,217 @@ def _pdf_choice_fraction_part(value: str) -> bool:
     return bool(PDF_CHOICE_FRACTION_PART_RE.match(stripped))
 
 
+def _pdf_choice_label_order(label: str) -> int:
+    try:
+        return PDF_CHOICE_FRACTION_LABELS.index(label)
+    except ValueError:
+        return 99
+
+
+def _pdf_choice_exponent_base(value: str) -> bool:
+    stripped = str(value or "").strip()
+    return bool(stripped) and bool(re.search(r"[A-Za-z0-9α-ωΑ-Ωπ∞)\]}]", stripped))
+
+
+def _pdf_choice_run(
+    lines: list[str],
+    index: int,
+    pattern: re.Pattern[str],
+) -> tuple[list[re.Match[str]], int] | None:
+    matches: list[re.Match[str]] = []
+    cursor = index
+    while cursor < len(lines) and len(matches) < 5:
+        match = pattern.match(lines[cursor].strip())
+        if not match:
+            break
+        matches.append(match)
+        cursor += 1
+    labels = [match.group("label") for match in matches]
+    if len(matches) < 2 or len(set(labels)) != len(labels):
+        return None
+    return matches, cursor
+
+
+def _pdf_choice_denominators(
+    lines: list[str],
+    cursor: int,
+    missing_count: int,
+) -> tuple[list[str], int] | None:
+    denominators: list[str] = []
+    while (
+        len(denominators) < missing_count
+        and cursor < len(lines)
+        and _pdf_choice_fraction_part(lines[cursor])
+    ):
+        denominators.append(lines[cursor].strip())
+        cursor += 1
+    if len(denominators) != missing_count:
+        return None
+    return denominators, cursor
+
+
+def _render_pdf_choice_fraction_rows(
+    matches: list[re.Match[str]],
+    numerator_by_label: dict[str, str],
+    denominator_by_label: dict[str, str],
+    *,
+    exponent: bool,
+) -> list[str]:
+    rows: list[str] = []
+    for match in sorted(matches, key=lambda item: _pdf_choice_label_order(item.group("label"))):
+        label = match.group("label")
+        numerator = numerator_by_label[label]
+        denominator = denominator_by_label[label]
+        if exponent:
+            rows.append(f"{label}{match.group('base')}^{{\\frac{{{numerator}}}{{{denominator}}}}}")
+        else:
+            sign = "-" if match.groupdict().get("sign") else ""
+            rows.append(f"{label}{sign}\\frac{{{numerator}}}{{{denominator}}}")
+    return rows
+
+
+def _repair_pdf_choice_layout_after_numerators(
+    lines: list[str],
+    index: int,
+    repaired: list[str],
+    pattern: re.Pattern[str],
+    *,
+    exponent: bool,
+) -> tuple[list[str], int, int] | None:
+    run = _pdf_choice_run(lines, index, pattern)
+    if run is None:
+        return None
+    matches, cursor = run
+    count = len(matches)
+    if exponent and not all(_pdf_choice_exponent_base(match.group("base")) for match in matches):
+        return None
+    if len(repaired) < count:
+        return None
+    numerator_rows = [line.strip() for line in repaired[-count:]]
+    if not all(_pdf_choice_fraction_part(row) for row in numerator_rows):
+        return None
+
+    missing_count = sum(1 for match in matches if not (match.groupdict().get("den") or ""))
+    denominator_rows, denominator_cursor = _pdf_choice_denominators(lines, cursor, missing_count) or (None, None)
+    if denominator_rows is None or denominator_cursor is None:
+        return None
+
+    labels = sorted((match.group("label") for match in matches), key=_pdf_choice_label_order)
+    numerator_by_label = {label: numerator_rows[offset] for offset, label in enumerate(labels)}
+    denominator_iter = iter(denominator_rows)
+    denominator_by_label: dict[str, str] = {}
+    for match in matches:
+        label = match.group("label")
+        denominator_by_label[label] = (match.groupdict().get("den") or next(denominator_iter)).strip()
+
+    return (
+        _render_pdf_choice_fraction_rows(
+            matches,
+            numerator_by_label,
+            denominator_by_label,
+            exponent=exponent,
+        ),
+        denominator_cursor,
+        count,
+    )
+
+
+def _repair_pdf_choice_layout_before_parts(
+    lines: list[str],
+    index: int,
+    pattern: re.Pattern[str],
+    *,
+    exponent: bool,
+) -> tuple[list[str], int, int] | None:
+    run = _pdf_choice_run(lines, index, pattern)
+    if run is None:
+        return None
+    matches, cursor = run
+    count = len(matches)
+    if exponent and not all(_pdf_choice_exponent_base(match.group("base")) for match in matches):
+        return None
+    if any(match.groupdict().get("den") for match in matches):
+        return None
+    numerator_rows = [line.strip() for line in lines[cursor : cursor + count]]
+    if len(numerator_rows) != count or not all(_pdf_choice_fraction_part(row) for row in numerator_rows):
+        return None
+    denominator_cursor = cursor + count
+    denominator_rows = [line.strip() for line in lines[denominator_cursor : denominator_cursor + count]]
+    if len(denominator_rows) != count or not all(_pdf_choice_fraction_part(row) for row in denominator_rows):
+        return None
+
+    numerator_by_label = {
+        match.group("label"): numerator_rows[offset] for offset, match in enumerate(matches)
+    }
+    denominator_by_label = {
+        match.group("label"): denominator_rows[offset] for offset, match in enumerate(matches)
+    }
+    return (
+        _render_pdf_choice_fraction_rows(
+            matches,
+            numerator_by_label,
+            denominator_by_label,
+            exponent=exponent,
+        ),
+        denominator_cursor + count,
+        0,
+    )
+
+
 def _repair_pdf_choice_fraction_layout(text: str) -> str:
     """Rejoin PDF choice fractions split into numerator/placeholder/denominator rows."""
     lines = str(text or "").splitlines()
-    if len(lines) < 11:
+    if len(lines) < 6:
         return str(text or "")
 
     repaired: list[str] = []
     index = 0
     while index < len(lines):
-        if index >= 5:
-            numerator_rows = [line.strip() for line in lines[index - 5 : index]]
-            choice_matches: list[re.Match[str]] = []
-            cursor = index
-            while cursor < len(lines) and len(choice_matches) < 5:
-                match = PDF_CHOICE_FRACTION_RE.match(lines[cursor].strip())
-                if not match:
-                    break
-                choice_matches.append(match)
-                cursor += 1
+        converted: tuple[list[str], int, int] | None = None
+        for pattern, exponent in (
+            (PDF_CHOICE_EXPONENT_FRACTION_RE, True),
+            (PDF_CHOICE_FRACTION_RE, False),
+        ):
+            converted = _repair_pdf_choice_layout_after_numerators(
+                lines,
+                index,
+                repaired,
+                pattern,
+                exponent=exponent,
+            )
+            if converted is not None:
+                break
+            converted = _repair_pdf_choice_layout_before_parts(
+                lines,
+                index,
+                pattern,
+                exponent=exponent,
+            )
+            if converted is not None:
+                break
 
-            labels = [match.group("label") for match in choice_matches]
-            if (
-                len(choice_matches) == 5
-                and set(labels) == set(PDF_CHOICE_FRACTION_LABELS)
-                and all(_pdf_choice_fraction_part(row) for row in numerator_rows)
-                and all(not match.group("den") or _pdf_choice_fraction_part(match.group("den")) for match in choice_matches)
-            ):
-                denominator_rows: list[str] = []
-                denominator_cursor = cursor
-                missing_count = sum(1 for match in choice_matches if not match.group("den"))
-                while (
-                    len(denominator_rows) < missing_count
-                    and denominator_cursor < len(lines)
-                    and _pdf_choice_fraction_part(lines[denominator_cursor])
-                ):
-                    denominator_rows.append(lines[denominator_cursor].strip())
-                    denominator_cursor += 1
-
-                if len(denominator_rows) == missing_count:
-                    for _ in range(5):
-                        if repaired:
-                            repaired.pop()
-                    denominator_iter = iter(denominator_rows)
-                    choice_by_label = {match.group("label"): match for match in choice_matches}
-                    for offset, label in enumerate(PDF_CHOICE_FRACTION_LABELS):
-                        match = choice_by_label[label]
-                        numerator = numerator_rows[offset]
-                        denominator = (match.group("den") or next(denominator_iter)).strip()
-                        sign = "-" if match.group("sign") else ""
-                        repaired.append(f"{label}{sign}\\frac{{{numerator}}}{{{denominator}}}")
-                    index = denominator_cursor
-                    continue
+        if converted is not None:
+            rows, next_index, pop_count = converted
+            for _ in range(pop_count):
+                if repaired:
+                    repaired.pop()
+            repaired.extend(rows)
+            index = next_index
+            continue
 
         repaired.append(lines[index])
         index += 1
 
     return "\n".join(repaired)
+
+
+def _normalize_pdf_choice_body(value: str) -> str:
+    text = str(value or "").strip()
+    match = PDF_CHOICE_UNIT_FRACTION_RE.match(text)
+    if match:
+        sign = "-" if match.group("sign") else ""
+        return f"{sign}\\frac{{1}}{{{match.group('den')}}}"
+    return text
 
 
 def _split_stem_and_choices(text: str) -> tuple[str, list[str]]:
@@ -687,7 +851,7 @@ def _split_stem_and_choices(text: str) -> tuple[str, list[str]]:
             choices.append(bare_body)
             continue
         stem_lines.append(raw_line.rstrip())
-    return _clean_text("\n".join(stem_lines)), choices
+    return _clean_text("\n".join(stem_lines)), [_normalize_pdf_choice_body(choice) for choice in choices]
 
 
 def _strip_leading_leaked_choice_block(stem: str, existing_choices: list[str]) -> str:
