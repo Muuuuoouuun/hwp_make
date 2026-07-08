@@ -7,6 +7,7 @@ const state = {
   templates: [],
   exports: [], // 내보내기 기록 [{name, size, modified, format, url}]
   lastDefaultTitle: DEFAULT_EXPORT_TITLE,
+  sideMode: "source",
 };
 
 const els = {
@@ -15,6 +16,8 @@ const els = {
   flowBasketCount: document.querySelector("#flowBasketCount"),
   inputModeButtons: document.querySelectorAll("[data-input-mode]"),
   inputModePanels: document.querySelectorAll("[data-input-panel]"),
+  sideSwitchButtons: document.querySelectorAll("[data-side-mode]"),
+  sidePanes: document.querySelectorAll("[data-side-pane]"),
   mathInsertButtons: document.querySelectorAll("[data-math-insert]"),
   importKind: document.querySelector("#importKind"),
   fileInput: document.querySelector("#fileInput"),
@@ -34,6 +37,8 @@ const els = {
   quickManualButton: document.querySelector("#quickManualButton"),
   problemList: document.querySelector("#problemList"),
   countBadge: document.querySelector("#countBadge"),
+  libraryProblemHint: document.querySelector("#libraryProblemHint"),
+  libraryBasketHint: document.querySelector("#libraryBasketHint"),
   searchInput: document.querySelector("#searchInput"),
   sourceFilter: document.querySelector("#sourceFilter"),
   selectedText: document.querySelector("#selectedText"),
@@ -136,7 +141,8 @@ async function loadProblems() {
   if (els.sourceFilter.value) params.set("source_type", els.sourceFilter.value);
   const data = await api(`/api/problems?${params.toString()}`);
   state.problems = data.items;
-  els.countBadge.textContent = String(state.problems.length);
+  els.countBadge.textContent = `${state.problems.length}개`;
+  if (els.libraryProblemHint) els.libraryProblemHint.textContent = `검색 결과 ${state.problems.length}개`;
   els.statusText.textContent = `가져온 문제 ${state.problems.length}개`;
   if (els.flowProblemCount) els.flowProblemCount.textContent = `가져온 문제 ${state.problems.length}개`;
   renderList();
@@ -159,13 +165,17 @@ async function loadExportTemplates() {
   state.lastDefaultTitle = exportDefaultTitle(active);
 }
 
+function currentExportTemplate() {
+  return state.templates.find((item) => item.key === els.exportTemplate.value) || state.templates[0] || null;
+}
+
 function exportDefaultTitle(template) {
   const title = String(template?.default_title || DEFAULT_EXPORT_TITLE).trim();
   return title === "문항 모음" ? DEFAULT_EXPORT_TITLE : title;
 }
 
 function syncExportTitleToTemplate() {
-  const template = state.templates.find((item) => item.key === els.exportTemplate.value);
+  const template = currentExportTemplate();
   if (!template) return;
   const defaultTitle = exportDefaultTitle(template);
   const current = els.exportTitle.value.trim();
@@ -187,9 +197,10 @@ function syncPaperPreviewMeta() {
 
 function syncExportOptions() {
   const isHwpx = els.exportFormat.value === "hwpx";
+  const template = currentExportTemplate();
   if (els.exportNativeMath) {
     els.exportNativeMath.disabled = !isHwpx;
-    if (!isHwpx) els.exportNativeMath.checked = false;
+    els.exportNativeMath.checked = isHwpx && Boolean(template?.native_math_default);
   }
   if (els.nativeMathLabel) {
     els.nativeMathLabel.classList.toggle("disabled", !isHwpx);
@@ -224,50 +235,72 @@ function compactText(value, maxLength = 92) {
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 
-const MATH_OPERATOR = String.raw`(?:->|=>|\\(?:leq|geq|neq|cdot|times|div|pm|mp|approx)\b|[+\-*\/=<>≤≥≠≈×÷±^])`;
-const MATH_SYMBOL = String.raw`[√∑∏∫∞≤≥≠≈±×÷∠△∥⊥]`;
+const MATH_OPERATOR = String.raw`(?:->|=>|\\(?:to|le|leq|ge|geq|ne|neq|cdot|times|div|pm|mp|approx|in|notin|cup|cap|subset|supset|subseteq|supseteq|circ|mid|vert)(?![A-Za-z])|[+\-*\/=<>≤≥≠≈×÷±∈∉∪∩⊂⊃⊆⊇∘^!])`;
+const MATH_SYMBOL = String.raw`[√∑∏∫∞≤≥≠≈±×÷∠△∥⊥∈∉∪∩⊂⊃⊆⊇∘′″]`;
 const GREEK_RANGE = String.raw`α-ωΑ-Ω`;
 const GREEK_LETTER = String.raw`[${GREEK_RANGE}]`;
 const IDENTIFIER = String.raw`[a-zA-Z${GREEK_RANGE}][a-zA-Z0-9${GREEK_RANGE}]*`;
 const SUPERSCRIPT_CHARS = String.raw`⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ`;
 const SUBSCRIPT_CHARS = String.raw`₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥₓ`;
 const VULGAR_FRACTION_CHARS = String.raw`¼½¾⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞`;
+const PRIME_CHARS = String.raw`'′″`;
 const UNICODE_SUP_SUB_PATTERN = String.raw`(?<![a-zA-Z0-9${GREEK_RANGE}])[a-zA-Z${GREEK_RANGE}][a-zA-Z0-9${GREEK_RANGE}]*[${SUPERSCRIPT_CHARS}${SUBSCRIPT_CHARS}]+`;
 const VULGAR_FRACTION_PATTERN = String.raw`[${VULGAR_FRACTION_CHARS}]`;
-const MATH_OPERAND = String.raw`(?:[+\-]?\d+(?:\.\d+)?(?:\s*\/\s*[+\-]?\d+(?:\.\d+)?)?|[+\-]?\d+(?:\.\d+)?\([^()\n]{1,120}\)|[+\-]?\d*(?:\.\d+)?${IDENTIFIER}(?:\([^()\n]{0,120}\))?(?:[_^](?:\{[^{}\n]{1,80}\}|[a-zA-Z0-9]+))*|${IDENTIFIER}\([^()\n]{0,120}\)(?:[_^](?:\{[^{}\n]{1,80}\}|[a-zA-Z0-9]+))*|\([^()\n]{1,120}\)|${MATH_SYMBOL})`;
+const MATH_OPERAND = String.raw`(?:[+\-]?\d+(?:\.\d+)?(?:\s*\/\s*[+\-]?\d+(?:\.\d+)?)?|[+\-]?\d+(?:\.\d+)?\([^()\n]{1,120}\)|[+\-]?\d*(?:\.\d+)?${IDENTIFIER}[${PRIME_CHARS}]*(?:\([^()\n]{0,120}\))?(?:[_^](?:\{[^{}\n]{1,80}\}|[a-zA-Z0-9]+))*|${IDENTIFIER}[${PRIME_CHARS}]*\([^()\n]{0,120}\)(?:[_^](?:\{[^{}\n]{1,80}\}|[a-zA-Z0-9]+))*|\([^()\n]{1,120}\)|${MATH_SYMBOL})`;
 const LATEX_GROUP_CONTENT = String.raw`(?:[^{}\n]|\\[A-Za-z]+(?:\{[^{}\n]{0,120}\})?|\{[^{}\n]{0,120}\}){0,180}`;
+const LATEX_WRAPPED_OPERAND = String.raw`\\(?:mathrm|mathbb|mathbf|text|operatorname)\{${LATEX_GROUP_CONTENT}\}`;
+const LATEX_WRAPPED_FUNCTION_PATTERN = String.raw`${LATEX_WRAPPED_OPERAND}\([^()\n]{0,120}\)`;
+const LATEX_LEFT_RIGHT_PATTERN = String.raw`\\left[\s\S]{1,1200}?\\right(?:\\[{}]|\S)?`;
+const LATEX_WRAPPED_LEFT_RIGHT_PATTERN = String.raw`${LATEX_WRAPPED_OPERAND}\s*${LATEX_LEFT_RIGHT_PATTERN}`;
+const LATEX_WRAPPED_EXPRESSION_PATTERN = String.raw`(?:${MATH_OPERAND}|${LATEX_WRAPPED_OPERAND})\s*${MATH_OPERATOR}\s*(?:${MATH_OPERAND}|${LATEX_WRAPPED_OPERAND})(?:\s*${MATH_OPERATOR}\s*(?:${MATH_OPERAND}|${LATEX_WRAPPED_OPERAND}))*`;
 const LATEX_FRACTION_PATTERN = String.raw`\\(?:frac|dfrac|tfrac)\{${LATEX_GROUP_CONTENT}\}\{${LATEX_GROUP_CONTENT}\}`;
+const LATEX_BINOM_PATTERN = String.raw`\\(?:binom|dbinom|tbinom)\{${LATEX_GROUP_CONTENT}\}\{${LATEX_GROUP_CONTENT}\}`;
 const LATEX_SQRT_PATTERN = String.raw`\\sqrt(?:\[[^\]\n]{0,80}\])?\{${LATEX_GROUP_CONTENT}\}`;
+const LATEX_SPACE_COMMAND_PATTERN = String.raw`(?:\\[,;:! ]|\\(?:quad|qquad|enspace|thinspace|medspace|thickspace)(?![A-Za-z]))`;
+const ABSOLUTE_VALUE_PATTERN = String.raw`\|(?=[^|$\n]*[a-zA-Z0-9${GREEK_RANGE}])[^|$\n]{1,160}\|`;
 const LATEX_NARY_BODY_PATTERN = String.raw`(?:${LATEX_FRACTION_PATTERN}|${LATEX_SQRT_PATTERN}|\([^()\n]{1,120}\)|\[[^\[\]\n]{1,120}\]|${IDENTIFIER}(?:\([^()\n]{0,120}\))?(?:[_^](?:\{[^{}\n]{1,80}\}|[a-zA-Z0-9]+))*(?:d${IDENTIFIER})?|\d+(?:\.\d+)?)`;
-const LATEX_NARY_PATTERN = String.raw`\\(?:sum|prod|int|iint)(?![A-Za-z])(?:\s*[_^](?:\{[^{}\n]{0,120}\}|[a-zA-Z0-9]+)){0,2}(?:\s+${LATEX_NARY_BODY_PATTERN})?`;
-const LATEX_FUNCTION_PATTERN = String.raw`\\(?:lim|log|ln|sin|cos|tan|sec|csc|cot)(?![A-Za-z])(?:\s*[_^](?:\{[^{}\n]{0,120}\}|[a-zA-Z0-9]+)){0,2}(?:\s*${LATEX_NARY_BODY_PATTERN})?`;
-const UNICODE_RADICAL_PATTERN = String.raw`√\s*(?:${IDENTIFIER}|\([^()\n]{1,120}\)|\d+(?:\.\d+)?)`;
+const LATEX_NARY_PATTERN = String.raw`\\(?:sum|prod|int|iint)(?![A-Za-z])(?:\s*[_^](?:\{[^{}\n]{0,120}\}|[a-zA-Z0-9]+)){0,2}(?:\s+${LATEX_NARY_BODY_PATTERN})?(?:\s*(?:${LATEX_SPACE_COMMAND_PATTERN}\s*)?d${IDENTIFIER})?`;
+const LATEX_FUNCTION_PATTERN = String.raw`\\(?:lim|log|ln|sin|cos|tan|sec|csc|cot)(?![A-Za-z])(?:\s*[_^](?:\{[^{}\n]{0,120}\}|[a-zA-Z0-9]+)){0,2}(?:\s*${LATEX_NARY_BODY_PATTERN})?(?:\s*\{${LATEX_GROUP_CONTENT}\})?`;
+const LATEX_FUNCTION_EXPRESSION_PATTERN = String.raw`\\(?:lim|log|ln)(?![A-Za-z])(?:\s*[_^](?:\{[^{}\n]{0,120}\}|[a-zA-Z0-9]+)){0,2}(?:\s*${LATEX_NARY_BODY_PATTERN})?(?:\s*\{${LATEX_GROUP_CONTENT}\})?(?:\s*${MATH_OPERATOR}\s*(?:${LATEX_NARY_BODY_PATTERN}|${MATH_OPERAND}))+`;
+const RADICAL_PLACEHOLDER_PATTERN = String.raw`[□▢]*`;
+const RADICAL_BODY_PATTERN = String.raw`(?:${IDENTIFIER}|\([^()\n]{1,120}\)|\d+(?:\.\d+)?)`;
+const UNICODE_RADICAL_PATTERN = String.raw`√\s*${RADICAL_PLACEHOLDER_PATTERN}\s*${RADICAL_BODY_PATTERN}`;
+const HANCOM_RADICAL_PATTERN = String.raw`(?<![a-zA-Z0-9${GREEK_RANGE}])sqrt\s*${RADICAL_PLACEHOLDER_PATTERN}\s*${RADICAL_BODY_PATTERN}`;
 const UNICODE_NARY_PATTERN = String.raw`[∑∏∫](?:[_^](?:\{[^{}\n]{0,120}\}|[a-zA-Z0-9]+)){0,2}(?:\s*${LATEX_NARY_BODY_PATTERN})?`;
-const LATEX_COMMAND_PATTERN = String.raw`\\(?:frac|dfrac|tfrac|sqrt|sum|prod|int|iint|lim|log|ln|sin|cos|tan|sec|csc|cot|alpha|beta|gamma|delta|theta|lambda|mu|pi|sigma|omega|Delta|nabla|leq|geq|neq|approx|cdot|times|div|pm|mp|infty|overline|underline|bar|vec|angle|triangle|parallel|perp|because|therefore)(?![A-Za-z])(?:\s*(?:[_^](?:\{[^{}\n]{0,120}\}|[a-zA-Z0-9]+)|\{[^{}\n]{0,120}\}|\[[^\]\n]{0,80}\])){0,4}`;
-const SUPER_SUB_PATTERN = String.raw`(?<![a-zA-Z0-9${GREEK_RANGE}])[a-zA-Z${GREEK_RANGE}][a-zA-Z0-9${GREEK_RANGE}]*(?:[_^](?:\{[^{}\n]{1,80}\}|[a-zA-Z0-9]+))+`;
+const LATEX_COMMAND_PATTERN = String.raw`\\(?:frac|dfrac|tfrac|sqrt|sum|prod|int|iint|lim|log|ln|sin|cos|tan|sec|csc|cot|alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|varpi|rho|varrho|sigma|varsigma|tau|upsilon|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega|nabla|le|leq|ge|geq|ne|neq|approx|cdot|times|div|pm|mp|infty|overline|underline|overrightarrow|widehat|hat|tilde|dot|ddot|check|bar|vec|angle|triangle|parallel|perp|because|therefore|binom|dbinom|tbinom|mathrm|mathbb|mathbf|text|operatorname|in|notin|cup|cap|subset|supset|subseteq|supseteq|circ|mid|vert|lvert|rvert|lVert|rVert|cdots|ldots)(?![A-Za-z])(?:\s*(?:[_^](?:\{[^{}\n]{0,120}\}|[a-zA-Z0-9]+)|\{[^{}\n]{0,120}\}|\[[^\]\n]{0,80}\])){0,4}`;
+const SUPER_SUB_PATTERN = String.raw`(?<![a-zA-Z0-9${GREEK_RANGE}])[a-zA-Z${GREEK_RANGE}][a-zA-Z0-9${GREEK_RANGE}]*[${PRIME_CHARS}]*(?:[_^](?:\{[^{}\n]{1,80}\}|[a-zA-Z0-9]+))+`;
+const PREFIXED_SUP_SUB_PATTERN = String.raw`(?:\{\})?(?:[_^](?:\{[^{}\n]{1,80}\}|[a-zA-Z0-9]+))+[a-zA-Z${GREEK_RANGE}][a-zA-Z0-9${GREEK_RANGE}]*(?:[_^](?:\{[^{}\n]{1,80}\}|[a-zA-Z0-9]+))+`;
 const DATE_LIKE_TOKEN_PATTERN = /^\d{1,4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?$/;
 const NUMERIC_RANGE_TOKEN_PATTERN = /^\d+(?:\.\d+)?\s*[-~]\s*\d+(?:\.\d+)?$/;
 const ALNUM_ID_TOKEN_PATTERN = /^[A-Za-z]+\d+\s*[-/]\s*\d{2,}$/;
 const CURRENCY_SPAN_TOKEN_PATTERN = /^\$\d+(?:\.\d+)?(?:\s+\w+)?\s+\$\d+(?:\.\d+)?$/;
 const CURRENCY_FRAGMENT_TOKEN_PATTERN = /^\$\d+(?:\.\d+)?(?:\s+\w+)?\s*\$$/;
-const MATH_SYMBOL_TOKEN_PATTERN = /^[√∑∏∫∞≤≥≠≈±×÷∠△∥⊥¼½¾⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞]$/;
+const MATH_SYMBOL_TOKEN_PATTERN = /^[√∑∏∫∞≤≥≠≈±×÷∠△∥⊥∈∉∪∩⊂⊃⊆⊇∘′″¼½¾⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞]$/;
 const FORMULA_TOKEN_PATTERN = new RegExp(
   [
-    String.raw`\$[^$\n]{1,160}\$`,
-    String.raw`\\\([^)]{1,160}\\\)`,
-    String.raw`\\\[[\s\S]{1,240}?\\\]`,
-    String.raw`\\begin\{(?:aligned|matrix|cases|array|pmatrix|bmatrix)\}[\s\S]{1,320}?\\end\{[a-zA-Z*]+\}`,
-    String.raw`\\left[\s\S]{1,240}?\\right(?:\\[{}]|\S)?`,
+    String.raw`\$[^$\n]{1,2000}\$`,
+    String.raw`\\\([^)]{1,2000}\\\)`,
+    String.raw`\\\[[\s\S]{1,2400}?\\\]`,
+    String.raw`\\begin\{(?:aligned|matrix|cases|array|pmatrix|bmatrix)\}[\s\S]{1,2400}?\\end\{[a-zA-Z*]+\}`,
+    LATEX_WRAPPED_LEFT_RIGHT_PATTERN,
+    LATEX_LEFT_RIGHT_PATTERN,
+    LATEX_WRAPPED_FUNCTION_PATTERN,
+    LATEX_WRAPPED_EXPRESSION_PATTERN,
     LATEX_FRACTION_PATTERN,
+    LATEX_BINOM_PATTERN,
     LATEX_SQRT_PATTERN,
     LATEX_NARY_PATTERN,
+    LATEX_FUNCTION_EXPRESSION_PATTERN,
     LATEX_FUNCTION_PATTERN,
     UNICODE_RADICAL_PATTERN,
+    HANCOM_RADICAL_PATTERN,
     UNICODE_NARY_PATTERN,
     LATEX_COMMAND_PATTERN,
     UNICODE_SUP_SUB_PATTERN,
     VULGAR_FRACTION_PATTERN,
+    ABSOLUTE_VALUE_PATTERN,
     MATH_SYMBOL,
+    PREFIXED_SUP_SUB_PATTERN,
     String.raw`${MATH_OPERAND}\s*${MATH_OPERATOR}\s*${MATH_OPERAND}(?:\s*${MATH_OPERATOR}\s*${MATH_OPERAND})*`,
     SUPER_SUB_PATTERN,
   ].join("|"),
@@ -452,6 +485,7 @@ async function handleImportedProblems(created, { quick = false } = {}) {
   renderList();
   renderBasket();
   renderEditor();
+  setSideMode("library");
   if (quick) {
     await exportSelected(created.map((problem) => problem.id));
   }
@@ -463,6 +497,7 @@ function renderBasket() {
   els.basketBadge.textContent = String(state.basket.length);
   els.selectedText.textContent = `담은 문제 ${count}개`;
   if (els.flowBasketCount) els.flowBasketCount.textContent = `담은 문제 ${count}개`;
+  if (els.libraryBasketHint) els.libraryBasketHint.textContent = `담은 문제 ${count}개`;
   syncPaperPreviewMeta();
   if (els.basketClearButton) els.basketClearButton.disabled = !state.basket.length;
   if (els.previewButton) els.previewButton.disabled = !count;
@@ -683,6 +718,7 @@ function renderList() {
     row.draggable = true;
 
     const body = document.createElement("div");
+    body.className = "problem-body";
     const title = document.createElement("div");
     title.className = "problem-title";
     title.innerHTML = `<span></span><b class="source-pill">${sourceLabel(problem.source_type)}</b>`;
@@ -699,7 +735,7 @@ function renderList() {
     const mergeButton = document.createElement("button");
     mergeButton.type = "button";
     mergeButton.className = `problem-merge-btn ${selected ? "active" : ""}`;
-    mergeButton.textContent = selected ? "담김" : "담기";
+    mergeButton.textContent = selected ? "빼기" : "시험지에 담기";
     mergeButton.title = selected ? "시험지 구성에서 빼기" : "시험지 구성에 담기";
     mergeButton.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -708,8 +744,16 @@ function renderList() {
       renderBasket();
     });
 
+    const action = document.createElement("div");
+    action.className = "problem-action";
+
+    const status = document.createElement("span");
+    status.className = `problem-status ${selected ? "selected" : ""}`;
+    status.textContent = selected ? "담김" : "보관함";
+
     body.append(title, meta, preview);
-    row.append(body, mergeButton);
+    action.append(status, mergeButton);
+    row.append(body, action);
     row.addEventListener("click", () => {
       state.activeId = problem.id;
       renderList();
@@ -1112,6 +1156,7 @@ async function previewExport() {
         format: "hwpx",
         template_key: els.exportTemplate.value || "basic",
         include_answer_sheet: els.exportAnswerSheet.checked,
+        native_math: Boolean(els.exportNativeMath?.checked),
       }),
     });
     els.previewPages.innerHTML = "";
@@ -1178,6 +1223,25 @@ function setInputMode(mode) {
   });
 }
 
+function setSideMode(mode) {
+  const activeMode = mode || "source";
+  state.sideMode = activeMode;
+  els.sideSwitchButtons.forEach((button) => {
+    const active = button.dataset.sideMode === activeMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  els.sidePanes.forEach((pane) => {
+    const active = pane.dataset.sidePane === activeMode;
+    pane.classList.toggle("active", active);
+    pane.classList.toggle("hidden", !active);
+  });
+}
+
+els.sideSwitchButtons.forEach((button) => {
+  button.addEventListener("click", () => setSideMode(button.dataset.sideMode));
+});
+
 els.inputModeButtons.forEach((button) => {
   button.addEventListener("click", () => setInputMode(button.dataset.inputMode));
 });
@@ -1217,7 +1281,10 @@ els.previewClose.addEventListener("click", () => els.previewModal.classList.add(
 els.previewModal.addEventListener("click", (event) => {
   if (event.target === els.previewModal) els.previewModal.classList.add("hidden");
 });
-els.exportTemplate.addEventListener("change", syncExportTitleToTemplate);
+els.exportTemplate.addEventListener("change", () => {
+  syncExportTitleToTemplate();
+  syncExportOptions();
+});
 els.exportTitle.addEventListener("input", syncPaperPreviewMeta);
 els.exportFormat.addEventListener("change", syncExportOptions);
 els.searchInput.addEventListener("input", debounce(loadProblems));
@@ -1257,6 +1324,7 @@ els.basketList.addEventListener("drop", (event) => {
 
 (async function init() {
   state.basket = restoreBasket();
+  setSideMode(state.sideMode);
   await loadExportTemplates();
   syncExportTitleToTemplate();
   syncPaperPreviewMeta();

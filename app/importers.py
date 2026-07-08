@@ -19,6 +19,7 @@ from PIL import Image
 from pypdf import PdfReader
 
 from . import storage
+from .math_text import normalize_recognized_math_text
 
 try:  # OCR은 선택 사항: pytesseract + tesseract 실행 파일이 있을 때만 사용
     import pytesseract
@@ -39,6 +40,25 @@ SAFE_NAME_RE = re.compile(r"[^0-9A-Za-z가-힣._ -]+")
 QUESTION_START_RE = re.compile(
     r"(?m)(?=^\s*(?:문제\s*)?\d{1,3}\s*[\.\)]|\n\s*(?:문제\s*)?\d{1,3}\s*[\.\)])"
 )
+CIRCLED_CHOICE_MARKERS = "①②③④⑤⑥⑦⑧⑨"
+INLINE_CIRCLED_CHOICE_RE = re.compile(rf"([{CIRCLED_CHOICE_MARKERS}])\s*")
+INLINE_NUMERIC_CHOICE_RE = re.compile(r"(?<![\w/])([1-5])(?:[\.\)])?(?:\s+|$)")
+CHOICE_LINE_RE = re.compile(
+    rf"^\s*(?P<label>[{CIRCLED_CHOICE_MARKERS}]|\(?[1-9]\)|[1-9][\.\)]|[A-Ea-e][\.\)])\s*(?P<body>.+)$"
+)
+BARE_NUMERIC_CHOICE_LINE_RE = re.compile(r"^\s*(?P<label>[1-5])\s+(?P<body>\S.+)$")
+NUMERIC_CHOICE_LABEL_RE = re.compile(r"^\(?([1-9])[\.\)]?$")
+PDF_CHOICE_FRACTION_LABELS = "①②③④⑤"
+PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS = "\u25a1\u25a2\ue06d"
+PDF_CHOICE_FRACTION_RE = re.compile(
+    rf"^\s*(?P<label>[{PDF_CHOICE_FRACTION_LABELS}])\s*(?P<sign>-?)"
+    rf"\s*[{PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS}](?P<den>[A-Za-z0-9α-ωΑ-Ωπ∞+\-.]+)?\s*$"
+)
+PDF_CHOICE_FRACTION_PART_RE = re.compile(r"^[A-Za-z0-9α-ωΑ-Ωπ∞+\-./]+$")
+ANSWER_LINE_RE = re.compile(r"^\s*(?:정답|답)(?:\s*[:：]|\s+)(?P<value>.+?)\s*$")
+EXPLANATION_LINE_RE = re.compile(r"^\s*(?:해설|풀이)(?:(?:\s*[:：]|\s+)(?P<value>.*))?\s*$")
+SCORE_MARKER_RE = re.compile(r"\[\s*\d+\s*점\s*\]")
+PDF_FORM_LABEL_RE = re.compile(r"\(?\s*(?:홀수형|짝수형|미적분|확률과\s*통계|기하)\s*\)?")
 
 
 class _Sink:
@@ -85,10 +105,41 @@ def save_upload(filename: str, payload: bytes) -> str:
 
 
 def _clean_text(value: str) -> str:
+    value = normalize_recognized_math_text(value)
     value = value.replace("\r\n", "\n").replace("\r", "\n")
     value = re.sub(r"[ \t]+\n", "\n", value)
     value = re.sub(r"\n{3,}", "\n\n", value)
     return value.strip()
+
+
+def _recognized_pdf_loose_duplicate_key(number: str, stem: str) -> str:
+    """Fingerprint repeated odd/even-form PDF problems despite choice/image drift."""
+    value = normalize_recognized_math_text(str(stem or ""))
+    score = SCORE_MARKER_RE.search(value)
+    if score:
+        value = value[: score.end()]
+    else:
+        value = "\n".join(value.splitlines()[:6])
+    value = re.sub(r"^\s*\d{1,3}\s*[.)]\s*", "", value)
+    value = PDF_FORM_LABEL_RE.sub("", value)
+    value = re.sub(r"[^0-9A-Za-z가-힣α-ωΑ-Ω]+", "", value)
+    if len(value) < 24:
+        return ""
+    return f"{str(number or '').strip()}:{value[:180]}"
+
+
+def _looks_like_math_pdf(*values: str) -> bool:
+    return any("수학" in str(value or "") or "math" in str(value or "").lower() for value in values)
+
+
+def _decode_text(payload: bytes) -> str:
+    """텍스트/CSV류 입력은 UTF-8을 우선하고, 오래된 윈도우 한글(cp949)도 받는다."""
+    for encoding in ("utf-8-sig", "utf-8", "cp949", "euc-kr"):
+        try:
+            return payload.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return payload.decode("utf-8", errors="replace")
 
 
 def _split_questions(page_text: str) -> list[str]:
@@ -98,8 +149,42 @@ def _split_questions(page_text: str) -> list[str]:
     chunks = [chunk.strip() for chunk in QUESTION_START_RE.split(text) if chunk.strip()]
     if len(chunks) <= 1:
         paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+        if _looks_like_single_passage(text, paragraphs):
+            return [text]
         return paragraphs if len(paragraphs) > 1 else [text]
     return chunks
+
+
+def _looks_like_single_passage(text: str, paragraphs: list[str]) -> bool:
+    """번호 없는 국어 지문처럼 긴 글은 빈 줄 기준으로 여러 문항처럼 쪼개지 않는다."""
+    if len(paragraphs) <= 1:
+        return False
+    if re.search(r"\[(?:지문|보기|자료)\]|\<(?:보기|지문)\>", text):
+        return True
+    long_paragraphs = [para for para in paragraphs if len(para) >= 80]
+    return len(text) >= 600 and len(long_paragraphs) >= 2
+
+
+def _plain_text_chunks(text: str) -> list[dict[str, Any]]:
+    """줄글/붙여넣기 텍스트를 문항 chunk로 바꾼다."""
+    clean = _clean_text(text)
+    if not clean:
+        return []
+    line_blocks = [(line, [], []) for line in clean.splitlines()]
+    chunks = _paragraphs_to_chunks(line_blocks)
+    if len(chunks) > 1 or any(chunk.get("number_hint") for chunk in chunks):
+        return chunks
+
+    split = [{"text": chunk, "images": [], "tables": []} for chunk in _split_questions(clean)]
+    if len(split) > 1 and not QUESTION_LINE_RE.match(split[0]["text"]):
+        first_numbered = next(
+            (index for index, chunk in enumerate(split[1:], start=1) if QUESTION_LINE_RE.match(chunk["text"])),
+            None,
+        )
+        if first_numbered is not None:
+            split[first_numbered]["text"] = f"{split[0]['text']}\n{split[first_numbered]['text']}"
+            split.pop(0)
+    return split
 
 
 def _extract_number(text: str, fallback: int) -> str:
@@ -108,6 +193,113 @@ def _extract_number(text: str, fallback: int) -> str:
 
 
 def import_pdf(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
+    """PDF 가져오기.
+
+    1순위: 인식 파이프라인(app.recognition) — born-digital 시험지를 문항 단위로 분리하고
+           그림/문항 이미지를 추출한다(수식 폰트로 텍스트가 깨지는 수학·과학은 문항 전체를
+           충실 이미지로 첨부). 2순위(스캔/텍스트레이어 없음): 기존 pypdf+OCR 경로.
+    """
+    recognized = _import_pdf_recognized(filename, payload, metadata)
+    if recognized is not None:
+        return recognized
+    return _legacy_import_pdf(filename, payload, metadata)
+
+
+def _import_pdf_recognized(
+    filename: str, payload: bytes, metadata: dict[str, Any]
+) -> dict[str, Any] | None:
+    """인식 파이프라인으로 PDF 문항을 가져온다. born-digital 이 아니면 None(→ 레거시)."""
+    try:
+        from .recognition.pipeline import recognize_pdf
+    except Exception:
+        return None  # 인식 스택(fitz 등) 불가 → 레거시로
+    try:
+        result = recognize_pdf(payload, filename=filename)
+    except Exception:
+        return None
+    if not result.found:
+        return None  # 스캔/텍스트레이어 없음 → 레거시가 처리
+
+    save_upload(filename, payload)  # 원본 PDF 보관
+    stem_name = Path(filename).stem
+    sink = _Sink()
+    loose_seen: set[str] = set()
+    loose_dedup_enabled = _looks_like_math_pdf(filename, getattr(result, "exam_title", ""))
+
+    def layout_payload(prob: Any) -> dict[str, Any]:
+        box = getattr(prob, "box", None)
+        bbox_px = None
+        if box is not None:
+            bbox_px = [box.left, box.top, box.width, box.height]
+        return {
+            "column_count": int(getattr(prob, "column_count", 0) or 0),
+            "column_index": int(getattr(prob, "column_index", 0) or 0),
+            "page": {
+                "number": int(getattr(prob, "page_number", 0) or 0),
+                "width_px": int(getattr(prob, "page_width_px", 0) or 0),
+                "height_px": int(getattr(prob, "page_height_px", 0) or 0),
+            },
+            "bbox_px": bbox_px,
+            "block_type": "image_fallback" if getattr(prob, "problem_image_png", None) else "problem",
+        }
+
+    for prob in result.problems:
+        image_paths: list[str] = []
+        image_only_fallback = bool(prob.problem_image_png) and (
+            not prob.text_reliable or not str(prob.text or "").strip()
+        )
+        if image_only_fallback and prob.problem_image_png:
+            rp = _save_image_bytes(f"{stem_name}_q{prob.number}.png", prob.problem_image_png)
+            if rp:
+                image_paths.append(rp)
+        for fig_index, fig_png in enumerate(prob.figure_pngs, start=1):
+            rp = _save_image_bytes(f"{stem_name}_q{prob.number}_fig{fig_index}.png", fig_png)
+            if rp:
+                image_paths.append(rp)
+
+        # 규칙: 문항 전체 crop 이미지가 있으면(=그림이 딸렸거나 수식폰트로 텍스트가 깨진 경우)
+        #   그 이미지가 번호·본문·선지·그림을 모두 담으므로 텍스트는 버리고 이미지-only 로 낸다
+        #   → 텍스트+이미지 중복 없이 원본과 픽셀 동일하게 재현(수학 전부, 과탐 그림문항).
+        # 그림 없고 텍스트가 신뢰 가능한 순수 텍스트 문항만 편집 가능한 stem/choices 로 낸다.
+        if image_only_fallback:
+            stem_text, choices = "", []
+        else:
+            stem_text, choices = _split_stem_and_choices(prob.text)
+
+        number = str(prob.number) if prob.number else ""
+        loose_key = _recognized_pdf_loose_duplicate_key(number, stem_text) if loose_dedup_enabled else ""
+        if loose_key and loose_key in loose_seen:
+            sink.skipped += 1
+            continue
+        if loose_key:
+            loose_seen.add(loose_key)
+
+        title = f"{stem_name} #{number}" if number else stem_name
+        sink.add(
+            {
+                **metadata,
+                "source_type": "pdf",
+                "source_name": filename,
+                "source_page": prob.page_number,
+                "number": number,
+                "title": title,
+                "stem": stem_text,
+                "choices": choices,
+                "image_paths": image_paths,
+                "tables": [],
+                "layout": layout_payload(prob),
+            }
+        )
+
+    notices = [f"{len(sink.created)}개 문항을 PDF에서 자동 인식했습니다(문항 분리 + 그림/이미지 추출)."]
+    if getattr(result, "exam_title", ""):
+        notices.append(f"시험지 제목 감지: {result.exam_title}")
+    notices.extend(result.notices)
+    notices.extend(_dedup_notices(sink))
+    return {"created": sink.created, "notices": notices, "exam_title": getattr(result, "exam_title", "")}
+
+
+def _legacy_import_pdf(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
     rel_path = save_upload(filename, payload)
     pdf_path = storage.DATA_DIR / rel_path
     sink = _Sink()
@@ -236,6 +428,23 @@ def import_image(filename: str, payload: bytes, metadata: dict[str, Any]) -> dic
     return {"created": [problem], "notices": notices}
 
 
+def import_text(
+    filename: str,
+    payload: bytes,
+    metadata: dict[str, Any],
+    source_type: str = "text",
+) -> dict[str, Any]:
+    save_upload(filename, payload)
+    text = _decode_text(payload)
+    chunks = _plain_text_chunks(text)
+    if not chunks:
+        return {"created": [], "notices": ["텍스트에서 문항을 찾지 못했습니다."]}
+    sink = _create_from_chunks(chunks, source_type, filename, metadata)
+    notices = [f"{len(sink.created)}개 문항을 텍스트에서 가져왔습니다."]
+    notices.extend(_dedup_notices(sink))
+    return {"created": sink.created, "notices": notices}
+
+
 FIELD_ALIASES = {
     "number": ["number", "num", "no", "문항", "문항번호", "번호"],
     "subject": ["subject", "과목"],
@@ -270,10 +479,264 @@ def _choices_from_row(row: dict[str, Any]) -> list[str]:
     if combined and not choices:
         choices = [
             part.strip()
-            for part in re.split(r"\s*(?:\||/|;|\n)\s*", str(combined))
+            for part in re.split(r"\s*(?:\||;|\n)\s*", str(combined))
             if part.strip()
         ]
     return choices
+
+
+def _split_inline_circled_choices(line: str) -> tuple[str, list[str]]:
+    matches = list(INLINE_CIRCLED_CHOICE_RE.finditer(line))
+    if len(matches) < 2:
+        return line, []
+    prefix = line[: matches[0].start()].strip()
+    choices: list[str] = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
+        value = line[start:end].strip()
+        choices.append(value or match.group(1))
+    if len(choices) < 2:
+        return line, []
+    return prefix, choices
+
+
+def _split_inline_numeric_choices(line: str) -> tuple[str, list[str]]:
+    matches = list(INLINE_NUMERIC_CHOICE_RE.finditer(line))
+    if len(matches) < 3:
+        return line, []
+    labels = [int(match.group(1)) for match in matches]
+    if labels[:3] != [1, 2, 3] or labels != sorted(labels) or len(set(labels)) != len(labels):
+        return line, []
+    prefix = line[: matches[0].start()].strip()
+    choices: list[str] = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
+        value = line[start:end].strip()
+        choices.append(value or match.group(1))
+    if len(choices) < 3:
+        return line, []
+    return prefix, choices
+
+
+def _bare_numeric_choice_body(lines: list[str], index: int, choices_started: bool) -> str | None:
+    match = BARE_NUMERIC_CHOICE_LINE_RE.match(lines[index].strip())
+    if not match:
+        return None
+    label = int(match.group("label"))
+    if label == 1 and not choices_started:
+        lookahead: list[int] = []
+        for raw in lines[index : index + 5]:
+            next_match = BARE_NUMERIC_CHOICE_LINE_RE.match(raw.strip())
+            if not next_match:
+                break
+            lookahead.append(int(next_match.group("label")))
+        if lookahead[:3] != [1, 2, 3]:
+            return None
+    elif choices_started and label <= 5:
+        pass
+    else:
+        return None
+    return match.group("body").strip()
+
+
+def _numeric_choice_label(label: str) -> int | None:
+    match = NUMERIC_CHOICE_LABEL_RE.match(label.strip())
+    return int(match.group(1)) if match else None
+
+
+def _numeric_choice_sequence_starts(lines: list[str], index: int) -> bool:
+    labels: list[int] = []
+    for raw in lines[index : index + 5]:
+        match = CHOICE_LINE_RE.match(raw.strip())
+        if not match:
+            break
+        label = _numeric_choice_label(match.group("label"))
+        if label is None:
+            break
+        labels.append(label)
+    return labels[:3] == [1, 2, 3]
+
+
+def _choice_line_body(
+    lines: list[str],
+    index: int,
+    choices_started: bool,
+    choice_count: int,
+) -> str | None:
+    line = lines[index].strip()
+    match = CHOICE_LINE_RE.match(line)
+    if not match:
+        return None
+    # 첫 줄의 "1. 문제..."는 문항 번호이므로 선지로 보지 않는다.
+    if index == 0 and QUESTION_LINE_RE.match(line):
+        return None
+    label = match.group("label")
+    number = _numeric_choice_label(label)
+    if number is None:
+        return match.group("body").strip()
+    if not choices_started:
+        if number != 1 or not _numeric_choice_sequence_starts(lines, index):
+            return None
+    elif number != choice_count + 1:
+        return None
+    return match.group("body").strip()
+
+
+def _pdf_choice_fraction_part(value: str) -> bool:
+    stripped = str(value or "").strip()
+    if not stripped or len(stripped) > 40:
+        return False
+    if any(marker in stripped for marker in PDF_CHOICE_FRACTION_LABELS + PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS):
+        return False
+    if re.search(r"[\uac00-\ud7a3]", stripped):
+        return False
+    return bool(PDF_CHOICE_FRACTION_PART_RE.match(stripped))
+
+
+def _repair_pdf_choice_fraction_layout(text: str) -> str:
+    """Rejoin PDF choice fractions split into numerator/placeholder/denominator rows."""
+    lines = str(text or "").splitlines()
+    if len(lines) < 11:
+        return str(text or "")
+
+    repaired: list[str] = []
+    index = 0
+    while index < len(lines):
+        if index >= 5:
+            numerator_rows = [line.strip() for line in lines[index - 5 : index]]
+            choice_matches: list[re.Match[str]] = []
+            cursor = index
+            while cursor < len(lines) and len(choice_matches) < 5:
+                match = PDF_CHOICE_FRACTION_RE.match(lines[cursor].strip())
+                if not match:
+                    break
+                choice_matches.append(match)
+                cursor += 1
+
+            labels = [match.group("label") for match in choice_matches]
+            if (
+                len(choice_matches) == 5
+                and set(labels) == set(PDF_CHOICE_FRACTION_LABELS)
+                and all(_pdf_choice_fraction_part(row) for row in numerator_rows)
+                and all(not match.group("den") or _pdf_choice_fraction_part(match.group("den")) for match in choice_matches)
+            ):
+                denominator_rows: list[str] = []
+                denominator_cursor = cursor
+                missing_count = sum(1 for match in choice_matches if not match.group("den"))
+                while (
+                    len(denominator_rows) < missing_count
+                    and denominator_cursor < len(lines)
+                    and _pdf_choice_fraction_part(lines[denominator_cursor])
+                ):
+                    denominator_rows.append(lines[denominator_cursor].strip())
+                    denominator_cursor += 1
+
+                if len(denominator_rows) == missing_count:
+                    for _ in range(5):
+                        if repaired:
+                            repaired.pop()
+                    denominator_iter = iter(denominator_rows)
+                    choice_by_label = {match.group("label"): match for match in choice_matches}
+                    for offset, label in enumerate(PDF_CHOICE_FRACTION_LABELS):
+                        match = choice_by_label[label]
+                        numerator = numerator_rows[offset]
+                        denominator = (match.group("den") or next(denominator_iter)).strip()
+                        sign = "-" if match.group("sign") else ""
+                        repaired.append(f"{label}{sign}\\frac{{{numerator}}}{{{denominator}}}")
+                    index = denominator_cursor
+                    continue
+
+        repaired.append(lines[index])
+        index += 1
+
+    return "\n".join(repaired)
+
+
+def _split_stem_and_choices(text: str) -> tuple[str, list[str]]:
+    """본문 안에 붙어 들어온 객관식 선지를 stem과 choices로 나눈다."""
+    if not text:
+        return "", []
+    stem_lines: list[str] = []
+    choices: list[str] = []
+    lines = _repair_pdf_choice_fraction_layout(text).splitlines()
+    for line_index, raw_line in enumerate(lines):
+        line = raw_line.strip()
+        if not line:
+            stem_lines.append("")
+            continue
+        prefix, inline_choices = _split_inline_circled_choices(line)
+        if inline_choices:
+            if prefix:
+                stem_lines.append(prefix)
+            choices.extend(inline_choices)
+            continue
+        prefix, inline_choices = _split_inline_numeric_choices(line)
+        if inline_choices:
+            if prefix:
+                stem_lines.append(prefix)
+            choices.extend(inline_choices)
+            continue
+        choice_body = _choice_line_body(lines, line_index, bool(choices), len(choices))
+        if choice_body is not None:
+            choices.append(choice_body)
+            continue
+        bare_body = _bare_numeric_choice_body(lines, line_index, bool(choices))
+        if bare_body is not None:
+            choices.append(bare_body)
+            continue
+        stem_lines.append(raw_line.rstrip())
+    return _clean_text("\n".join(stem_lines)), choices
+
+
+def _strip_leading_leaked_choice_block(stem: str, existing_choices: list[str]) -> str:
+    """Drop a stale leading ①-⑤ block when HWP IR already has this problem's choices."""
+    if not stem or len(existing_choices) < 2:
+        return stem
+    stripped = stem.lstrip()
+    if not stripped or stripped[0] not in CIRCLED_CHOICE_MARKERS:
+        return stem
+    cleaned_stem, leaked_choices = _split_stem_and_choices(stem)
+    if len(leaked_choices) < 5 or not cleaned_stem.strip():
+        return stem
+    return cleaned_stem
+
+
+def _is_answer_heading(value: str) -> bool:
+    normalized = re.sub(r"\s+", "", value)
+    return normalized in {"및해설", "및풀이", "해설", "풀이"}
+
+
+def _split_answer_explanation(text: str) -> tuple[str, str, str]:
+    """본문 끝에 섞인 정답/해설 줄을 별도 필드로 분리한다."""
+    body_lines: list[str] = []
+    explanation_lines: list[str] = []
+    answer = ""
+    mode = "body"
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        answer_match = ANSWER_LINE_RE.match(line)
+        if answer_match and not _is_answer_heading(answer_match.group("value")):
+            answer = answer_match.group("value").strip()
+            mode = "body"
+            continue
+        explanation_match = EXPLANATION_LINE_RE.match(line)
+        if explanation_match:
+            mode = "explanation"
+            first = (explanation_match.group("value") or "").strip()
+            if first:
+                explanation_lines.append(first)
+            continue
+        if mode == "explanation":
+            explanation_lines.append(raw_line.rstrip())
+        else:
+            body_lines.append(raw_line.rstrip())
+    return (
+        _clean_text("\n".join(body_lines)),
+        answer,
+        _clean_text("\n".join(explanation_lines)),
+    )
 
 
 def _problem_from_row(row: dict[str, Any], source_type: str, source_name: str) -> dict[str, Any] | None:
@@ -281,6 +744,13 @@ def _problem_from_row(row: dict[str, Any], source_type: str, source_name: str) -
     title = _first(row, "title")
     if not stem and not title:
         return None
+    choices = _choices_from_row(row)
+    if stem and not choices:
+        stem, extracted_answer, extracted_explanation = _split_answer_explanation(stem)
+        stem, choices = _split_stem_and_choices(stem)
+    else:
+        extracted_answer = ""
+        extracted_explanation = ""
     return {
         "source_type": source_type,
         "source_name": source_name,
@@ -290,15 +760,15 @@ def _problem_from_row(row: dict[str, Any], source_type: str, source_name: str) -
         "tags": _first(row, "tags"),
         "title": title or (stem[:40] + ("..." if len(stem) > 40 else "")),
         "stem": stem,
-        "choices": _choices_from_row(row),
-        "answer": _first(row, "answer"),
-        "explanation": _first(row, "explanation"),
+        "choices": choices,
+        "answer": _first(row, "answer") or extracted_answer,
+        "explanation": _first(row, "explanation") or extracted_explanation,
     }
 
 
 def import_csv(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
     save_upload(filename, payload)
-    text = payload.decode("utf-8-sig", errors="replace")
+    text = _decode_text(payload)
     sample = text[:2048]
     dialect = csv.Sniffer().sniff(sample) if "," in sample or "\t" in sample else csv.excel
     reader = csv.DictReader(io.StringIO(text), dialect=dialect)
@@ -356,6 +826,10 @@ def import_sqlite(filename: str, payload: bytes, metadata: dict[str, Any]) -> di
 
 
 QUESTION_LINE_RE = re.compile(r"^\s*(?:문제\s*)?(\d{1,3})\s*[\.\)]")
+PASSAGE_LEAD_RE = re.compile(r"^\s*\[\s*\d{1,2}\s*[~∼\-–]\s*\d{1,2}\s*\]")
+QUESTION_TRAILER_RE = re.compile(
+    r"^\s*\[(?P<score>\d+점)\]\[(?P<context>[^\]]*?(?P<number>\d{1,3}))\]\s*$"
+)
 
 
 def _save_image_bytes(name: str, payload: bytes) -> str | None:
@@ -368,35 +842,242 @@ def _save_image_bytes(name: str, payload: bytes) -> str | None:
     return save_upload(name, payload)
 
 
+def _first_child_math_text(element: Any, name: str) -> str:
+    for child in element:
+        if _local_name(child) == name:
+            return _omml_text(child)
+    return ""
+
+
+def _first_descendant_math_text(element: Any, name: str) -> str:
+    for child in element.iter():
+        if child is element:
+            continue
+        if _local_name(child) == name:
+            return _omml_text(child)
+    return ""
+
+
+def _child_math_texts(element: Any, name: str) -> list[str]:
+    return [_omml_text(child) for child in element if _local_name(child) == name]
+
+
+def _math_attr(element: Any, *names: str) -> str:
+    wanted = set(names)
+    for key, value in getattr(element, "attrib", {}).items():
+        if str(key).rsplit("}", 1)[-1] in wanted and value:
+            return str(value)
+    return ""
+
+
+def _first_descendant_math_attr(element: Any, child_name: str, *attr_names: str) -> str:
+    for child in element.iter():
+        if child is element:
+            continue
+        if _local_name(child) == child_name:
+            value = _math_attr(child, *attr_names)
+            if value:
+                return value
+    return ""
+
+
+def _latex_group(value: str) -> str:
+    text = value.strip()
+    return text if text.startswith("{") and text.endswith("}") else "{" + text + "}"
+
+
+def _latex_delimiter(value: str, default: str = ".") -> str:
+    text = (value or default).strip() or default
+    return {"{": r"\{", "}": r"\}", " ": "."}.get(text, text)
+
+
+def _matrix_text(element: Any) -> str:
+    rows: list[str] = []
+    for row_node in element:
+        if _local_name(row_node) != "mr":
+            continue
+        cells = [cell for cell in _child_math_texts(row_node, "e")]
+        rows.append(" & ".join(cells))
+    if not rows:
+        return ""
+    return r"\begin{matrix}" + r" \\ ".join(rows) + r"\end{matrix}"
+
+
+def _omml_text(element: Any) -> str:
+    """Word OMML 수식을 편집 가능한 LaTeX 스타일 텍스트 표현으로 바꾼다."""
+    name = _local_name(element)
+    if name == "t":
+        return element.text or ""
+    if name == "chr":
+        return _math_attr(element, "val") or element.text or ""
+    if name == "f":
+        num = _first_child_math_text(element, "num")
+        den = _first_child_math_text(element, "den")
+        return f"\\frac{_latex_group(num)}{_latex_group(den)}" if num or den else ""
+    if name == "rad":
+        deg = _first_child_math_text(element, "deg")
+        base = _first_child_math_text(element, "e")
+        return f"\\sqrt[{deg}]{_latex_group(base)}" if deg else f"\\sqrt{_latex_group(base)}"
+    if name == "d":
+        body = _first_child_math_text(element, "e")
+        beg = _latex_delimiter(_first_descendant_math_attr(element, "begChr", "val"), ".")
+        end = _latex_delimiter(_first_descendant_math_attr(element, "endChr", "val"), ".")
+        return f"\\left{beg}{body}\\right{end}" if body else ""
+    if name == "bar":
+        body = _first_child_math_text(element, "e")
+        pos = _first_descendant_math_attr(element, "pos", "val")
+        command = "underline" if pos == "bot" else "overline"
+        return f"\\{command}{_latex_group(body)}" if body else ""
+    if name == "sSup":
+        base = _first_child_math_text(element, "e")
+        sup = _first_child_math_text(element, "sup")
+        return f"{base}^{_latex_group(sup)}" if sup else base
+    if name == "sSub":
+        base = _first_child_math_text(element, "e")
+        sub = _first_child_math_text(element, "sub")
+        return f"{base}_{_latex_group(sub)}" if sub else base
+    if name == "sSubSup":
+        base = _first_child_math_text(element, "e")
+        sub = _first_child_math_text(element, "sub")
+        sup = _first_child_math_text(element, "sup")
+        if sub and sup:
+            return f"{base}_{_latex_group(sub)}^{_latex_group(sup)}"
+        return f"{base}_{_latex_group(sub)}" if sub else f"{base}^{_latex_group(sup)}"
+    if name == "nary":
+        symbol = _first_child_math_text(element, "chr") or _first_descendant_math_text(element, "chr") or "∑"
+        sub = _first_child_math_text(element, "sub")
+        sup = _first_child_math_text(element, "sup")
+        body = _first_child_math_text(element, "e")
+        symbol = {"∑": r"\sum", "Σ": r"\sum", "∫": r"\int", "∏": r"\prod"}.get(symbol, symbol)
+        limit = ""
+        if sub and sup:
+            limit = f"_{_latex_group(sub)}^{_latex_group(sup)}"
+        elif sub:
+            limit = f"_{_latex_group(sub)}"
+        elif sup:
+            limit = f"^{_latex_group(sup)}"
+        return f"{symbol}{limit} {body}".strip()
+    if name == "acc":
+        accent = _first_child_math_text(element, "chr") or _first_descendant_math_text(element, "chr")
+        body = _first_child_math_text(element, "e")
+        command = {
+            "\u0305": "overline",
+            "\u00af": "overline",
+            "\u20d7": "vec",
+            "\u2192": "vec",
+            "\u0332": "underline",
+        }.get(accent, "overline")
+        return f"\\{command}{_latex_group(body)}" if body else ""
+    if name == "limLow":
+        base = _first_child_math_text(element, "e")
+        limit = _first_child_math_text(element, "lim")
+        command = r"\lim" if base.strip() == "lim" else base
+        return f"{command}_{_latex_group(limit)}" if limit else command
+    if name == "limUpp":
+        base = _first_child_math_text(element, "e")
+        limit = _first_child_math_text(element, "lim")
+        command = r"\lim" if base.strip() == "lim" else base
+        return f"{command}^{_latex_group(limit)}" if limit else command
+    if name == "m":
+        return _matrix_text(element)
+    if name == "func":
+        fname = _first_child_math_text(element, "fName")
+        body = _first_child_math_text(element, "e")
+        return f"{fname}({body})" if fname else body
+    return "".join(_omml_text(child) for child in element)
+
+
+def _docx_paragraph_text(para: Any) -> str:
+    parts: list[str] = []
+    for child in para._p.iterchildren():
+        name = _local_name(child)
+        if name in {"oMath", "oMathPara"}:
+            math = _omml_text(child).strip()
+            if math:
+                parts.append(f"${math}$")
+            continue
+        if name == "r":
+            run_text = "".join(
+                node.text or ""
+                for node in child.iter()
+                if _local_name(node) == "t" and node.text
+            )
+            if run_text:
+                parts.append(run_text)
+    return "".join(parts).strip()
+
+
+def _docx_cell_text(cell: Any) -> str:
+    lines = [
+        _docx_paragraph_text(paragraph).strip()
+        for paragraph in getattr(cell, "paragraphs", []) or []
+    ]
+    return "\n".join(line for line in lines if line)
+
+
 def _paragraphs_to_chunks(
     blocks: list[tuple[str, list[str], list[list[list[str]]]]],
 ) -> list[dict[str, Any]]:
     """(문단 텍스트, 이미지 경로들, 표들) 목록을 문항 번호 기준으로 묶는다."""
     chunks: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
+    pending_lead: dict[str, Any] | None = None
+
+    def append_block(target: dict[str, Any], text: str, images: list[str], tables: list[list[list[str]]]) -> None:
+        if text:
+            target["text"].append(text)
+        target["images"].extend(images)
+        target["tables"].extend(tables)
+
     for text, images, tables in blocks:
+        trailer_match = QUESTION_TRAILER_RE.match(text)
+        if trailer_match and (current is not None or pending_lead is not None):
+            if current is None:
+                current = pending_lead or {"text": [], "images": [], "tables": []}
+                pending_lead = None
+                chunks.append(current)
+            append_block(current, text, images, tables)
+            current["number_hint"] = str(int(trailer_match.group("number")))
+            current = None
+            continue
         if QUESTION_LINE_RE.match(text):
-            current = {"text": [text], "images": list(images), "tables": list(tables)}
+            current = {
+                "text": [],
+                "images": [],
+                "tables": [],
+            }
+            if pending_lead is not None:
+                current["text"].extend(pending_lead["text"])
+                current["images"].extend(pending_lead["images"])
+                current["tables"].extend(pending_lead["tables"])
+                pending_lead = None
+            append_block(current, text, images, tables)
             chunks.append(current)
+            continue
+        if current is not None and PASSAGE_LEAD_RE.match(text):
+            pending_lead = {"text": [], "images": [], "tables": []}
+            append_block(pending_lead, text, images, tables)
+            current = None
             continue
         if current is None:
-            current = {
-                "text": [text] if text else [],
-                "images": list(images),
-                "tables": list(tables),
-            }
-            chunks.append(current)
+            if pending_lead is None:
+                pending_lead = {"text": [], "images": [], "tables": []}
+            append_block(pending_lead, text, images, tables)
             continue
-        if text:
-            current["text"].append(text)
-        current["images"].extend(images)
-        current["tables"].extend(tables)
+        append_block(current, text, images, tables)
+    if pending_lead is not None and not chunks:
+        chunks.append(pending_lead)
     result = []
     for chunk in chunks:
         body = _clean_text("\n".join(chunk["text"]))
         if body or chunk["images"] or chunk["tables"]:
             result.append(
-                {"text": body, "images": chunk["images"], "tables": chunk["tables"]}
+                {
+                    "text": body,
+                    "images": chunk["images"],
+                    "tables": chunk["tables"],
+                    "number_hint": chunk.get("number_hint", ""),
+                }
             )
     return result
 
@@ -408,10 +1089,13 @@ def _create_from_chunks(
     metadata: dict[str, Any],
 ) -> _Sink:
     sink = _Sink()
-    has_numbers = len(chunks) > 1
     for sequence, chunk in enumerate(chunks, start=1):
-        text = chunk["text"]
-        number = _extract_number(text, sequence) if has_numbers else ""
+        text, answer, explanation = _split_answer_explanation(chunk["text"])
+        text, choices = _split_stem_and_choices(text)
+        number = (
+            str(chunk.get("number_hint") or "")
+            or (_extract_number(text, sequence) if QUESTION_LINE_RE.match(text) else "")
+        )
         title = f"{Path(filename).stem} #{number}" if number else Path(filename).stem
         sink.add(
             {
@@ -421,11 +1105,47 @@ def _create_from_chunks(
                 "number": number,
                 "title": title,
                 "stem": text,
+                "choices": choices,
+                "answer": answer,
+                "explanation": explanation,
                 "image_paths": chunk["images"],
                 "tables": chunk.get("tables") or [],
             }
         )
     return sink
+
+
+VISUAL_CUE_RE = re.compile(r"(그림|그래프|도형|좌표평면|자료|표|곡선|직선|삼각형|사각형|원)")
+
+
+def _attach_unpositioned_images(chunks: list[dict[str, Any]], images: list[str]) -> str:
+    """위치 정보가 없는 HWP BinData 이미지를 문항들에 최대한 분산 배치한다."""
+    if not chunks or not images:
+        return ""
+    if len(chunks) == 1:
+        chunks[0]["images"] = [*images, *chunks[0]["images"]]
+        return f"이미지 {len(images)}개는 위치를 알 수 없어 첫 문항에 첨부했습니다."
+
+    cue_indexes = [
+        index
+        for index, chunk in enumerate(chunks)
+        if VISUAL_CUE_RE.search(str(chunk.get("text") or ""))
+    ]
+    order: list[int] = []
+    seen: set[int] = set()
+    for index in cue_indexes:
+        if index not in seen:
+            order.append(index)
+            seen.add(index)
+    for index in range(len(chunks)):
+        if index not in seen:
+            order.append(index)
+            seen.add(index)
+
+    for image_index, image in enumerate(images):
+        target = order[min(image_index, len(order) - 1)]
+        chunks[target]["images"].append(image)
+    return f"이미지 {len(images)}개는 HWP 내부 위치를 직접 읽지 못해 문항 순서 기준으로 분산 첨부했습니다."
 
 
 def import_docx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -467,10 +1187,10 @@ def import_docx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
                 if rel_path:
                     images.append(rel_path)
                     image_count += 1
-            blocks.append((para.text.strip(), images, []))
+            blocks.append((_docx_paragraph_text(para), images, []))
         elif child.tag == qn("w:tbl"):
             table = Table(child, document)
-            rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+            rows = [[_docx_cell_text(cell) for cell in row.cells] for row in table.rows]
             if any(any(cell for cell in row) for row in rows):
                 blocks.append(("", [], [rows]))
 
@@ -499,11 +1219,47 @@ def _hwpx_table_rows(tbl: Any) -> list[list[str]]:
         for tc in tr:
             if _local_name(tc) != "tc":
                 continue
-            texts = [node.text for node in tc.iter() if _local_name(node) == "t" and node.text]
+            texts: list[str] = []
+            for node in tc.iter():
+                name = _local_name(node)
+                if name != "equation" and _inside_hwpx_container(node, {"equation"}):
+                    continue
+                if name == "t" and node.text:
+                    texts.append(node.text)
+                elif name == "equation":
+                    texts.append(_hwpx_equation_text(node))
             cells.append("".join(texts).strip())
         if cells:
             rows.append(cells)
     return rows
+
+
+def _inside_hwpx_container(node: Any, names: set[str]) -> bool:
+    iter_ancestors = getattr(node, "iterancestors", None)
+    if iter_ancestors is None:
+        return False
+    return any(_local_name(parent) in names for parent in iter_ancestors())
+
+
+def _hwpx_equation_text(node: Any) -> str:
+    for attr in ("script", "text", "formula", "eqn"):
+        value = node.get(attr)
+        if value:
+            text = value.strip()
+            return text if text.startswith("$") and text.endswith("$") else f"${text}$"
+    for child in node.iter():
+        if child is node or _local_name(child) != "script" or not child.text:
+            continue
+        text = str(child.text).strip()
+        if text:
+            return text if text.startswith("$") and text.endswith("$") else f"${text}$"
+    texts = [
+        str(child.text).strip()
+        for child in node.iter()
+        if child is not node and child.text and str(child.text).strip()
+    ]
+    text = " ".join(texts).strip()
+    return f"${text}$" if text else "[수식 개체]"
 
 
 def _hwpx_manifest_map(archive: zipfile.ZipFile) -> dict[str, str]:
@@ -559,16 +1315,16 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
                     _hwpx_table_rows(node) for node in para.iter() if _local_name(node) == "tbl"
                 ]
                 tables = [rows for rows in tables if rows]
-                if tables:
-                    # 표가 든 문단은 셀 텍스트를 본문에 중복으로 넣지 않는다.
-                    paragraphs.append(("", [], tables))
-                    continue
                 texts: list[str] = []
                 images: list[str] = []
                 for node in para.iter():
+                    if _inside_hwpx_container(node, {"tbl", "equation"}):
+                        continue
                     name = _local_name(node)
                     if name == "t" and node.text:
                         texts.append(node.text)
+                    elif name == "equation":
+                        texts.append(_hwpx_equation_text(node))
                     elif name == "img":
                         ref = node.get("binaryItemIDRef") or node.get("binaryItemIDRef".lower()) or ""
                         if ref not in saved_bins:
@@ -583,7 +1339,7 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
                         if saved_bins[ref]:
                             images.append(saved_bins[ref])
                             image_count += 1
-                paragraphs.append((" ".join(texts).strip(), images, []))
+                paragraphs.append(("".join(texts).strip(), images, tables))
 
     chunks = _paragraphs_to_chunks(paragraphs)
     if not chunks:
@@ -643,10 +1399,111 @@ def _hwp_iter_records(stream: bytes):
         pos += size
 
 
+_ANSWER_SECTION_RE = re.compile(r"^\s*(?:\[정답\]|빠른\s*정답|정답\s*(?:및|과)\s*해설|정답\s*표)")
+
+
+def _looks_like_answer_section(text: str) -> bool:
+    """문항 뒤에 오는 정답표/해설 섹션인가(문항이 아니므로 제외 대상)."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(_ANSWER_SECTION_RE.match(t)) or t.count("[정답]") >= 3
+
+
+def _import_hwp_via_ir(
+    filename: str, payload: bytes, metadata: dict[str, Any]
+) -> dict[str, Any] | None:
+    """rhwp to_ir() 로 원본 HWP → 편집 가능한 문항(텍스트+수식EQN+이미지). 실패 시 None."""
+    try:
+        from .importers_hwp_ir import hwp_to_problems
+    except Exception:
+        return None
+    try:
+        problems = hwp_to_problems(
+            payload,
+            filename,
+            _save_image_bytes,
+            _split_inline_circled_choices,
+            chunk_paragraphs=_paragraphs_to_chunks,
+            split_stem_choices=_split_stem_and_choices,
+        )
+    except Exception:
+        return None
+    if not problems:
+        return None
+    stem_name = Path(filename).stem
+    sink = _Sink()
+    answer_section = False
+    for prob in problems:
+        num = str(prob.get("number") or "")
+        stem_text = prob.get("stem", "") or ""
+        # 정답표·해설 섹션은 문항 뒤에 오므로, 한 번 만나면 이후 항목도 전부 제외한다.
+        combined = stem_text + " " + " ".join(
+            str(cell) for tbl in (prob.get("tables") or []) for row in tbl for cell in row
+        )
+        if answer_section or _looks_like_answer_section(combined):
+            answer_section = True
+            continue
+        # 공유 지문은 원본 문제지처럼 테두리 박스로 낸다. writer 가 tables 를 테두리 표로
+        # 렌더하므로, 안내문("[1~3] 다음 글을...")은 stem(박스 위), 지문 본문은 1칸 표(박스
+        # 안)에 넣으면 편집 가능한 텍스트가 박스 안에 배치된다(writer 수정 불필요).
+        if prob.get("is_passage"):
+            head, _, body = stem_text.partition("\n")
+            sink.add(
+                {
+                    **metadata,
+                    "source_type": "hwp",
+                    "source_name": filename,
+                    "number": num,
+                    "title": f"{stem_name} 지문{num}",
+                    "unit": prob.get("unit") or metadata.get("unit", ""),
+                    "stem": head.strip(),
+                    "choices": [],
+                    "image_paths": prob.get("image_paths", []),
+                    "tables": [[[body.strip()]]] if body.strip() else [],
+                }
+            )
+            continue
+        # 번호가 비어 있으면 stem 선두("1." 등)에서 추출한다. 안 그러면 writer 가 순번
+        # 인덱스를 붙여 "2. 1. …"처럼 중복 표기된다(지문이 순번 슬롯을 차지하므로).
+        if not num and QUESTION_LINE_RE.match(stem_text):
+            num = _extract_number(stem_text, "")
+        choices = prob.get("choices", []) or []
+        # 선지가 아직 stem 에 섞여 있으면(국어/영어 문단-청킹 경로) 분리해 번호·문제·보기를
+        # 각각 편집 가능한 필드로 나눈다. 수학 마커 경로는 이미 선지가 분리돼 있어 건너뛴다.
+        if not choices:
+            stem_text, choices = _split_stem_and_choices(stem_text)
+        else:
+            stem_text = _strip_leading_leaked_choice_block(stem_text, choices)
+        sink.add(
+            {
+                **metadata,
+                "source_type": "hwp",
+                "source_name": filename,
+                "number": num,
+                "title": f"{stem_name} #{num}" if num else stem_name,
+                "unit": prob.get("unit") or metadata.get("unit", ""),
+                "stem": stem_text,
+                "choices": choices,
+                "image_paths": prob.get("image_paths", []),
+                "tables": prob.get("tables", []),
+            }
+        )
+    notices = [f"{len(sink.created)}개 문항을 HWP에서 편집 가능하게 가져왔습니다(수식·이미지 포함)."]
+    notices.extend(_dedup_notices(sink))
+    return {"created": sink.created, "notices": notices}
+
+
 def import_hwp(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
     import olefile
 
     save_upload(filename, payload)
+    # 1순위: rhwp to_ir() — 편집 가능한 [텍스트+수식(EQN)+이미지] 직접 추출. 수식은 $EQN$ 로
+    #   stem 에 인라인 삽입돼 writer 의 native_math 가 hp:equation 으로 방출한다.
+    #   실패/미설치면 아래 기존 경로(rhwp.paragraphs → OLE 레코드 → PrvText)로 폴백.
+    ir_result = _import_hwp_via_ir(filename, payload, metadata)
+    if ir_result is not None:
+        return ir_result
     notices: list[str] = []
     try:
         ole = olefile.OleFileIO(io.BytesIO(payload))
@@ -720,9 +1577,9 @@ def import_hwp(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[
     if not chunks:
         return {"created": [], "notices": ["HWP에서 텍스트를 추출하지 못했습니다.", *notices]}
     if images:
-        chunks[0]["images"] = [*images, *chunks[0]["images"]]
-        notices.append(f"이미지 {len(images)}개는 위치를 알 수 없어 첫 문항에 첨부했습니다.")
+        notice = _attach_unpositioned_images(chunks, images)
+        if notice:
+            notices.append(notice)
     sink = _create_from_chunks(chunks, "hwp", filename, metadata)
     notices.extend(_dedup_notices(sink))
     return {"created": sink.created, "notices": notices}
-

@@ -27,9 +27,12 @@ class ExamTemplate:
     include_explanations: bool = True
     merge_question_number: bool = False
     circled_choices: bool = False
+    choice_style: str = ""
     inline_short_choices: bool = False
+    answer_blank: bool = False
     compact: bool = False
     columns: int = 1
+    native_math_default: bool = False
 
     def export_option(self) -> dict[str, str | bool | int]:
         data = asdict(self)
@@ -56,6 +59,31 @@ TEMPLATES: tuple[ExamTemplate, ...] = (
         include_explanations=False,
         merge_question_number=True,
         circled_choices=True,
+        compact=True,
+    ),
+    ExamTemplate(
+        key="legacy_objective_12345",
+        label="레거시 객관식 1~5",
+        description="동그라미 대신 1 2 3 4 5 숫자 선지를 쓰는 옛 시험지 양식",
+        default_title="레거시 객관식 문제지",
+        masthead_title="레거시 객관식 문제지",
+        include_answers=False,
+        include_explanations=False,
+        merge_question_number=True,
+        choice_style="bare_number",
+        inline_short_choices=True,
+        compact=True,
+    ),
+    ExamTemplate(
+        key="legacy_short_answer_blank",
+        label="레거시 주관식 괄호",
+        description="선지가 없는 문항에 주관식 답안 괄호를 붙이는 옛 문제지 양식",
+        default_title="레거시 주관식 문제지",
+        masthead_title="레거시 주관식 문제지",
+        include_answers=False,
+        include_explanations=False,
+        merge_question_number=True,
+        answer_blank=True,
         compact=True,
     ),
     ExamTemplate(
@@ -133,6 +161,7 @@ TEMPLATES: tuple[ExamTemplate, ...] = (
         inline_short_choices=True,
         compact=True,
         columns=2,
+        native_math_default=True,
     ),
     ExamTemplate(
         key="kice_english",
@@ -246,3 +275,17 @@ def explanation_entries(
         heading = f"{label}. 정답 {answer}" if answer else f"{label}."
         entries.append((heading, explanation.splitlines()))
     return entries
+
+
+ANSWER_BLANK_RE = re.compile(r"[\(\[][\s＿_]{2,}[\)\]]|답\s*[:：]?\s*[\(\[]")
+
+
+def needs_answer_blank(problem: dict[str, Any], template: ExamTemplate) -> bool:
+    if not template.answer_blank or problem.get("choices"):
+        return False
+    stem = str(problem.get("stem") or "")
+    return ANSWER_BLANK_RE.search(stem) is None
+
+
+def answer_blank_text(template: ExamTemplate) -> str:
+    return "(          )"

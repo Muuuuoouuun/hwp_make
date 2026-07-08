@@ -359,7 +359,7 @@ textarea:hover {
 
 .workspace {
   display: grid;
-  grid-template-columns: 308px minmax(420px, 1fr) minmax(520px, 660px);
+  grid-template-columns: minmax(360px, 430px) minmax(0, 1fr);
   gap: 0;
   flex: 1 1 auto;
   min-height: 0;
@@ -431,9 +431,56 @@ textarea:hover {
   flex-direction: column;
 }
 
+.side-workbench {
+  gap: var(--s3);
+}
+
 .sidebar {
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+.side-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s1);
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--surface);
+  padding: var(--s1);
+}
+
+.side-switch-button {
+  min-width: 0;
+  min-height: 38px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--t-sm);
+}
+
+.side-switch-button:hover {
+  border-color: var(--line);
+  background: #ffffff;
+  color: var(--ink);
+}
+
+.side-switch-button.active {
+  border-color: var(--line-strong);
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.side-pane {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.side-pane .sb-block {
+  min-height: 0;
 }
 
 .sidebar::-webkit-scrollbar,
@@ -474,6 +521,24 @@ textarea:hover {
   font-weight: 760;
   letter-spacing: 0;
   line-height: 1.25;
+}
+
+.library-heading {
+  align-items: flex-start;
+  margin-bottom: var(--s2);
+}
+
+.library-heading > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.panel-kicker {
+  color: var(--muted);
+  font-size: var(--t-xs);
+  font-weight: 800;
+  letter-spacing: 0;
 }
 
 .panel-note {
@@ -680,7 +745,7 @@ textarea:hover {
 
 .filters {
   grid-template-columns: minmax(0, 1fr) 124px;
-  margin-bottom: var(--s3);
+  margin-bottom: var(--s2);
 }
 
 .bulk-row {
@@ -693,6 +758,50 @@ textarea:hover {
   min-height: 34px;
   padding: 0 var(--s2);
   font-size: var(--t-base);
+}
+
+.selection-bridge {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--paper);
+  padding: var(--s2);
+}
+
+.selection-bridge > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.selection-bridge strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: var(--t-sm);
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selection-bridge span {
+  color: var(--muted);
+  font-size: var(--t-xs);
+  font-weight: 700;
+}
+
+.selection-bridge > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--ink-soft);
 }
 
 .history-list {
@@ -1038,7 +1147,7 @@ textarea:hover {
 
 .problem-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 72px;
+  grid-template-columns: minmax(0, 1fr) 108px;
   gap: var(--s2);
   min-height: 72px;
   border: 1px solid var(--line);
@@ -1047,6 +1156,11 @@ textarea:hover {
   padding: var(--s3);
   cursor: pointer;
   transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
+}
+
+.side-workbench .problem-row {
+  grid-template-columns: minmax(0, 1fr) 96px;
+  min-height: 92px;
 }
 
 .problem-row:hover {
@@ -1065,7 +1179,7 @@ textarea:hover {
 }
 
 .problem-row.selected {
-  border-color: var(--line-strong);
+  border-color: var(--accent);
   background: #fbfaf6;
 }
 
@@ -1073,6 +1187,36 @@ textarea:hover {
   border-color: var(--accent);
   background: #f6f5ef;
   box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.problem-body {
+  min-width: 0;
+}
+
+.problem-action {
+  display: grid;
+  align-content: start;
+  gap: var(--s2);
+}
+
+.problem-status {
+  justify-self: end;
+  min-width: 62px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: var(--t-xs);
+  font-weight: 800;
+  line-height: 1.2;
+  padding: 4px 8px;
+  text-align: center;
+}
+
+.problem-status.selected {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #ffffff;
 }
 
 .problem-merge-btn {
@@ -1085,10 +1229,14 @@ textarea:hover {
   white-space: nowrap;
 }
 
+.side-workbench .problem-merge-btn {
+  width: 100%;
+}
+
 .problem-merge-btn.active {
-  border-color: var(--line-strong);
+  border-color: var(--danger);
   background: var(--surface);
-  color: var(--muted);
+  color: var(--danger);
 }
 
 .problem-merge-btn.active:hover {
@@ -1158,7 +1306,7 @@ textarea:hover {
 }
 
 #countBadge {
-  min-width: 34px;
+  min-width: 42px;
   font-size: var(--t-sm);
 }
 
@@ -1463,7 +1611,7 @@ textarea:hover {
   }
 
   .workspace {
-    grid-template-columns: 320px minmax(0, 1fr);
+    grid-template-columns: minmax(330px, 390px) minmax(0, 1fr);
   }
 
   .tool-panel {
@@ -1477,10 +1625,6 @@ textarea:hover {
 
   .problem-list {
     max-height: 62vh;
-  }
-
-  .editor-panel {
-    grid-column: 1 / -1;
   }
 
   .editor-form {
@@ -1530,8 +1674,13 @@ textarea:hover {
   .export-box,
   .filters,
   .two-col,
-  .bulk-row {
+  .bulk-row,
+  .selection-bridge {
     grid-template-columns: 1fr;
+  }
+
+  .selection-bridge > span {
+    display: none;
   }
 
   .bulk-row span {
@@ -1540,6 +1689,21 @@ textarea:hover {
 
   .problem-row {
     grid-template-columns: 1fr;
+  }
+
+  .problem-action {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+
+  .problem-status {
+    justify-self: start;
+  }
+
+  .problem-merge-btn {
+    min-width: 104px;
   }
 
   .basket-list,

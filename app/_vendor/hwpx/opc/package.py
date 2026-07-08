@@ -641,10 +641,14 @@ class HwpxPackage:
             if existing.get("id") == item_id:
                 return  # already present
 
-        new_item = manifest_el.makeelement(
-            f"{{{OPF_NS['opf']}}}item",
-            {"id": item_id, "href": href, "media-type": media_type},
-        )
+        attrs = {"id": item_id, "href": href, "media-type": media_type}
+        # 한컴 호환 필수: 패키지에 내장된 BinData(이미지 등)는 isEmbeded="1" 이 있어야
+        # 한컴오피스 한글이 '내장 리소스'로 인식해 렌더한다. 이 속성이 없으면 외부
+        # 링크로 간주해 그림이 빈 박스로 나온다(실제 한컴 뷰어에서 확인, 2026-07-07).
+        # (isEmbeded 는 한컴 OWPML 철자 그대로 — d 하나. 폰트의 isEmbedded 와 다름.)
+        if href.startswith("BinData/"):
+            attrs["isEmbeded"] = "1"
+        new_item = manifest_el.makeelement(f"{{{OPF_NS['opf']}}}item", attrs)
         manifest_el.append(new_item)
         self._persist_manifest()
 

@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from . import hwpx_writer
+from . import hwpx_writer_v2
 
 try:
     import rhwp
@@ -32,17 +32,19 @@ def render_preview(
     template_key: str = "basic",
     max_pages: int = MAX_PREVIEW_PAGES,
     include_answer_sheet: bool = False,
+    native_math: bool = False,
 ) -> dict[str, Any]:
     if rhwp is None:
         raise RuntimeError("미리보기 엔진(rhwp-python)이 설치되어 있지 않습니다.")
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "preview.hwpx"
-        hwpx_writer.write_hwpx(
+        hwpx_writer_v2.write_hwpx(
             path,
             title,
             problems,
             template_key=template_key,
             include_answer_sheet=include_answer_sheet,
+            native_math=native_math,
         )
         doc = rhwp.parse(str(path))
         page_count = int(doc.page_count)

@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import math_text
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("HWP_MAKE_DATA_DIR", PROJECT_ROOT / "data")).resolve()
@@ -50,6 +52,7 @@ def init_db() -> None:
                 explanation TEXT NOT NULL DEFAULT '',
                 image_paths_json TEXT NOT NULL DEFAULT '[]',
                 tables_json TEXT NOT NULL DEFAULT '[]',
+                layout_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -59,20 +62,24 @@ def init_db() -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(problems)")}
         if "tables_json" not in columns:
             conn.execute("ALTER TABLE problems ADD COLUMN tables_json TEXT NOT NULL DEFAULT '[]'")
+        if "layout_json" not in columns:
+            conn.execute("ALTER TABLE problems ADD COLUMN layout_json TEXT NOT NULL DEFAULT '{}'")
         if "content_hash" not in columns:
             conn.execute("ALTER TABLE problems ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''")
-            for row in conn.execute("SELECT id, stem, choices_json, answer FROM problems").fetchall():
-                digest = _content_hash(
-                    {
-                        "stem": row["stem"],
-                        "choices": row["choices_json"],
-                        "answer": row["answer"],
-                    }
-                )
-                if digest:
-                    conn.execute(
-                        "UPDATE problems SET content_hash = ? WHERE id = ?", (digest, row["id"])
-                    )
+        for row in conn.execute(
+            "SELECT id, stem, choices_json, answer, image_paths_json, tables_json, content_hash FROM problems"
+        ).fetchall():
+            digest = _content_hash(
+                {
+                    "stem": row["stem"],
+                    "choices": row["choices_json"],
+                    "answer": row["answer"],
+                    "image_paths": row["image_paths_json"],
+                    "tables": row["tables_json"],
+                }
+            )
+            if digest and digest != row["content_hash"]:
+                conn.execute("UPDATE problems SET content_hash = ? WHERE id = ?", (digest, row["id"]))
         conn.execute("CREATE INDEX IF NOT EXISTS idx_problems_source ON problems(source_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_problems_subject ON problems(subject)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_problems_tags ON problems(tags)")
@@ -97,11 +104,80 @@ def _as_choice_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+def _jsonable(value: Any) -> Any:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _normalize_text_value(value: Any) -> str:
+    return math_text.normalize_recognized_math_text(str(value or ""))
+
+
+def _normalize_tables(value: Any) -> Any:
+    tables = _jsonable(value)
+    if not isinstance(tables, list):
+        return tables
+    normalized_tables: list[Any] = []
+    for table in tables:
+        if not isinstance(table, list):
+            normalized_tables.append(_normalize_text_value(table))
+            continue
+        normalized_rows: list[Any] = []
+        for row in table:
+            if isinstance(row, list):
+                normalized_rows.append([_normalize_text_value(cell) for cell in row])
+            else:
+                normalized_rows.append(_normalize_text_value(row))
+        normalized_tables.append(normalized_rows)
+    return normalized_tables
+
+
+def _normalize_problem_data(data: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(data)
+    for key in ("number", "subject", "unit", "tags", "title", "stem", "answer", "explanation"):
+        if key in normalized:
+            normalized[key] = _normalize_text_value(normalized[key])
+    if "choices" in normalized:
+        normalized["choices"] = [_normalize_text_value(choice) for choice in _as_choice_list(normalized.get("choices"))]
+    if "tables" in normalized:
+        normalized["tables"] = _normalize_tables(normalized.get("tables"))
+    return normalized
+
+
+def _image_fingerprints(value: Any) -> list[str]:
+    fingerprints: list[str] = []
+    for image_path in _as_choice_list(value):
+        if not image_path:
+            continue
+        full_path = (DATA_DIR / image_path).resolve()
+        try:
+            full_path.relative_to(DATA_DIR)
+        except ValueError:
+            fingerprints.append(image_path)
+            continue
+        if not full_path.is_file():
+            fingerprints.append(image_path)
+            continue
+        fingerprints.append(hashlib.sha1(full_path.read_bytes()).hexdigest())
+    return fingerprints
+
+
 def _content_hash(data: dict[str, Any]) -> str:
-    """본문·선지·정답을 정규화한 콘텐츠 지문. 식별 텍스트가 없으면 빈 문자열(중복 검사 제외)."""
-    parts = [str(data.get("stem") or "")]
-    parts.extend(_as_choice_list(data.get("choices")))
-    parts.append(str(data.get("answer") or ""))
+    """본문·선지·정답·표·이미지를 정규화한 콘텐츠 지문."""
+    normalized_data = _normalize_problem_data(data)
+    parts = [str(normalized_data.get("stem") or "")]
+    parts.extend(_as_choice_list(normalized_data.get("choices")))
+    parts.append(str(normalized_data.get("answer") or ""))
+    tables = _jsonable(normalized_data.get("tables"))
+    if tables:
+        parts.append(json.dumps(tables, ensure_ascii=False, sort_keys=True))
+    parts.extend(_image_fingerprints(data.get("image_paths")))
     normalized = re.sub(r"\s+", " ", "\n".join(parts)).strip().lower()
     if not normalized:
         return ""
@@ -132,17 +208,40 @@ def _json_list(value: Any) -> str:
     return json.dumps([value], ensure_ascii=False)
 
 
+def _json_object(value: Any) -> str:
+    if value is None:
+        return "{}"
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return "{}"
+        return json.dumps(parsed if isinstance(parsed, dict) else {}, ensure_ascii=False)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return "{}"
+
+
 def row_to_problem(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
     item.pop("content_hash", None)
     item["choices"] = json.loads(item.pop("choices_json") or "[]")
     item["image_paths"] = json.loads(item.pop("image_paths_json") or "[]")
     item["tables"] = json.loads(item.pop("tables_json") or "[]")
+    raw_layout = item.pop("layout_json", "{}") or "{}"
+    try:
+        layout = json.loads(raw_layout)
+    except json.JSONDecodeError:
+        layout = {}
+    item["layout"] = layout if isinstance(layout, dict) and layout else None
     item["image_urls"] = [f"/files/{path}" for path in item["image_paths"]]
+    item["math_spans"] = math_text.analyze_problem_math(item)
+    item["math_summary"] = math_text.math_summary(item)
     return item
 
 
 def create_problem(data: dict[str, Any]) -> dict[str, Any]:
+    data = _normalize_problem_data(data)
     stamp = now_iso()
     values = {
         "source_type": data.get("source_type") or "manual",
@@ -159,6 +258,7 @@ def create_problem(data: dict[str, Any]) -> dict[str, Any]:
         "explanation": data.get("explanation") or "",
         "image_paths_json": _json_list(data.get("image_paths")),
         "tables_json": _json_list(data.get("tables")),
+        "layout_json": _json_object(data.get("layout")),
         "content_hash": _content_hash(data),
         "created_at": stamp,
         "updated_at": stamp,
@@ -169,12 +269,12 @@ def create_problem(data: dict[str, Any]) -> dict[str, Any]:
             INSERT INTO problems (
                 source_type, source_name, source_page, number, subject, unit, tags,
                 title, stem, choices_json, answer, explanation, image_paths_json,
-                tables_json, content_hash, created_at, updated_at
+                tables_json, layout_json, content_hash, created_at, updated_at
             )
             VALUES (
                 :source_type, :source_name, :source_page, :number, :subject, :unit, :tags,
                 :title, :stem, :choices_json, :answer, :explanation, :image_paths_json,
-                :tables_json, :content_hash, :created_at, :updated_at
+                :tables_json, :layout_json, :content_hash, :created_at, :updated_at
             )
             """,
             values,
@@ -190,6 +290,7 @@ def create_problem_unique(
 
     seen에는 이번 가져오기 안에서 이미 만든 해시를 모아 한 파일 내 중복도 막는다.
     식별 텍스트가 없는(빈 해시) 문항은 항상 새로 만든다(이미지 전용 등)."""
+    data = _normalize_problem_data(data)
     digest = _content_hash(data)
     if digest:
         if seen is not None and digest in seen:
@@ -210,6 +311,7 @@ def get_problem(problem_id: int) -> dict[str, Any]:
 
 
 def update_problem(problem_id: int, data: dict[str, Any]) -> dict[str, Any]:
+    data = _normalize_problem_data(data)
     allowed = {
         "source_type",
         "source_name",
@@ -238,7 +340,10 @@ def update_problem(problem_id: int, data: dict[str, Any]) -> dict[str, Any]:
     if "tables" in data:
         assignments.append("tables_json = :tables_json")
         values["tables_json"] = _json_list(data.get("tables"))
-    if any(key in data for key in ("stem", "choices", "answer")):
+    if "layout" in data:
+        assignments.append("layout_json = :layout_json")
+        values["layout_json"] = _json_object(data.get("layout"))
+    if any(key in data for key in ("stem", "choices", "answer", "image_paths", "tables")):
         current = get_problem(problem_id)
         assignments.append("content_hash = :content_hash")
         values["content_hash"] = _content_hash(
@@ -246,6 +351,8 @@ def update_problem(problem_id: int, data: dict[str, Any]) -> dict[str, Any]:
                 "stem": data.get("stem", current["stem"]),
                 "choices": data["choices"] if "choices" in data else current["choices"],
                 "answer": data.get("answer", current["answer"]),
+                "image_paths": data["image_paths"] if "image_paths" in data else current["image_paths"],
+                "tables": data["tables"] if "tables" in data else current["tables"],
             }
         )
     if not assignments:
@@ -349,4 +456,3 @@ def delete_export(name: str) -> bool:
         return False
     target.unlink()
     return True
-

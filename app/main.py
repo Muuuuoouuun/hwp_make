@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
@@ -9,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import collector, docx_writer, exam_templates, hwpx_writer, importers, preview, storage
+from . import collector, docx_writer, exam_templates, hwpx_writer_v2, importers, preview, storage
 
 
 STATIC_DIR = storage.PROJECT_ROOT / "static"
@@ -31,7 +32,11 @@ app = FastAPI(title="HWP Make", version="0.1.0")
 storage.init_db()
 
 app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
-app.mount("/files", StaticFiles(directory=storage.DATA_DIR), name="files")
+# 데이터 루트(DATA_DIR) 전체를 마운트하면 problems.sqlite3·user_settings.json까지 HTTP로
+# 노출된다. 실제 서빙이 필요한 uploads/exports 하위만 개별 마운트한다.
+storage.ensure_dirs()
+app.mount("/files/uploads", StaticFiles(directory=storage.UPLOAD_DIR), name="files-uploads")
+app.mount("/files/exports", StaticFiles(directory=storage.EXPORT_DIR), name="files-exports")
 
 
 class ProblemPayload(BaseModel):
@@ -52,10 +57,17 @@ class ProblemPayload(BaseModel):
 
 
 class ImportPayload(BaseModel):
-    kind: Literal["pdf", "image", "csv", "sqlite", "hwp", "hwpx", "docx"]
+    kind: Literal["pdf", "image", "csv", "sqlite", "hwp", "hwpx", "docx", "text"]
     filename: str
     data_base64: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TextInputPayload(BaseModel):
+    title: str = ""
+    text: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    source_type: Literal["manual", "text"] = "manual"
 
 
 class CollectPayload(BaseModel):
@@ -74,6 +86,15 @@ class ExportPayload(BaseModel):
     format: Literal["hwpx", "docx"] = "hwpx"
     template_key: str = "basic"
     include_answer_sheet: bool = False
+    native_math: bool | None = None
+
+
+def _effective_native_math(payload: ExportPayload, template: exam_templates.ExamTemplate) -> bool:
+    if payload.format != "hwpx":
+        return False
+    if payload.native_math is not None:
+        return bool(payload.native_math)
+    return bool(template.native_math_default)
 
 
 def _safe_export_name(title: str, extension: str) -> str:
@@ -81,6 +102,18 @@ def _safe_export_name(title: str, extension: str) -> str:
     name = name[:80] or "문항 모음"
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"{stamp}_{name}.{extension}"
+
+
+def _unique_export_path(filename: str) -> Path:
+    """같은 초에 같은 제목으로 두 번 내보내도 덮어쓰지 않도록 충돌 시 접미사를 붙인다."""
+    path = storage.EXPORT_DIR / filename
+    if not path.exists():
+        return path
+    for counter in range(2, 1000):
+        candidate = storage.EXPORT_DIR / f"{path.stem}_{counter}{path.suffix}"
+        if not candidate.exists():
+            return candidate
+    return path
 
 
 @app.get("/")
@@ -137,7 +170,7 @@ def create_problem(payload: ProblemPayload) -> dict[str, Any]:
 @app.put("/api/problems/{problem_id}")
 def update_problem(problem_id: int, payload: ProblemPayload) -> dict[str, Any]:
     try:
-        return {"item": storage.update_problem(problem_id, payload.model_dump())}
+        return {"item": storage.update_problem(problem_id, payload.model_dump(exclude_unset=True))}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Problem not found") from exc
 
@@ -170,13 +203,34 @@ IMPORTERS = {
     "hwp": importers.import_hwp,
     "hwpx": importers.import_hwpx,
     "docx": importers.import_docx,
+    "text": importers.import_text,
 }
 
 
 @app.post("/api/import")
 def import_file(payload: ImportPayload) -> dict[str, Any]:
-    data = importers.decode_base64(payload.data_base64)
-    result = IMPORTERS[payload.kind](payload.filename, data, payload.metadata or {})
+    try:
+        data = importers.decode_base64(payload.data_base64)
+        result = IMPORTERS[payload.kind](payload.filename, data, payload.metadata or {})
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"가져오기 실패: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - 임포터 라이브러리별 오류를 500으로 감싼다
+        raise HTTPException(status_code=500, detail=f"가져오기 중 오류가 발생했습니다: {exc}") from exc
+    return {"ok": True, **result}
+
+
+@app.post("/api/import-text")
+def import_text(payload: TextInputPayload) -> dict[str, Any]:
+    title = payload.title.strip() or "직접 입력"
+    filename = f"{title}.txt"
+    result = importers.import_text(
+        filename,
+        payload.text.encode("utf-8"),
+        payload.metadata or {},
+        source_type=payload.source_type,
+    )
     return {"ok": True, **result}
 
 
@@ -200,9 +254,14 @@ def preview_export(payload: ExportPayload) -> dict[str, Any]:
     if not problems:
         raise HTTPException(status_code=400, detail="No problems selected")
     title = exam_templates.resolve_export_title(payload.title, template)
+    native_math = _effective_native_math(payload, template)
     try:
         result = preview.render_preview(
-            title, problems, template.key, include_answer_sheet=payload.include_answer_sheet
+            title,
+            problems,
+            template.key,
+            include_answer_sheet=payload.include_answer_sheet,
+            native_math=native_math,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"미리보기 실패: {exc}") from exc
@@ -221,16 +280,27 @@ def export(payload: ExportPayload) -> FileResponse:
         raise HTTPException(status_code=400, detail="No problems selected")
     storage.ensure_dirs()
     title = exam_templates.resolve_export_title(payload.title, template)
-    filename = _safe_export_name(title, payload.format)
-    path = storage.EXPORT_DIR / filename
-    if payload.format == "docx":
-        docx_writer.write_docx(
-            path, title, problems, template.key, include_answer_sheet=payload.include_answer_sheet
-        )
-        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    else:
-        hwpx_writer.write_hwpx(
-            path, title, problems, template.key, include_answer_sheet=payload.include_answer_sheet
-        )
-        media_type = "application/hwp+zip"
+    native_math = _effective_native_math(payload, template)
+    path = _unique_export_path(_safe_export_name(title, payload.format))
+    filename = path.name
+    try:
+        if payload.format == "docx":
+            docx_writer.write_docx(
+                path, title, problems, template.key, include_answer_sheet=payload.include_answer_sheet
+            )
+            media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        else:
+            # v2(vendored python-hwpx) 만 실제 한컴에서 열린다. v1(hwpx_writer)은 version.xml
+            # 등 패키지 스켈레톤이 비표준이라 한컴이 "파일 손상"으로 거부한다(실제 뷰어 확인).
+            hwpx_writer_v2.write_hwpx(
+                path,
+                title,
+                problems,
+                template.key,
+                include_answer_sheet=payload.include_answer_sheet,
+                native_math=native_math,
+            )
+            media_type = "application/hwp+zip"
+    except Exception as exc:  # noqa: BLE001 - 작성기 오류를 500으로 감싼다
+        raise HTTPException(status_code=500, detail=f"내보내기에 실패했습니다: {exc}") from exc
     return FileResponse(path, media_type=media_type, filename=filename)

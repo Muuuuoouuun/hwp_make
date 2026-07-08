@@ -41,8 +41,14 @@
       </section>
 
       <section class="workspace" aria-label="문항 제작 작업공간">
-        <aside class="sidebar tool-panel" aria-label="문제 가져오기">
-          <div class="sb-block">
+        <aside class="sidebar side-workbench tool-panel" aria-label="자료 넣기와 문제 고르기">
+          <div class="side-switch" role="tablist" aria-label="왼쪽 패널 전환">
+            <button class="side-switch-button active" type="button" data-side-mode="source" aria-pressed="true">1. 자료 넣기</button>
+            <button class="side-switch-button" type="button" data-side-mode="library" aria-pressed="false">2. 문제 고르기</button>
+          </div>
+
+          <section id="sourcePanel" class="side-pane active" data-side-pane="source" aria-label="문제 가져오기">
+            <div class="sb-block">
             <div class="panel-title compact">
               <h2>1. 문제 가져오기</h2>
             </div>
@@ -123,37 +129,52 @@
               </summary>
               <div id="historyList" class="history-list"></div>
             </details>
-          </div>
-        </aside>
+            </div>
+          </section>
 
-        <section class="list-panel tool-panel" aria-label="가져온 문제">
-          <div class="panel-title with-count">
-            <h2>2. 시험지에 넣을 문제 고르기</h2>
-            <span id="countBadge">0</span>
-          </div>
-          <p class="panel-note">행을 클릭하면 확인하고, 담기 버튼은 오른쪽 시험지 구성에 추가합니다.</p>
-          <div class="filters">
-            <input id="searchInput" type="search" placeholder="검색" />
-            <select id="sourceFilter">
-              <option value="">전체</option>
-              <option value="manual">직접</option>
-              <option value="pdf">PDF</option>
-              <option value="image">이미지</option>
-              <option value="hwp">HWP</option>
-              <option value="hwpx">HWPX</option>
-              <option value="docx">DOCX</option>
-              <option value="text">텍스트</option>
-              <option value="web">웹</option>
-              <option value="csv">CSV</option>
-              <option value="sqlite">SQLite</option>
-            </select>
-          </div>
-          <div class="bulk-row">
-            <button id="selectAllButton">보이는 문제 담기</button>
-            <button id="clearSelectionButton">담은 문제 비우기</button>
-          </div>
-          <div id="problemList" class="problem-list"></div>
-        </section>
+          <section id="libraryPanel" class="side-pane list-panel hidden" data-side-pane="library" aria-label="문제 보관함">
+            <div class="panel-title with-count library-heading">
+              <div>
+                <span class="panel-kicker">문제 보관함</span>
+                <h2>2. 검토해서 시험지에 담기</h2>
+              </div>
+              <span id="countBadge">0</span>
+            </div>
+            <p class="panel-note">가져온 문제를 확인하고, 필요한 문항만 오른쪽 시험지 구성으로 보냅니다.</p>
+            <div class="selection-bridge" aria-label="문제 담기 흐름">
+              <div>
+                <strong>가져온 문제</strong>
+                <span id="libraryProblemHint">검색 결과 0개</span>
+              </div>
+              <span aria-hidden="true">→</span>
+              <div>
+                <strong>오른쪽 시험지</strong>
+                <span id="libraryBasketHint">담은 문제 0개</span>
+              </div>
+            </div>
+            <div class="filters">
+              <input id="searchInput" type="search" placeholder="번호, 제목, 본문 검색" aria-label="문제 검색" />
+              <select id="sourceFilter" aria-label="자료 종류 필터">
+                <option value="">전체</option>
+                <option value="manual">직접</option>
+                <option value="pdf">PDF</option>
+                <option value="image">이미지</option>
+                <option value="hwp">HWP</option>
+                <option value="hwpx">HWPX</option>
+                <option value="docx">DOCX</option>
+                <option value="text">텍스트</option>
+                <option value="web">웹</option>
+                <option value="csv">CSV</option>
+                <option value="sqlite">SQLite</option>
+              </select>
+            </div>
+            <div class="bulk-row">
+              <button id="selectAllButton">검색 결과 모두 담기</button>
+              <button id="clearSelectionButton">담은 문제 비우기</button>
+            </div>
+            <div id="problemList" class="problem-list"></div>
+          </section>
+        </aside>
 
         <section class="editor-panel tool-panel" aria-label="시험지 구성과 문제 확인">
           <section class="merge-panel" aria-label="시험지 구성">
@@ -280,6 +301,6 @@
       </div>
     </div>
     <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
-    <script src="/static/app.js?v=11" type="module"></script>
+    <script src="/static/app.js?v=12" type="module"></script>
   </body>
 </html>

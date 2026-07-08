@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import sys
+import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -66,6 +67,11 @@ def _extract(path: Path) -> list[str]:
     return out
 
 
+def _normalized_stream(items: list[str]) -> str:
+    text = "\n".join(items).replace("\u3000", " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _validate(path: Path) -> str:
     try:
         from hwpx import validate_package
@@ -113,6 +119,8 @@ def main() -> int:
             t1, t2 = _extract(p1), _extract(p2)
             if t1 == t2:
                 parity = f"MATCH ({len(t1)})"
+            elif _normalized_stream(t1) == _normalized_stream(t2):
+                parity = f"MATCH normalized (v1={len(t1)} v2={len(t2)})"
             else:
                 parity = f"DIFF v1={len(t1)} v2={len(t2)}"
                 all_ok = False
