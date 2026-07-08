@@ -1819,12 +1819,11 @@ def _append_spacer_table(
     no_border_fill: str,
     compact_para: str,
     page_break: bool,
-    image_item: dict[str, Any] | None = None,
 ) -> bool:
     if table_height <= 0:
         return False
     attrs = {"pageBreak": "1"} if page_break else {}
-    table = doc.add_table(
+    doc.add_table(
         1,
         1,
         width=table_width,
@@ -1833,40 +1832,7 @@ def _append_spacer_table(
         para_pr_id_ref=compact_para,
         **attrs,
     )
-    if image_item is not None:
-        cell = table.cell(0, 0)
-        _clear_cell_paragraphs(cell)
-        _append_cell_image(
-            doc,
-            cell,
-            image_item,
-            cell_width=table_width,
-            para_pr_id_ref=compact_para,
-            border_fill_id_ref=no_border_fill,
-        )
     return True
-
-
-def _flow_repeated_header_image(
-    page: fitz.Page,
-    *,
-    margin_left_pt: float,
-    margin_right_pt: float,
-    margin_top_pt: float,
-    body_top: float,
-) -> dict[str, Any] | None:
-    if body_top <= margin_top_pt + 8:
-        return None
-    crop = fitz.Rect(
-        margin_left_pt,
-        margin_top_pt,
-        max(margin_left_pt + 1.0, page.rect.width - margin_right_pt),
-        body_top,
-    )
-    matrix = fitz.Matrix(2.0, 2.0)
-    pix = page.get_pixmap(matrix=matrix, clip=crop, alpha=False)
-    display = fitz.Rect(0, 0, crop.width, crop.height)
-    return {"type": "image", "bbox": display, "image": pix.tobytes("png"), "ext": "png", "header_image": True}
 
 
 def _append_flow_block(
@@ -1965,8 +1931,6 @@ def write_pdf_flow_hwpx(
         body_width_mm = max(10.0, width_mm - margin_left_mm - margin_right_mm)
         table_width = _mm_to_hwp(body_width_mm)
         cell_width = max(1, table_width // 2)
-        margin_left_pt = margin_left_mm * 72.0 / 25.4
-        margin_right_pt = margin_right_mm * 72.0 / 25.4
         margin_top_pt = margin_top_mm * 72.0 / 25.4
         margin_bottom_pt = margin_bottom_mm * 72.0 / 25.4
 
@@ -2010,17 +1974,9 @@ def write_pdf_flow_hwpx(
             body_items = [item for item in all_items if _item_bbox(item).y1 >= body_top - 1]
             body_items = _merge_same_row_flow_lines(page, body_items)
             repeated_header_spacer = 0
-            repeated_header_image: dict[str, Any] | None = None
             header_gap_pt = max(0.0, body_top - margin_top_pt)
             if header_items and page_index > 0:
                 repeated_header_spacer = _pt_to_hwp(min(header_gap_pt, 140.0))
-                repeated_header_image = _flow_repeated_header_image(
-                    page,
-                    margin_left_pt=margin_left_pt,
-                    margin_right_pt=margin_right_pt,
-                    margin_top_pt=margin_top_pt,
-                    body_top=body_top,
-                )
                 header_items = []
             elif header_items and not _has_substantial_flow_header(page, header_items):
                 body_items = all_items
@@ -2049,7 +2005,6 @@ def write_pdf_flow_hwpx(
                 no_border_fill=no_border_fill,
                 compact_para=compact_para,
                 page_break=page_index > 0 and not header_items,
-                image_item=repeated_header_image,
             )
             table_attrs = {"pageBreak": "1"} if page_index > 0 and not header_items and not has_spacer else {}
             table = doc.add_table(
