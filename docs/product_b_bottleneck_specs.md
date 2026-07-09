@@ -6,6 +6,14 @@ Product B는 입력 PDF/HWP/HWPX를 평가원/교육청 시험지에 가까운 �
 
 핵심 목표는 보기만 비슷한 문서가 아닙니다. 문항 번호가 싱크되고, 수식이 네이티브 수식으로 살아 있고, 폰트/간격이 시험지 기준에 맞으며, 렌더링에서 겹침과 overflow가 없어야 합니다.
 
+## 현재 상태 스냅샷
+
+- 수학 PDF/HWP 복원은 수식 구현과 레이아웃 겹침 방지를 최우선으로 둡니다.
+- 네 개 로컬 수학 PDF 샘플 기준으로 선택지 분수 placeholder는 제거되었고, 단순 stem stacked fraction과 확정 split vector residue까지 복원되었습니다.
+- 남은 핵심 병목은 mixed fraction, root, super/subscript, cases, bbox 기반 vector base 추론입니다.
+- PDF 원본 레이아웃 HWPX는 흐름 기반 writer가 canonical입니다. 절대좌표 글상자 방식은 한컴 호환성과 편집성 문제가 있어 실험 기준으로만 둡니다.
+- 폰트/간격 기본 profile은 평가원형 `신명조/HY신명조/신명 중명조 + Times New Roman + 돋움/중고딕`, 본문 10-11pt, 줄간격 160-170%, 장평 약 95, 자간 약 -5입니다.
+
 ## 현재 Canonical 기준
 
 ### 1. 입력 경로는 두 개로 분리한다
@@ -50,7 +58,18 @@ XML 유효성만으로는 충분하지 않습니다. 합격 기준은 rhwp 렌�
 
 ### 8. HWP GUI 열기는 보조 검증이다
 
-한글 광고 탭은 환경/제품/계정/라이선스 영향이므로 문서 생성 코드의 책임 범위 밖입니다. 수정권한/보호보기/읽기전용 문제는 생성 파일 속성, 보호 플래그, Mark-of-the-Web, 출력 경로를 점검합니다. GUI open은 제한 시간 있는 probe로 다루고, 기본 검증은 XML/rhwp/render 기반으로 둡니다.
+한글 광고 탭은 환경/제품/계정/라이선스 영향이므로 문서 생성 코드의 책임 범위 밖입니다. 수정권한/보호보기/읽기전용 문제는 생성 파일 속성, 보호 플래그, Mark-of-the-Web, 출력 경로를 점검합니다. GUI open은 제한 시간 있는 probe로 다루고, 기본 검증은 XML/rhwp/render 기반으로 둡니다. GUI 이슈를 기록할 때는 `docs/hwp_open_probe_checklist.md`의 구분을 사용합니다.
+
+## 기준 적용 체크리스트
+
+작업을 커밋하기 전에 아래 질문에 모두 답합니다.
+
+1. 이 변경이 `/api/import` 문제은행 경로인지, `/api/pdf-layout-export` 원본 레이아웃 경로인지 분리되어 있는가?
+2. 수식이 텍스트 흉내나 전체 이미지가 아니라 가능한 네이티브 `hp:equation`으로 남는가?
+3. 렌더 기준에서 overflow, column crossing, 겹침이 악화되지 않는가?
+4. PDF 좌표/스팬 정보가 사라지지 않고 다음 수식 복원에 계속 사용 가능한가?
+5. 폰트/간격 변경은 평가원형 기본 profile 또는 명명된 별도 profile로 설명되는가?
+6. 레퍼런스 PDF/HWP 파일 자체를 저장소에 추가하지 않았는가?
 
 ## 완료되어 유지할 작업
 
@@ -96,6 +115,12 @@ XML 유효성만으로는 충분하지 않습니다. 합격 기준은 rhwp 렌�
 10. `한 버튼, 한 파이프라인으로 모든 입력/출력을 해결`하는 기준은 폐기합니다.
     문제은행 import와 PDF 원본 레이아웃 복원은 서로 다른 제품 동작으로 유지합니다.
 
+11. `verify_pdf_layout_hwpx.py --render`만 실행하면 PDF 레이아웃 검증이 끝난다는 기준은 폐기합니다.
+    이 스크립트는 이미 생성된 HWPX 경로가 필요합니다. 먼저 `pdf_layout_hwpx_probe.py`나 API export로 HWPX를 만든 뒤, 그 산출물을 검증합니다.
+
+12. `한글 GUI 광고/계정 탭을 생성 파일에서 제거해야 통과` 기준은 폐기합니다.
+    광고 탭은 환경 변수에 가깝고, 개발 기준은 생성 파일의 편집 가능성, 보호 플래그, Mark-of-the-Web, 렌더/구조 검증입니다.
+
 ## 다음 우선순위
 
 1. 실제 PDF QA의 import, HWPX write, render phase 분리와 샘플별 시간 기록을 regression gate로 유지합니다.
@@ -120,7 +145,8 @@ python scripts/verify_pdf_math_pipeline.py
 python scripts/verify_real_pdf_math_samples.py
 python scripts/qa_hwp_math_samples.py
 python scripts/verify_pdf_layout_export_api.py
-python scripts/verify_pdf_layout_hwpx.py --render
+python scripts/pdf_layout_hwpx_probe.py "data/uploads/sample.pdf" "data/exports/sample_flow.hwpx" --flow --max-pages 1
+python scripts/verify_pdf_layout_hwpx.py "data/exports/sample_flow.hwpx" --render
 python scripts/verify_kice_typography.py
 ```
 

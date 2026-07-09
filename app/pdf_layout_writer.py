@@ -276,13 +276,11 @@ def _flow_size_for_span(span: dict[str, Any]) -> float:
     except (TypeError, ValueError):
         size = 10.0
     if size <= 8.6:
-        return 9.0
-    if size <= 11.2:
-        return 11.0
+        return 8.8
     if size <= 12.8:
-        return 11.5
+        return 10.0
     if size <= 15.0:
-        return 13.0
+        return 12.0
     return min(16.0, round(size, 1))
 
 
@@ -1979,6 +1977,57 @@ def _append_header_table(
     return count
 
 
+def _append_header_content_to_cell(
+    doc: HwpxDocument,
+    cell: Any,
+    page: fitz.Page,
+    items: list[dict[str, Any]],
+    *,
+    table_width: int,
+    table_height: int,
+    no_border_fill: str,
+    compact_para: str,
+    styles: dict[tuple[str, float, bool], str],
+) -> int:
+    if not items:
+        return 0
+    _clear_cell_paragraphs(cell)
+    table = cell.add_table(
+        1,
+        3,
+        width=table_width,
+        height=table_height,
+        border_fill_id_ref=no_border_fill,
+    )
+    header_weights = (1.2, 5.6, 1.2)
+    try:
+        table.set_column_widths(header_weights)
+    except Exception:
+        pass
+    weight_total = sum(header_weights)
+    header_cell_widths = [int(round(table_width * weight / weight_total)) for weight in header_weights]
+    header_cell_widths[-1] = max(1, table_width - sum(header_cell_widths[:-1]))
+    for column in (0, 1, 2):
+        _clear_cell_paragraphs(table.cell(0, column))
+    count = 0
+    for column_index, column_items in enumerate(_flow_header_columns(page, items)):
+        nested_cell = table.cell(0, column_index)
+        for item in column_items:
+            if item.get("type") == "image":
+                if _append_cell_image(
+                    doc,
+                    nested_cell,
+                    item,
+                    cell_width=max(1, header_cell_widths[column_index]),
+                    para_pr_id_ref=compact_para,
+                    border_fill_id_ref=no_border_fill,
+                ):
+                    count += 1
+            elif _append_cell_line(doc, nested_cell, item, styles=styles, para_pr_id_ref=compact_para):
+                count += 1
+    return count
+
+
 def _append_spacer_table(
     doc: HwpxDocument,
     *,
@@ -2165,40 +2214,46 @@ def write_pdf_flow_hwpx(
             header_height = _pt_to_hwp(header_gap_pt)
             body_height_pt = max(24.0, page.rect.height - body_top - margin_bottom_pt)
             body_height = _pt_to_hwp(min(body_height_pt, page.rect.height * 0.62))
-            header_count = _append_header_table(
-                doc,
-                page,
-                header_items,
-                table_width=table_width,
-                table_height=header_height,
-                no_border_fill=no_border_fill,
-                compact_para=compact_para,
-                styles=styles,
-                page_break=page_index > 0,
-            )
-            line_count += header_count
-            has_spacer = _append_spacer_table(
-                doc,
-                table_width=table_width,
-                table_height=repeated_header_spacer,
-                no_border_fill=no_border_fill,
-                compact_para=compact_para,
-                page_break=page_index > 0 and not header_items,
-            )
-            table_attrs = {"pageBreak": "1"} if page_index > 0 and not header_items and not has_spacer else {}
+            header_row_height = 0
+            if header_items:
+                header_row_height = max(_pt_to_hwp(24), min(header_height, _pt_to_hwp(140)))
+            elif repeated_header_spacer > 0:
+                header_row_height = max(_pt_to_hwp(4), repeated_header_spacer)
+            has_header_row = header_row_height > 0
+            body_row_index = 1 if has_header_row else 0
+            table_attrs = {"pageBreak": "1"} if page_index > 0 else {}
             table = doc.add_table(
-                1,
+                2 if has_header_row else 1,
                 2,
                 width=table_width,
-                height=body_height,
+                height=body_height + header_row_height,
                 border_fill_id_ref=no_border_fill,
                 para_pr_id_ref=compact_para,
                 **table_attrs,
             )
+            if has_header_row:
+                header_cell = table.merge_cells(0, 0, 0, 1)
+                header_cell.set_size(table_width, header_row_height)
+                _set_cell_border_fill(header_cell, no_border_fill)
+                _set_cell_margin(header_cell, left_mm=0.0, right_mm=0.0, top_mm=0.0, bottom_mm=0.0)
+                if header_items:
+                    line_count += _append_header_content_to_cell(
+                        doc,
+                        header_cell,
+                        page,
+                        header_items,
+                        table_width=table_width,
+                        table_height=header_row_height,
+                        no_border_fill=no_border_fill,
+                        compact_para=compact_para,
+                        styles=styles,
+                    )
             for column in (0, 1):
-                _clear_cell_paragraphs(table.cell(0, column))
-            left_cell = table.cell(0, 0)
-            right_cell = table.cell(0, 1)
+                body_cell = table.cell(body_row_index, column)
+                body_cell.set_size(cell_width, body_height)
+                _clear_cell_paragraphs(body_cell)
+            left_cell = table.cell(body_row_index, 0)
+            right_cell = table.cell(body_row_index, 1)
             _set_cell_border_fill(left_cell, column_divider_border_fill)
             _set_cell_margin(left_cell, left_mm=0.4, right_mm=2.3, top_mm=0.0, bottom_mm=0.0)
             _set_cell_margin(right_cell, left_mm=2.3, right_mm=0.4, top_mm=0.0, bottom_mm=0.0)

@@ -2,7 +2,7 @@
 
 HWP Make는 PDF, HWP/HWPX, DOCX, 이미지, 텍스트, CSV/SQLite 자료를 문항 단위로 가져오고, 평가원/교육청 시험지 스타일의 편집 가능한 HWPX/DOCX로 내보내는 로컬 앱입니다.
 
-현재 개발의 최우선 목표는 수학 시험지 기준입니다. 즉, 문항 번호 싱크, 네이티브 한글 수식, 실제 시험지 타이포그래피, 2단 레이아웃, 겹침 없는 렌더링을 동시에 만족하는 HWPX를 만드는 것입니다.
+현재 개발의 최우선 목표는 수학 시험지 기준입니다. 즉, 문항 번호 싱크, 네이티브 한글 수식, 실제 시험지 타이포그래피, 2단 레이아웃, 겹침 없는 렌더링을 동시에 만족하는 HWPX를 만드는 것입니다. Product B의 세부 기준과 폐기한 옛 기준은 `docs/product_b_bottleneck_specs.md`를 canonical 문서로 봅니다.
 
 ## 실행
 
@@ -38,6 +38,14 @@ pip install -r requirements.txt
 
 선택한 문항은 HWPX 또는 DOCX로 내보낼 수 있습니다. `.hwp` 바이너리 직접 저장은 한컴오피스 COM 자동화가 필요하므로 기본 출력은 HWPX입니다. 한컴오피스가 설치된 PC에서는 HWPX를 열어 `.hwp`로 저장할 수 있습니다.
 
+## 현재 판정 기준 요약
+
+1. 문항 번호는 원본 순서와 싱크가 맞아야 하며 누락/중복이 없어야 합니다.
+2. 수식은 가능한 한 Hancom EQN 네이티브 수식으로 내보냅니다. 텍스트로 보이는 흉내나 무조건 이미지화는 최종 목표가 아닙니다.
+3. 레이아웃은 렌더 결과 기준입니다. XML 유효성만으로 통과시키지 않고 overflow 0, column crossing 0, 겹침 없음까지 봅니다.
+4. PDF 원본 레이아웃 경로는 full-page raster fallback을 성공 기준으로 보지 않습니다. 편집 가능한 텍스트/수식이 우선입니다.
+5. 레퍼런스 시험지 PDF/HWP는 기본적으로 로컬 자료입니다. 저장소에는 샘플 파일 자체 대신 검증 스크립트, manifest, 분석 요약을 둡니다.
+
 ## 수식 기준
 
 - 수학 변수(`x`, `y`, `n`, `a`, `f` 등)는 Times New Roman 이탤릭 계열로 보이도록 맞춥니다.
@@ -70,11 +78,15 @@ pip install -r requirements.txt
 
 `data/`는 git에 올리지 않는 로컬 작업 영역입니다. 평가원/교육청 PDF/HWP 레퍼런스 파일도 저작권과 용량 때문에 기본적으로 저장소에 커밋하지 않습니다. 필요하면 파일명/출처/검증 상태를 문서화하고, 별도 사설 스토리지나 Git LFS 정책을 정한 뒤 추가합니다.
 
+로컬 레퍼런스 샘플의 이름, 용도, 검증 상태는 `docs/reference_samples_manifest.md`에 기록합니다. 이 manifest는 파일 자체를 추적하지 않고, 재현에 필요한 맥락만 남깁니다.
+
 ## HWP 열기 관련 기준
 
 - 한글 실행 시 뜨는 광고 탭은 설치된 제품, 계정, 라이선스, 업데이트 채널 영향이 크므로 생성 HWPX 내부에서 안정적으로 끌 수 있는 대상이 아닙니다.
 - 수정 권한, 보호 보기, 읽기 전용 탭은 일부 제어 가능합니다. 생성 파일의 문서 보호 플래그, 읽기 전용 속성, Mark-of-the-Web, temp/download 경로, 잠긴 출력 파일 여부를 점검합니다.
 - 개발 중 GUI 열기 검증은 보조 게이트입니다. 기본 검증은 HWPX XML, rhwp 렌더, 필요 시 제한 시간 있는 HWP COM open probe로 진행합니다.
+- Computer Use가 필요한 검증은 최소화합니다. 광고/수정권한 탭 때문에 자동화가 막히는 경우, 먼저 XML/rhwp/스크립트 검증으로 좁히고 GUI는 최종 확인이나 open-probe 체크리스트 용도로만 사용합니다.
+- GUI 열기 이슈를 기록할 때는 `docs/hwp_open_probe_checklist.md`의 editable/read-only/protected/ad prompt 구분을 사용합니다.
 
 ## 검증
 
@@ -93,7 +105,8 @@ python scripts/run_all_verify.py
 - `python scripts/verify_real_pdf_math_samples.py --mode import|write|render|all`
 - `python scripts/qa_hwp_math_samples.py`
 - `python scripts/verify_pdf_layout_export_api.py`
-- `python scripts/verify_pdf_layout_hwpx.py --render`
+- `python scripts/pdf_layout_hwpx_probe.py "data/uploads/sample.pdf" "data/exports/sample_flow.hwpx" --flow --max-pages 1`
+- `python scripts/verify_pdf_layout_hwpx.py "data/exports/sample_flow.hwpx" --render`
 - `python scripts/verify_kice_typography.py`
 - `powershell -ExecutionPolicy Bypass -File scripts/probe_hwp_open.ps1`
 
@@ -112,3 +125,5 @@ python scripts/run_all_verify.py
 - `scripts/analyze_hwp_templates.py`: 실제 HWP 샘플 스타일 분석
 - `docs/priority_work_queue.md`: 현재 우선순위 작업 큐
 - `docs/product_b_bottleneck_specs.md`: Product B 기준과 폐기한 옛 기준 정리
+- `docs/reference_samples_manifest.md`: 로컬 레퍼런스 샘플 목록과 사용 목적
+- `docs/hwp_open_probe_checklist.md`: 한글 GUI 열기/광고/수정권한 탭 진단 체크리스트
