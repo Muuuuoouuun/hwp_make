@@ -617,6 +617,12 @@ p_over_q_radical_guard = math_text.normalize_recognized_math_layout_text(
 )
 if "\\frac{p}{q}" in p_over_q_radical_guard:
     failures.append(f"Recognized math layout normalization: p/q radical context was over-converted {p_over_q_radical_guard!r}")
+log_base_placeholder = math_text.normalize_recognized_math_layout_text("log3\ue06da+log10\ue06dx")
+if r"\log_{3}a+\log_{10}x" not in log_base_placeholder:
+    failures.append(f"Recognized math layout normalization: log base placeholder failed {log_base_placeholder!r}")
+log_base_word_guard = math_text.normalize_recognized_math_layout_text("blog3\ue06da")
+if r"\log_{3}a" in log_base_word_guard:
+    failures.append(f"Recognized math layout normalization: log base placeholder over-converted word text {log_base_word_guard!r}")
 stacked_exponent_candidate = math_text.normalize_recognized_math_layout_text("9\ue06d4\n1")
 if "9^{\\frac{1}{4}}" not in stacked_exponent_candidate:
     failures.append(f"Recognized math layout normalization: stacked fraction exponent failed {stacked_exponent_candidate!r}")

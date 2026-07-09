@@ -276,11 +276,11 @@ def _flow_size_for_span(span: dict[str, Any]) -> float:
     except (TypeError, ValueError):
         size = 10.0
     if size <= 8.6:
-        return 8.8
+        return 8.4
     if size <= 12.8:
-        return 10.0
+        return 9.4
     if size <= 15.0:
-        return 12.0
+        return 10.8
     return min(16.0, round(size, 1))
 
 

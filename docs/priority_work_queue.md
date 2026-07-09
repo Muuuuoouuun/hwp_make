@@ -20,9 +20,10 @@ Canonical references:
    - Current status: residual classification ignores human-readable line-break markers, so `fraction`, `root`, `vector_or_arrow`, `cases_or_grouping`, and `adjacent_script_or_structure` buckets are no longer inflated by report formatting.
    - Current status: choice fraction repair removes all remaining `choice□` placeholders in the four local real math PDFs while keeping render overflow 0.
    - Current status: char-bbox stem fraction repair converts high-confidence stacked fractions, including `y=\frac{3}{x-1}`-style curves and `\frac{x2}{9}-\frac{y2}{16}`-style conics.
+   - Current status: log-base placeholder repair converts high-confidence `log3□a`-style PDF residue into `\log_{3}a` before `□x` can be misread as an overline.
    - Current status: split vector residue cleanup removes a `□⃗` line only when the following line is already a confirmed `\vec{...}` token.
-   - Current local baseline: the four-sample math PDF set reports 49 total `stem□` placeholders, down from 66 before this repair series, with malformed equation count 0 and render overflow 0.
-   - Current residual type counts after classifier cleanup: fraction 14, root 7, vector/arrow 6, cases/grouping 13, adjacent script/structure 9. Source-PDF `□` hints remain available separately for bbox-driven reconstruction.
+   - Current local baseline: the four-sample math PDF set reports 48 total `stem□` placeholders, down from 66 before this repair series, with malformed equation count 0 and render overflow 0.
+   - Current residual type counts after classifier cleanup: fraction 13, root 7, vector/arrow 6, cases/grouping 13, adjacent script/structure 9. Source-PDF `□` hints remain available separately for bbox-driven reconstruction.
    - Next action: classify the residual placeholders by structure type, then implement only high-confidence mixed fraction, root, script, case, and bbox-vector repairs.
    - Done when: remaining `□` counts are explained by type, and supported structural cases convert to native equations with regression fixtures.
 

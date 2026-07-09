@@ -173,6 +173,10 @@ SPLIT_NTH_ROOT_EXPONENT_RE = re.compile(
     rf"(?P<denominator>\d{{1,3}})\s*$"
 )
 P_OVER_Q_PLACEHOLDER_RE = re.compile(rf"[{HANCOM_MATH_PLACEHOLDER_CHARS}]p(?![A-Za-z0-9{GREEK_RANGE}])")
+LOG_BASE_PLACEHOLDER_RE = re.compile(
+    rf"(?<![A-Za-z\\])log(?P<base>[0-9A-Za-z{GREEK_RANGE}]{{1,4}})"
+    rf"[{HANCOM_MATH_PLACEHOLDER_CHARS}](?P<arg>[A-Za-z{GREEK_RANGE}][A-Za-z0-9{GREEK_RANGE}]*)"
+)
 UNIT_NUMERATOR_FRACTION_RE = re.compile(
     rf"(?P<prefix>^|[=(:,+\-*/<>\u2264\u2265]\s*)"
     rf"[{HANCOM_MATH_PLACEHOLDER_CHARS}](?P<den>[0-9]{{1,3}})(?![0-9])",
@@ -417,6 +421,7 @@ def normalize_recognized_math_text(text: str) -> str:
     value = HANCOM_TRAILING_VECTOR_ACCENT_RE.sub(r"\\vec{\g<base>}", value)
     value = HANCOM_VECTOR_ACCENT_RE.sub(r"\\vec{\1}", value)
     value = HANCOM_SPLIT_VECTOR_RESIDUE_RE.sub(r"\g<vector>", value)
+    value = _repair_log_base_placeholders(value)
     value = HANCOM_XBAR_RE.sub(r"\\overline{\1}", value)
     return HANCOM_SEGMENT_OVERLINE_RE.sub(r"\\overline{\1}", value)
 
@@ -684,6 +689,13 @@ def _repair_p_over_q_placeholders(value: str) -> str:
     return P_OVER_Q_PLACEHOLDER_RE.sub(replace, text)
 
 
+def _repair_log_base_placeholders(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        return rf"\log_{{{match.group('base')}}}{match.group('arg')}"
+
+    return LOG_BASE_PLACEHOLDER_RE.sub(replace, str(value or ""))
+
+
 def _repair_unit_numerator_fractions(value: str) -> str:
     def replace(match: re.Match[str]) -> str:
         return f"{match.group('prefix')}\\frac{{1}}{{{match.group('den')}}}"
@@ -699,6 +711,7 @@ def _cleanup_unresolved_layout_placeholders(value: str) -> str:
 def normalize_recognized_math_layout_text(text: str) -> str:
     """Recover known glyphs plus simple PDF line-layout math structures."""
     value = _repair_split_nth_root_exponents(normalize_recognized_math_text(text))
+    value = _repair_log_base_placeholders(value)
     value = _repair_stacked_limit_fractions(value)
     value = _repair_stacked_fraction_exponents(value)
     value = _repair_stacked_simple_fractions_and_cases(value)
