@@ -68,6 +68,9 @@ PDF_CHOICE_FRACTION_PART_RE = re.compile(
 PDF_CHOICE_GEOMETRY_LABEL_RE = re.compile(
     rf"^\s*(?P<label>[{PDF_CHOICE_FRACTION_LABELS}])\s*(?P<body>.*)$"
 )
+PDF_STEM_FRACTION_PART_RE = re.compile(
+    r"^[A-Za-z0-9α-ωΑ-Ωπ∞√∑∫+\-./*(){}\[\]\\_^]+$"
+)
 ANSWER_LINE_RE = re.compile(r"^\s*(?:정답|답)(?:\s*[:：]|\s+)(?P<value>.+?)\s*$")
 EXPLANATION_LINE_RE = re.compile(r"^\s*(?:해설|풀이)(?:(?:\s*[:：]|\s+)(?P<value>.*))?\s*$")
 SCORE_MARKER_RE = re.compile(r"\[\s*\d+\s*점\s*\]")
@@ -281,9 +284,10 @@ def _import_pdf_recognized(
             stem_text, choices = "", []
         else:
             stem_text, choices = _split_stem_and_choices(prob.text)
+            pdf_line_geometries = list(getattr(prob, "line_geometries", []) or [])
             geometry_split = _split_stem_and_choices_from_pdf_geometry(
                 prob.text,
-                list(getattr(prob, "line_geometries", []) or []),
+                pdf_line_geometries,
             )
             if geometry_split is not None:
                 geometry_stem, geometry_choices = geometry_split
@@ -293,6 +297,9 @@ def _import_pdf_recognized(
                     < _placeholder_count_in_fields(stem_text, choices)
                 ):
                     stem_text, choices = geometry_stem, geometry_choices
+            geometry_stem = _repair_pdf_stem_fractions_from_geometry(stem_text, pdf_line_geometries)
+            if _placeholder_count_in_fields(geometry_stem, choices) < _placeholder_count_in_fields(stem_text, choices):
+                stem_text = geometry_stem
 
         number = str(prob.number) if prob.number else ""
         loose_key = _recognized_pdf_loose_duplicate_key(number, stem_text) if loose_dedup_enabled else ""
@@ -844,6 +851,191 @@ def _bbox_top(bbox: Any) -> float | None:
         return float(bbox[1])
     except (TypeError, ValueError):
         return None
+
+
+def _rect_center(rect: Any) -> tuple[float, float] | None:
+    if not isinstance(rect, list) or len(rect) != 4:
+        return None
+    try:
+        left, top, right, bottom = [float(value) for value in rect]
+    except (TypeError, ValueError):
+        return None
+    return (left + right) / 2.0, (top + bottom) / 2.0
+
+
+def _pdf_line_placeholder_centers(line: dict[str, Any]) -> list[tuple[float, float]]:
+    centers: list[tuple[float, float]] = []
+    for char in line.get("pdf_line_chars") or []:
+        if not isinstance(char, dict):
+            continue
+        value = str(char.get("c") or "")
+        normalized = normalize_recognized_math_text(value)
+        if value not in PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS and not any(
+            marker in normalized for marker in PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS
+        ):
+            continue
+        center = _rect_center(char.get("bbox"))
+        if center is not None:
+            centers.append(center)
+    return centers
+
+
+def _pdf_stem_fraction_part(text: str) -> bool:
+    stripped = str(text or "").strip()
+    if not stripped or len(stripped) > 80:
+        return False
+    if any(marker in stripped for marker in PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS):
+        return False
+    if PDF_CHOICE_GEOMETRY_LABEL_RE.match(stripped):
+        return False
+    if re.search(r"[\uac00-\ud7a3]", stripped):
+        return False
+    if any(char in stripped for char in "<>=,"):
+        return False
+    if not re.search(r"[A-Za-z0-9α-ωΑ-Ωπ∞√∑∫]", stripped):
+        return False
+    if stripped in {"+", "-", "*", "/", "^", "_"}:
+        return False
+    return bool(PDF_STEM_FRACTION_PART_RE.match(stripped))
+
+
+def _pdf_stem_fraction_head_allows(text: str, placeholder_offset: int) -> bool:
+    head = str(text or "")[:placeholder_offset].rstrip()
+    if not head:
+        return True
+    return head[-1] in "=+-*/([{,"
+
+
+def _pdf_stem_fraction_suffix_allows(text: str, placeholder_offset: int) -> bool:
+    suffix = str(text or "")[placeholder_offset + 1 :].strip()
+    return suffix in {"", ")", "]", "}", ","}
+
+
+def _matched_pdf_stem_entries(
+    stem: str,
+    line_geometries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    source_lines = [line for line in str(stem or "").splitlines()]
+    entries: list[dict[str, Any]] = []
+    geometry_cursor = 0
+    for stem_index, raw in enumerate(source_lines):
+        text = raw.strip()
+        if not text:
+            continue
+        while geometry_cursor < len(line_geometries):
+            line = line_geometries[geometry_cursor]
+            geometry_cursor += 1
+            if not isinstance(line, dict):
+                continue
+            if str(line.get("text") or "").strip() != text:
+                continue
+            entries.append({"stem_index": stem_index, "geometry_index": geometry_cursor - 1, "line": line})
+            break
+    return entries
+
+
+def _nearest_pdf_stem_fraction_part(
+    entries: list[dict[str, Any]],
+    *,
+    stem_index: int,
+    placeholder_center_x: float,
+    placeholder_center_y: float,
+    above: bool,
+    used_stem_indices: set[int],
+) -> dict[str, Any] | None:
+    candidates: list[tuple[float, float, int, dict[str, Any]]] = []
+    for entry in entries:
+        candidate_stem_index = int(entry["stem_index"])
+        if candidate_stem_index == stem_index or candidate_stem_index in used_stem_indices:
+            continue
+        line = entry["line"]
+        text = str(line.get("text") or "").strip()
+        if not _pdf_stem_fraction_part(text):
+            continue
+        center = _bbox_center(line.get("bbox_px"))
+        if center is None:
+            continue
+        center_x, center_y = center
+        x_distance = abs(center_x - placeholder_center_x)
+        if x_distance > 70:
+            continue
+        vertical = placeholder_center_y - center_y if above else center_y - placeholder_center_y
+        if vertical <= 0 or vertical > 100:
+            continue
+        candidates.append((vertical, x_distance, candidate_stem_index, entry))
+    if not candidates:
+        return None
+    _, _, _, entry = sorted(candidates)[0]
+    return entry
+
+
+def _repair_pdf_stem_fractions_from_geometry(stem: str, line_geometries: list[dict[str, Any]]) -> str:
+    """Recover simple stacked fractions in stems from exact placeholder char geometry."""
+    if not stem or not line_geometries:
+        return str(stem or "")
+    entries = _matched_pdf_stem_entries(stem, line_geometries)
+    if not entries:
+        return str(stem or "")
+
+    output_lines = [line for line in str(stem or "").splitlines()]
+    used_stem_indices: set[int] = set()
+    changed = False
+    for entry in entries:
+        stem_index = int(entry["stem_index"])
+        if stem_index in used_stem_indices:
+            continue
+        line = entry["line"]
+        text = str(line.get("text") or "").strip()
+        placeholder_matches = list(re.finditer(r"[\u25a1\u25a2]", text))
+        if not placeholder_matches:
+            continue
+        placeholder_centers = _pdf_line_placeholder_centers(line)
+        if len(placeholder_centers) < len(placeholder_matches):
+            continue
+
+        replacements: list[tuple[int, int, str]] = []
+        local_used: set[int] = set()
+        for match, center in zip(placeholder_matches, placeholder_centers):
+            if not _pdf_stem_fraction_head_allows(text, match.start()):
+                continue
+            if not _pdf_stem_fraction_suffix_allows(text, match.start()):
+                continue
+            numerator_entry = _nearest_pdf_stem_fraction_part(
+                entries,
+                stem_index=stem_index,
+                placeholder_center_x=center[0],
+                placeholder_center_y=center[1],
+                above=True,
+                used_stem_indices=used_stem_indices | local_used,
+            )
+            denominator_entry = _nearest_pdf_stem_fraction_part(
+                entries,
+                stem_index=stem_index,
+                placeholder_center_x=center[0],
+                placeholder_center_y=center[1],
+                above=False,
+                used_stem_indices=used_stem_indices | local_used,
+            )
+            if numerator_entry is None or denominator_entry is None:
+                continue
+            numerator = str(numerator_entry["line"].get("text") or "").strip()
+            denominator = str(denominator_entry["line"].get("text") or "").strip()
+            replacements.append((match.start(), match.end(), rf"\frac{{{numerator}}}{{{denominator}}}"))
+            local_used.add(int(numerator_entry["stem_index"]))
+            local_used.add(int(denominator_entry["stem_index"]))
+
+        if not replacements:
+            continue
+        rebuilt = text
+        for start, end, replacement in sorted(replacements, reverse=True):
+            rebuilt = f"{rebuilt[:start]}{replacement}{rebuilt[end:]}"
+        output_lines[stem_index] = rebuilt
+        used_stem_indices.update(local_used)
+        changed = True
+
+    if not changed:
+        return str(stem or "")
+    return _clean_text("\n".join(line for index, line in enumerate(output_lines) if index not in used_stem_indices))
 
 
 def _pdf_choice_geometry_part(text: str) -> bool:

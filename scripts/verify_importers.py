@@ -494,6 +494,22 @@ def _pdf_line(text: str, x: float, y: float, width: float = 48.0, height: float 
     return {"text": text, "bbox_px": [x, y, width, height]}
 
 
+def _pdf_placeholder_line(
+    text: str,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    centers: list[tuple[float, float]],
+) -> dict[str, object]:
+    line = _pdf_line(text, x, y, width, height)
+    line["pdf_line_chars"] = [
+        {"c": "\u25a1", "bbox": [cx - 5.0, cy - 5.0, cx + 5.0, cy + 5.0]}
+        for cx, cy in centers
+    ]
+    return line
+
+
 choice_labels = ["\u2460", "\u2461", "\u2462", "\u2463", "\u2464"]
 full_fraction_lines = [_pdf_line("15. stem", 0, 0, 500, 24)]
 for offset, value in enumerate(("15", "27", "39", "51", "63")):
@@ -540,6 +556,46 @@ if mixed_fraction_split is None or mixed_fraction_split[1] != [
     r"\frac{19}{2}",
 ]:
     failures.append(f"PDF choice geometry repair: mixed fraction row failed {mixed_fraction_split!r}")
+
+stem_curve_lines = [
+    _pdf_placeholder_line("26. curve y=\u25a1", 0, 100, 220, 80, [(108, 130)]),
+    _pdf_line("3", 100, 95, 16, 20),
+    _pdf_line("(x>1) meets", 140, 115, 120, 20),
+    _pdf_line("x-1", 90, 145, 36, 20),
+    _pdf_line("3", 300, 205, 16, 20),
+    _pdf_placeholder_line("again y=\u25a1", 200, 200, 220, 60, [(308, 230)]),
+    _pdf_line("(x>1)", 340, 215, 60, 20),
+    _pdf_line("x-1", 290, 245, 36, 20),
+]
+stem_curve_repaired = importers._repair_pdf_stem_fractions_from_geometry(
+    "\n".join(str(line["text"]) for line in stem_curve_lines),
+    stem_curve_lines,
+)
+if stem_curve_repaired != "\n".join(
+    [
+        r"26. curve y=\frac{3}{x-1}",
+        "(x>1) meets",
+        r"again y=\frac{3}{x-1}",
+        "(x>1)",
+    ]
+):
+    failures.append(f"PDF stem geometry repair: curve fraction failed {stem_curve_repaired!r}")
+
+stem_hyperbola_lines = [
+    _pdf_line("x2", 100, 100, 20, 20),
+    _pdf_line("y2", 160, 100, 20, 20),
+    _pdf_placeholder_line("\u25a1", 95, 120, 30, 30, [(110, 135)]),
+    _pdf_placeholder_line("-\u25a1", 145, 120, 45, 30, [(170, 135)]),
+    _pdf_line("=-1", 200, 125, 50, 20),
+    _pdf_line("9", 105, 150, 12, 20),
+    _pdf_line("16", 160, 150, 24, 20),
+]
+stem_hyperbola_repaired = importers._repair_pdf_stem_fractions_from_geometry(
+    "\n".join(str(line["text"]) for line in stem_hyperbola_lines),
+    stem_hyperbola_lines,
+)
+if stem_hyperbola_repaired != "\n".join([r"\frac{x2}{9}", r"-\frac{y2}{16}", "=-1"]):
+    failures.append(f"PDF stem geometry repair: hyperbola fraction failed {stem_hyperbola_repaired!r}")
 p_over_q_placeholder = math_text.normalize_recognized_math_layout_text(
     "\ud655\ub960\uc740 \ue06dp\np+q\uc758 \uac12\uc744 \uad6c\ud558\uc2dc\uc624. (\ub2e8, p\uc640 q\ub294 \uc11c\ub85c\uc18c)"
 )
