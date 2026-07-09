@@ -2231,6 +2231,7 @@ def write_pdf_flow_hwpx(
                 para_pr_id_ref=compact_para,
                 **table_attrs,
             )
+            body_cells = [table.cell(body_row_index, column) for column in (0, 1)]
             if has_header_row:
                 header_cell = table.merge_cells(0, 0, 0, 1)
                 header_cell.set_size(table_width, header_row_height)
@@ -2248,12 +2249,10 @@ def write_pdf_flow_hwpx(
                         compact_para=compact_para,
                         styles=styles,
                     )
-            for column in (0, 1):
-                body_cell = table.cell(body_row_index, column)
+            for body_cell in body_cells:
                 body_cell.set_size(cell_width, body_height)
                 _clear_cell_paragraphs(body_cell)
-            left_cell = table.cell(body_row_index, 0)
-            right_cell = table.cell(body_row_index, 1)
+            left_cell, right_cell = body_cells
             _set_cell_border_fill(left_cell, column_divider_border_fill)
             _set_cell_margin(left_cell, left_mm=0.4, right_mm=2.3, top_mm=0.0, bottom_mm=0.0)
             _set_cell_margin(right_cell, left_mm=2.3, right_mm=0.4, top_mm=0.0, bottom_mm=0.0)
@@ -2261,7 +2260,7 @@ def write_pdf_flow_hwpx(
             boxes = _flow_box_rects(page) if boxed_passages else []
             columns = _flow_column_blocks(page, body_items, boxes)
             for column_index, blocks in enumerate(columns):
-                cell = table.cell(0, column_index)
+                cell = body_cells[column_index]
                 for block in blocks:
                     if block["type"] == "box":
                         boxed_count += 1

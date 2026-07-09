@@ -16,11 +16,13 @@ Canonical references:
 1. Reduce remaining real-PDF math placeholders.
    - Current status: raw PDF character/span geometry is preserved in `pdf_line_chars` and `pdf_line_spans`.
    - Current status: imported problem layout metadata carries `pdf_lines` with line text, bbox, char geometry, and span geometry.
-   - Current status: real PDF QA emits per-question placeholder reports with field, nearby text, inferred type, page/column, and bbox context.
+   - Current status: real PDF QA separates actual output residuals in `placeholder_reports` from source-PDF structure hints in `source_placeholder_hint_reports`.
+   - Current status: residual classification ignores human-readable line-break markers, so `fraction`, `root`, `vector_or_arrow`, `cases_or_grouping`, and `adjacent_script_or_structure` buckets are no longer inflated by report formatting.
    - Current status: choice fraction repair removes all remaining `choice□` placeholders in the four local real math PDFs while keeping render overflow 0.
    - Current status: char-bbox stem fraction repair converts high-confidence stacked fractions, including `y=\frac{3}{x-1}`-style curves and `\frac{x2}{9}-\frac{y2}{16}`-style conics.
    - Current status: split vector residue cleanup removes a `□⃗` line only when the following line is already a confirmed `\vec{...}` token.
    - Current local baseline: the four-sample math PDF set reports 49 total `stem□` placeholders, down from 66 before this repair series, with malformed equation count 0 and render overflow 0.
+   - Current residual type counts after classifier cleanup: fraction 14, root 7, vector/arrow 6, cases/grouping 13, adjacent script/structure 9. Source-PDF `□` hints remain available separately for bbox-driven reconstruction.
    - Next action: classify the residual placeholders by structure type, then implement only high-confidence mixed fraction, root, script, case, and bbox-vector repairs.
    - Done when: remaining `□` counts are explained by type, and supported structural cases convert to native equations with regression fixtures.
 
@@ -76,6 +78,7 @@ Canonical references:
 1. Promote residual-placeholder cases into regression fixtures.
    - Status: `scripts/verify_real_pdf_math_samples.py` writes reports under `data/real_pdf_math_qa/exports/real_pdf_math_qa_report_<mode>.json`.
    - Status: representative choice-fraction, simple stem-fraction, and split-vector-residue cases are promoted into `scripts/verify_importers.py`.
+   - Status: placeholder classifier self-checks cover line-break slash handling, vector priority, root detection, true fractions, and grouping contexts.
    - Next action: promote representative root/script/cases, bbox-vector, and mixed-fraction cases from the JSON report before adding repair rules.
 
 2. Keep per-phase performance logging useful.

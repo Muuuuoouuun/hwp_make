@@ -89,20 +89,40 @@ def _context(text: str, offset: int, radius: int = 44) -> str:
 
 
 def _classify_placeholder_context(context: str) -> str:
-    lowered = context.lower()
-    if "sqrt" in lowered or "\u221a" in context:
-        return "root"
-    if "\\frac" in lowered or " over " in lowered or "/" in context:
-        return "fraction"
-    if "vec" in lowered or "\u20d7" in context or "\u2192" in context or "\u2190" in context:
+    visible = str(context or "")
+    # `_context` uses " / " as a human-readable line break marker. Do not
+    # treat that marker as a mathematical slash when classifying residuals.
+    math_text = re.sub(r"\s+/\s+", " ", visible)
+    lowered = math_text.lower()
+    if "vec" in lowered or "\u20d7" in math_text or "\u2192" in math_text or "\u2190" in math_text:
         return "vector_or_arrow"
-    if "lim" in lowered or "\u221e" in context:
+    if "sqrt" in lowered or "\u221a" in math_text:
+        return "root"
+    if "\\frac" in lowered or " over " in lowered or re.search(r"\S/\S", math_text):
+        return "fraction"
+    if "lim" in lowered or "\u221e" in math_text:
         return "limit"
-    if "{" in context or "}" in context:
+    if "{" in math_text or "}" in math_text:
         return "cases_or_grouping"
-    if re.search(r"[0-9A-Za-z가-힣]\s*[\u25a1\u25a2]|[\u25a1\u25a2]\s*[0-9A-Za-z가-힣]", context):
+    if re.search(r"[0-9A-Za-z가-힣]\s*[\u25a1\u25a2]|[\u25a1\u25a2]\s*[0-9A-Za-z가-힣]", math_text):
         return "adjacent_script_or_structure"
     return "unknown"
+
+
+def _self_check_placeholder_classifier() -> None:
+    checks = [
+        ("x□ / y", "adjacent_script_or_structure"),
+        ("AC⋅□⃗ / \\frac{p}{q}", "vector_or_arrow"),
+        ("q√5이고 □p", "root"),
+        ("\\frac{1}{2}+□", "fraction"),
+        ("{x|0≤x<□ / 3kπ}", "cases_or_grouping"),
+    ]
+    for context, expected in checks:
+        actual = _classify_placeholder_context(context)
+        if actual != expected:
+            raise AssertionError(
+                f"placeholder classifier regression: {context!r} -> {actual!r}, expected {expected!r}"
+            )
 
 
 def _line_has_placeholder(line: dict[str, Any]) -> bool:
@@ -137,7 +157,7 @@ def _summarize_pdf_line(line: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _placeholder_reports(item: dict[str, Any], item_index: int) -> list[dict[str, Any]]:
+def _output_placeholder_reports(item: dict[str, Any], item_index: int) -> list[dict[str, Any]]:
     layout = item.get("layout") or {}
     pdf_lines = [line for line in (layout.get("pdf_lines") or []) if isinstance(line, dict)]
     line_contexts = [_summarize_pdf_line(line) for line in pdf_lines if _line_has_placeholder(line)]
@@ -171,20 +191,35 @@ def _placeholder_reports(item: dict[str, Any], item_index: int) -> list[dict[str
             }
             reports.append(report)
 
-    if not reports and line_contexts:
-        for line in line_contexts[:8]:
-            reports.append(
-                {
-                    **base,
-                    "field": "pdf_line",
-                    "choice_index": None,
-                    "offset": None,
-                    "char": None,
-                    "context": line.get("text"),
-                    "inferred_type": _classify_placeholder_context(str(line.get("text") or "")),
-                    "pdf_line_contexts": [line],
-                }
-            )
+    return reports
+
+
+def _source_placeholder_hint_reports(item: dict[str, Any], item_index: int) -> list[dict[str, Any]]:
+    layout = item.get("layout") or {}
+    pdf_lines = [line for line in (layout.get("pdf_lines") or []) if isinstance(line, dict)]
+    base = {
+        "item_index": item_index,
+        "number": item.get("number"),
+        "source_page": item.get("source_page"),
+        "layout_page": (layout.get("page") or {}).get("number"),
+        "column_index": layout.get("column_index"),
+        "problem_bbox_px": layout.get("bbox_px"),
+    }
+    reports: list[dict[str, Any]] = []
+    for line in (_summarize_pdf_line(line) for line in pdf_lines if _line_has_placeholder(line)):
+        reports.append(
+            {
+                **base,
+                "field": "source_pdf_line",
+                "choice_index": None,
+                "offset": None,
+                "char": None,
+                "context": line.get("text"),
+                "inferred_type": _classify_placeholder_context(str(line.get("text") or "")),
+                "pdf_line_contexts": [line],
+                "hint_only": True,
+            }
+        )
     return reports
 
 
@@ -278,8 +313,17 @@ def _run_one(
     placeholder_reports = [
         report
         for item_index, item in enumerate(items, start=1)
-        for report in _placeholder_reports(item, item_index)
+        for report in _output_placeholder_reports(item, item_index)
     ]
+    source_placeholder_hint_reports = [
+        report
+        for item_index, item in enumerate(items, start=1)
+        for report in _source_placeholder_hint_reports(item, item_index)
+    ]
+    placeholder_type_counts = Counter(str(report.get("inferred_type") or "unknown") for report in placeholder_reports)
+    source_placeholder_hint_type_counts = Counter(
+        str(report.get("inferred_type") or "unknown") for report in source_placeholder_hint_reports
+    )
     inventory = _question_inventory(items)
     timings["analysis"] = _elapsed(analysis_start)
 
@@ -368,7 +412,11 @@ def _run_one(
         "choice_unknown_square_count": choice_unknown_square_count,
         "total_unknown_square_count": unknown_square_count + choice_unknown_square_count,
         "placeholder_report_count": len(placeholder_reports),
+        "placeholder_type_counts": dict(sorted(placeholder_type_counts.items())),
         "placeholder_reports": placeholder_reports[:120],
+        "source_placeholder_hint_count": len(source_placeholder_hint_reports),
+        "source_placeholder_hint_type_counts": dict(sorted(source_placeholder_hint_type_counts.items())),
+        "source_placeholder_hint_reports": source_placeholder_hint_reports[:120],
         "footer_hit_count": len(footer_hits),
         "phase_timings_sec": timings,
         "inspect": {
@@ -416,6 +464,8 @@ def main() -> int:
     parser.add_argument("--save-pages", type=int, default=0, help="PNG pages to save during render; -1 saves all.")
     parser.add_argument("--render-timeout-sec", type=int, default=240, help="Per-sample rhwp render timeout.")
     args = parser.parse_args()
+
+    _self_check_placeholder_classifier()
 
     paths = _sample_paths(args.sample)
     if args.limit > 0:
@@ -467,6 +517,9 @@ def main() -> int:
         for flag in report["review_flags"]:
             print(f"  ? {flag}")
         placeholders = report.get("placeholder_reports") or []
+        source_hints = report.get("source_placeholder_hint_reports") or []
+        if placeholders:
+            print(f"  residual placeholder types: {report.get('placeholder_type_counts') or {}}")
         for item in placeholders[:5]:
             print(
                 "  placeholder: "
@@ -476,6 +529,13 @@ def main() -> int:
             )
         if len(placeholders) > 5:
             print(f"  placeholder: ... {len(placeholders) - 5} more in JSON report")
+        if source_hints:
+            hint_counts = report.get("source_placeholder_hint_type_counts") or {}
+            print(
+                "  source placeholder hints: "
+                f"{report.get('source_placeholder_hint_count', len(source_hints))} "
+                f"{hint_counts}"
+            )
     print(f"\nReport: {report_path}")
     if failed:
         print("RESULT: FAIL")

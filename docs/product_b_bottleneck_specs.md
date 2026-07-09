@@ -10,7 +10,7 @@ Product B는 입력 PDF/HWP/HWPX를 평가원/교육청 시험지에 가까운 �
 
 - 수학 PDF/HWP 복원은 수식 구현과 레이아웃 겹침 방지를 최우선으로 둡니다.
 - 네 개 로컬 수학 PDF 샘플 기준으로 선택지 분수 placeholder는 제거되었고, 단순 stem stacked fraction과 확정 split vector residue까지 복원되었습니다.
-- 남은 핵심 병목은 mixed fraction, root, super/subscript, cases, bbox 기반 vector base 추론입니다.
+- 남은 핵심 병목은 mixed fraction, root, super/subscript, cases, bbox 기반 vector base 추론입니다. QA 리포트는 실제 출력 잔여 placeholder와 원본 PDF 구조 힌트를 분리해서 기록합니다.
 - PDF 원본 레이아웃 HWPX는 흐름 기반 writer가 canonical입니다. 절대좌표 글상자 방식은 한컴 호환성과 편집성 문제가 있어 실험 기준으로만 둡니다.
 - 폰트/간격 기본 profile은 평가원형 `신명조/HY신명조/신명 중명조 + Times New Roman + 돋움/중고딕`, 본문 10-11pt, 줄간격 160-170%, 장평 약 95, 자간 약 -5입니다.
 
