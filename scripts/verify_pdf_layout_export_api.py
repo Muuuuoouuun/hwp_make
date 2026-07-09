@@ -79,6 +79,7 @@ def _inspect_flow_style(path: Path) -> dict[str, object]:
         section = ET.fromstring(archive.read("Contents/section0.xml"))
     faces = {font.get("face") for font in header.findall(f".//{HH}font") if font.get("face")}
     char_metric_ok = False
+    metric_heights = set()
     for char_pr in header.findall(f".//{HH}charPr"):
         ratio = char_pr.find(f"{HH}ratio")
         spacing = char_pr.find(f"{HH}spacing")
@@ -91,7 +92,8 @@ def _inspect_flow_style(path: Path) -> dict[str, object]:
             and spacing.get("latin") == "-5"
         ):
             char_metric_ok = True
-            break
+            if char_pr.get("height"):
+                metric_heights.add(char_pr.get("height"))
 
     para_165_ids = set()
     for para_pr in header.findall(f".//{HH}paraPr"):
@@ -137,6 +139,7 @@ def _inspect_flow_style(path: Path) -> dict[str, object]:
     return {
         "faces": faces,
         "char_metric_ok": char_metric_ok,
+        "metric_heights": metric_heights,
         "uses_165": uses_165,
         "divider_ok": divider_ok,
         "margin_ok": margin_ok,
@@ -182,6 +185,13 @@ def main() -> int:
             faces = style["faces"]
             check("flow font faces", {"신명 중명조", "Times New Roman", "돋움"}.issubset(faces), repr(sorted(faces)))
             check("flow char ratio/spacing", bool(style["char_metric_ok"]))
+            metric_heights = set(style["metric_heights"])
+            old_dense_heights = {"840", "940", "1080"}
+            check(
+                "flow font size buckets",
+                "1000" in metric_heights and not (metric_heights & old_dense_heights),
+                repr(sorted(metric_heights)),
+            )
             check("flow line spacing 165", bool(style["uses_165"]))
             check("flow middle divider", bool(style["divider_ok"]))
             check("flow cell margins", bool(style["margin_ok"]))
