@@ -4,6 +4,10 @@ Updated: 2026-07-09
 
 Goal: produce KICE/school-exam HWPX/HWP output that preserves question sync, native math equations, typography, and layout without overlaps.
 
+Canonical references:
+- `README.md` for current app usage, data policy, and verification commands.
+- `docs/product_b_bottleneck_specs.md` for Product B current standards and retired old standards.
+
 ## P0 - Blocking Quality Gates
 
 1. Resolve real PDF render QA timeout.
@@ -20,6 +24,11 @@ Goal: produce KICE/school-exam HWPX/HWP output that preserves question sync, nat
    - Current status: HWP sample QA keeps 46-question sync and overflow 0.
    - Next action: extend real-PDF QA reports to include per-question source page, column, detected number, stem/choice split, and image fallback status.
    - Done when: every sample has a deterministic 46-question inventory with no duplicated or missing numbers.
+
+4. Keep retired standards out of implementation decisions.
+   - Current status: README and Product B criteria now separate current standards from old investigation notes.
+   - Next action: when changing PDF import/export or HWPX writer behavior, check against the retired-standards list before accepting the change.
+   - Done when: no code path treats pypdf-only import, full-page raster fallback, GUI-open-only QA, or committed reference exams as a success criterion.
 
 ## P1 - Fidelity Improvements
 
@@ -44,6 +53,11 @@ Goal: produce KICE/school-exam HWPX/HWP output that preserves question sync, nat
    - Next action: add an open-probe checklist that records whether Hancom opens the generated HWPX as editable, read-only, protected, or blocked by a permission tab.
    - Done when: files generated into the app export directory open directly editable on a licensed Hancom install, with any remaining ad-only prompt documented as environment-level.
 
+5. Keep reference samples local unless a sharing policy is decided.
+   - Current status: `data/` is ignored and sample PDFs/HWPs are local-only.
+   - Next action: document sample name, source, and purpose without committing the files themselves.
+   - Done when: every local-only sample used by QA has a manifest entry or test skip message that explains what is missing.
+
 ## P2 - Tooling And Reporting
 
 1. Add a residual-placeholder report.
@@ -62,8 +76,11 @@ Goal: produce KICE/school-exam HWPX/HWP output that preserves question sync, nat
 
 ## Working Notes
 
+- Current standards live in `README.md` and `docs/product_b_bottleneck_specs.md`. Treat older exploratory notes as historical context only.
 - Do not treat every `□` as unknown text. Many are structural math glyphs from HyhwpEQ, especially fraction bars, radical parts, overlines, vectors, and cases.
 - Prefer conservative repair rules. Only convert when local text and bbox geometry agree.
 - The current best path is not OCR-first. Born-digital PDF text plus geometry is strong enough for many KICE math structures, and OCR should remain a fallback.
+- Do not reintroduce full-page raster fallback as a pass condition for PDF original-layout HWPX.
+- Do not commit reference exam PDFs/HWPs by default. Keep them local/private unless a rights and storage policy is explicitly chosen.
 - Every repair rule needs a regression case in `scripts/verify_importers.py` or the relevant PDF QA script.
 - Layout success means rendered output, not only XML validity: no overlap, no overflow, no column crossing, and readable native equations.

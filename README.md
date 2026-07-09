@@ -1,60 +1,113 @@
 # HWP Make
 
-선생님·조교용 문항 제작 도우미. PDF, 이미지, HWP, HWPX, DOCX, TXT/Markdown, CSV/SQLite DB, 웹 페이지에서 문제를 가져와 자체 DB에 쌓고, 골라서 순서를 정한 뒤 한글에서 열 수 있는 HWPX/DOCX 문서로 내보내는 로컬 앱입니다.
+HWP Make는 PDF, HWP/HWPX, DOCX, 이미지, 텍스트, CSV/SQLite 자료를 문항 단위로 가져오고, 평가원/교육청 시험지 스타일의 편집 가능한 HWPX/DOCX로 내보내는 로컬 앱입니다.
+
+현재 개발의 최우선 목표는 수학 시험지 기준입니다. 즉, 문항 번호 싱크, 네이티브 한글 수식, 실제 시험지 타이포그래피, 2단 레이아웃, 겹침 없는 렌더링을 동시에 만족하는 HWPX를 만드는 것입니다.
 
 ## 실행
 
 PowerShell에서:
 
 ```powershell
-pip install -r requirements.txt   # 최초 1회
+pip install -r requirements.txt
 .\run_local.ps1
 ```
 
 브라우저에서 `http://127.0.0.1:8787`을 엽니다.
 
-## 가져오기 (입력)
+## 현재 사용 경로
 
-| 소스 | 처리 방식 |
-| --- | --- |
-| PDF | `pypdf`로 본문 추출, 문항 번호(`1.` `문제 2)` 등) 기준 자동 분리. 페이지 포함 이미지를 함께 추출해 해당 페이지 첫 문항에 첨부 |
-| 이미지 | 첨부로 저장. `pytesseract`+tesseract 설치 시 OCR로 본문 자동 추출 |
-| HWP | rhwp 엔진(러스트 기반, 한컴 불필요)으로 텍스트 추출, 미설치 시 자체 BodyText 레코드 파서로 폴백. BinData 이미지 동반 추출 |
-| HWPX | section XML에서 문단·이미지를 순서대로 추출, 문항 번호 기준 분리 |
-| DOCX | 문단·표·삽입 이미지를 순서대로 추출, 문항 번호 기준 분리 |
-| TXT / Markdown | 붙여넣은 시험지 텍스트를 문항 번호 기준으로 분리하고, `①②③`, `1 2 3`, `1.` 줄 선지와 정답/해설 줄을 자동 필드화 |
-| CSV / SQLite | 번호/문제/정답/해설/선지 컬럼(한·영 별칭 지원)을 자동 매핑해 통합 |
-| 웹(URL) | 페이지 본문·이미지를 수집. PDF/이미지 URL이면 해당 임포터로 자동 전환 |
+### 1. 문제은행 가져오기
 
-파일은 드래그&드롭으로 올릴 수 있고, 소스를 "자동 감지"로 두면 확장자에 따라 알아서 처리합니다.
-사이드바의 직접 입력 칸에 여러 문항을 붙여넣어도 같은 텍스트 임포터로 자동 문항화됩니다.
+`/api/import` 경로입니다. PDF/HWP/HWPX/DOCX/TXT/CSV/SQLite/이미지/웹 자료를 문항 DB로 가져오고, 사용자가 문항을 골라 새 시험지를 구성하는 흐름입니다.
 
-**중복 감지**: 가져오는 모든 경로(파일·웹·CSV/DB)에서 본문·선지·정답이 같은 문항은 자동으로 건너뜁니다. 같은 파일을 두 번 올리거나 한 파일 안에 같은 문항이 여러 번 있어도 DB에는 한 번만 쌓이며, 건너뛴 개수는 가져오기 안내에 표시됩니다. (이미지만 있고 본문이 없는 문항은 식별 텍스트가 없어 중복 검사에서 제외됩니다.)
+- PDF는 단순 `pypdf` 텍스트 추출 기준이 아닙니다. 현재 기준은 PyMuPDF 기반 인식, 문항 번호 분리, 컬럼/페이지/bbox 메타데이터, 수식 PUA 복원, 필요한 경우 지역 이미지 폴백입니다.
+- HWP/HWPX/DOCX는 텍스트, 표, 이미지, 수식 구조를 가능한 한 보존해서 문항화합니다.
+- 이미지나 스캔 문서는 OCR 또는 이미지 폴백을 사용할 수 있지만, born-digital PDF 수학 시험지는 OCR-first가 아니라 PDF 텍스트와 좌표 정보 복원이 우선입니다.
 
-## 내보내기 (출력)
+### 2. PDF 원본 레이아웃 HWPX
 
-- **HWPX**: 한글 2014+ 표준 포맷. 이미지도 실제 `hp:pic` 개체로 본문에 삽입됩니다(한컴 공식 OWPML 구조 기준).
-- **DOCX**: 한글에서 열 수 있는 워드 문서. 이미지 포함.
-- 화면은 **1. 자료 넣기 → 2. 문제 고르기 → 3. 병합 만들기** 순서로 배치됩니다.
-- 가운데 문제 고르기 영역에서 `병합 추가`를 누르거나 전체 추가를 사용한 뒤, 오른쪽 병합 만들기 영역에서 끌어서(또는 ▲▼) 순서를 정하면 그 순서대로 문서가 만들어집니다.
-- 편집 패널에서 문항별 이미지를 추가/삭제할 수 있습니다.
-- **미리보기**: 내보내기 전에 한컴 없이도 실제 페이지 모습(PNG 렌더링)을 확인할 수 있습니다. rhwp 엔진 기반이며, 다단(2단) 양식은 미리보기에서만 1단으로 보입니다(실제 한글에서는 정상).
-- 내보내기 양식은 기본 문항 모음 외에 첨부한 기존 양식을 참고한 **평가원 국어/국어 화작/국어 언매/수학/영어/사탐/과탐**, **학교 기출 시험지**, **레거시 객관식 1~5**, **레거시 주관식 괄호** 프리셋을 고를 수 있습니다. 평가원/학교/레거시 시험지형 프리셋은 실제 문제지처럼 머리말·교시·유형·선택 과목/수험 정보란 또는 옛 선지/답란 양식을 넣고 정답/해설은 본문에서 제외합니다.
-- **정답·해설지**: 상단의 "정답·해설지"를 체크하면 문서 끝에 새 페이지로 빠른 정답표(5문항씩 한 줄)와 문항별 해설이 붙습니다. 원형 선지 양식에서는 정답 `2`를 `②`처럼 자동 변환합니다. 시험지형 프리셋과 함께 쓰면 문제지+해설지가 한 파일로 나옵니다.
+`/api/pdf-layout-export` 경로입니다. PDF 한 부를 문항 DB에 넣기보다, 원본 시험지 흐름을 유지하는 편집 가능한 HWPX로 직접 복원합니다.
 
-`.hwp` 바이너리 직접 저장은 한컴오피스 COM 자동화가 필요해서 지원하지 않습니다. 한컴오피스가 설치된 PC라면 HWPX를 열어 "다른 이름으로 저장"으로 .hwp 변환이 가능합니다. 한컴이 없는 PC에서 결과물을 열어보려면 오픈소스 뷰어 [hop](https://github.com/golbin/hop)도 쓸 수 있습니다.
+- 텍스트는 HWPX 문단/표 셀로 넣고, 수식은 가능한 한 `hp:equation` 네이티브 수식으로 만듭니다.
+- 전체 페이지 래스터 이미지를 본문에 깔아두는 방식은 이 경로의 성공 기준이 아닙니다.
+- 도표, 그림, 복원 불확실한 복잡 수식 영역만 지역 이미지 폴백 대상으로 둡니다.
+- 출력은 평가원/교육청 시험지처럼 2단, 중간 분할선, 좁은 여백, 실제 본문 폰트와 줄간격을 맞추는 방향으로 검증합니다.
 
-## 데이터 위치
+### 3. HWPX/DOCX 내보내기
 
-앱 데이터는 기본적으로 `data/` 폴더에 저장됩니다 (`HWP_MAKE_DATA_DIR` 환경 변수로 변경 가능).
+선택한 문항은 HWPX 또는 DOCX로 내보낼 수 있습니다. `.hwp` 바이너리 직접 저장은 한컴오피스 COM 자동화가 필요하므로 기본 출력은 HWPX입니다. 한컴오피스가 설치된 PC에서는 HWPX를 열어 `.hwp`로 저장할 수 있습니다.
+
+## 수식 기준
+
+- 수학 변수(`x`, `y`, `n`, `a`, `f` 등)는 Times New Roman 이탤릭 계열로 보이도록 맞춥니다.
+- 분수, 루트, 첨자, 벡터, 극한, 케이스 같은 수학 구조는 일반 텍스트로 흉내 내지 않고 Hancom EQN 기반 네이티브 수식으로 유지하는 것이 목표입니다.
+- HyhwpEQ 계열 PDF PUA 문자는 `app/hancom_pua_map.py`와 `app/math_text.py`에서 복원합니다.
+- 남은 square placeholder는 무조건 깨진 글자가 아니라, 분수선/루트/벡터/케이스 같은 2D 구조 힌트일 수 있습니다. 좌표 기반 재조립 대상으로 분류합니다.
+
+## 레이아웃 기준
+
+- 문항 번호는 누락/중복 없이 원본 순서와 싱크가 맞아야 합니다.
+- 렌더 기준은 XML 유효성만이 아니라 overflow 0, 컬럼 침범 0, 문항/선지/수식 겹침 없음입니다.
+- PDF 라인의 문자/스팬 좌표는 `pdf_line_chars`, `pdf_line_spans` 메타데이터로 보존합니다. 이 좌표는 분수, 루트, 첨자, 케이스 복원에 사용합니다.
+- full-page image fallback으로 보기만 비슷한 결과는 성공으로 보지 않습니다. 편집 가능한 텍스트와 수식이 우선입니다.
+
+## 폰트와 간격 기준
+
+- 한글 본문: `신명조`, `HY신명조`, 또는 실제 평가원 계열인 `신명 중명조`를 우선합니다.
+- 영어 지문/영문 표기: `Times New Roman`을 우선합니다.
+- 문항 번호, 과목명, 안내 문구: `돋움` 또는 `중고딕` 계열을 우선합니다.
+- 수식: 변수는 Times New Roman 이탤릭, 나머지 구조는 한글 수식 편집기 기본 수식 폰트 체계를 따릅니다.
+- 초기 실무값은 본문 10-11pt, 줄간격 160-170%, 장평 약 95, 자간 약 -5입니다. 실제 HWP 샘플 분석 결과에 맞춰 조정합니다.
+
+## 데이터와 레퍼런스 자료
+
+앱 데이터는 기본적으로 `data/` 폴더에 저장됩니다 (`HWP_MAKE_DATA_DIR`로 변경 가능).
 
 - `data/problems.sqlite3`: 문제 DB
 - `data/uploads/`: 업로드 원본 및 이미지
 - `data/exports/`: 내보내기 결과
 
-## 개발
+`data/`는 git에 올리지 않는 로컬 작업 영역입니다. 평가원/교육청 PDF/HWP 레퍼런스 파일도 저작권과 용량 때문에 기본적으로 저장소에 커밋하지 않습니다. 필요하면 파일명/출처/검증 상태를 문서화하고, 별도 사설 스토리지나 Git LFS 정책을 정한 뒤 추가합니다.
 
-- 백엔드: FastAPI (`app/`) — `main.py`(API), `importers.py`(파일 가져오기), `collector.py`(웹 수집), `hwpx_writer.py`/`docx_writer.py`(내보내기), `storage.py`(SQLite)
-- 프런트: 정적 파일 (`static/`)
-- 자체 검증: `python scripts/verify_importers.py` (DOCX/이미지/CSV 가져오기 + HWPX 내보내기↔가져오기 라운드트립)
-- 수학 시험지 완성도 게이트: `python scripts/verify_math_exam_pipeline.py` (네 개 HWP 샘플 기준 네이티브 수식, 문항/선지/출처/객체 싱크, 일반 텍스트 보존, rhwp 렌더 overflow/bounds 검증 + synthetic PDF 단일/2단/표·도형 문항·선지·수식 import→native HWPX 검증)
+## HWP 열기 관련 기준
+
+- 한글 실행 시 뜨는 광고 탭은 설치된 제품, 계정, 라이선스, 업데이트 채널 영향이 크므로 생성 HWPX 내부에서 안정적으로 끌 수 있는 대상이 아닙니다.
+- 수정 권한, 보호 보기, 읽기 전용 탭은 일부 제어 가능합니다. 생성 파일의 문서 보호 플래그, 읽기 전용 속성, Mark-of-the-Web, temp/download 경로, 잠긴 출력 파일 여부를 점검합니다.
+- 개발 중 GUI 열기 검증은 보조 게이트입니다. 기본 검증은 HWPX XML, rhwp 렌더, 필요 시 제한 시간 있는 HWP COM open probe로 진행합니다.
+
+## 검증
+
+통합 검증:
+
+```powershell
+python scripts/run_all_verify.py
+```
+
+주요 개별 검증:
+
+- `python scripts/verify_importers.py`
+- `python scripts/verify_math_exam_pipeline.py`
+- `python scripts/verify_pdf_math_pipeline.py`
+- `python scripts/verify_real_pdf_math_samples.py`
+- `python scripts/qa_hwp_math_samples.py`
+- `python scripts/verify_pdf_layout_export_api.py`
+- `python scripts/verify_pdf_layout_hwpx.py --render`
+- `python scripts/verify_kice_typography.py`
+- `powershell -ExecutionPolicy Bypass -File scripts/probe_hwp_open.ps1`
+
+실제 샘플이 없는 환경에서는 일부 검증이 SKIP으로 끝날 수 있습니다. SKIP은 실패가 아니라 로컬 레퍼런스 파일이 없다는 신호입니다.
+
+## 주요 모듈
+
+- `app/main.py`: API 진입점
+- `app/recognition/pdf_segment.py`: PDF 페이지/블록/문항/좌표 인식
+- `app/pipeline.py`: 인식 결과를 문항 모델로 변환
+- `app/importers.py`: 파일별 import 배선
+- `app/math_text.py`: 수식 텍스트 감지와 Hancom EQN 변환 보조
+- `app/hancom_pua_map.py`: HyhwpEQ PUA 매핑
+- `app/hwpx_writer_v2.py`: 문항 DB 기반 시험지형 HWPX writer
+- `app/pdf_layout_writer.py`: PDF 원본 레이아웃 직접 HWPX writer
+- `scripts/analyze_hwp_templates.py`: 실제 HWP 샘플 스타일 분석
+- `docs/priority_work_queue.md`: 현재 우선순위 작업 큐
+- `docs/product_b_bottleneck_specs.md`: Product B 기준과 폐기한 옛 기준 정리
