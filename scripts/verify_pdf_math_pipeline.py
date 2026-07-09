@@ -404,6 +404,22 @@ def run() -> int:
             )
     result, importer_warnings = _import_pdf_with_warnings(PDF_PATH)
     items = list(result.get("created") or [])
+    imported_pdf_lines = [
+        line
+        for item in items
+        for line in ((item.get("layout") or {}).get("pdf_lines") or [])
+        if isinstance(line, dict)
+    ]
+    if not imported_pdf_lines:
+        failures.append("PDF import did not carry raw line geometry into problem layout metadata")
+    else:
+        first_line = imported_pdf_lines[0]
+        if not (
+            isinstance(first_line.get("bbox_px"), list)
+            and len(first_line.get("bbox_px") or []) == 4
+            and first_line.get("pdf_line_chars")
+        ):
+            failures.append(f"imported PDF line geometry is incomplete: {first_line!r}")
     numbers = [str(item.get("number") or "") for item in items]
     choice_counts = [len(item.get("choices") or []) for item in items]
     text_payload = _text_payload(items)

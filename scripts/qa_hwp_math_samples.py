@@ -464,7 +464,12 @@ def _inspect_hwpx(path: Path) -> dict[str, Any]:
     }
 
 
-def _render_hwpx(path: Path, png_dir: Path, save_pages: int) -> dict[str, Any]:
+def _render_hwpx(
+    path: Path,
+    png_dir: Path,
+    save_pages: int,
+    timeout_sec: int = 240,
+) -> dict[str, Any]:
     code = r"""
 import io
 import json
@@ -704,7 +709,7 @@ except Exception as exc:
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=240,
+        timeout=timeout_sec,
     )
     log = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
     json_lines = [line for line in completed.stdout.splitlines() if line.strip().startswith("{")]

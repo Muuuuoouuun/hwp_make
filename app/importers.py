@@ -241,6 +241,7 @@ def _import_pdf_recognized(
         bbox_px = None
         if box is not None:
             bbox_px = [box.left, box.top, box.width, box.height]
+        pdf_lines = list(getattr(prob, "line_geometries", []) or [])
         return {
             "column_count": int(getattr(prob, "column_count", 0) or 0),
             "column_index": int(getattr(prob, "column_index", 0) or 0),
@@ -251,6 +252,8 @@ def _import_pdf_recognized(
             },
             "bbox_px": bbox_px,
             "block_type": "image_fallback" if getattr(prob, "problem_image_png", None) else "problem",
+            "pdf_lines": pdf_lines,
+            "pdf_line_count": len(pdf_lines),
         }
 
     for prob in result.problems:

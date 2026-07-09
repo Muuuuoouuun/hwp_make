@@ -11,13 +11,14 @@ Canonical references:
 ## P0 - Blocking Quality Gates
 
 1. Resolve real PDF render QA timeout.
-   - Current status: import-only checks are fast and stable, but the full four-sample render QA timed out once.
-   - Next action: split `verify_real_pdf_math_samples.py` into import, HWPX write, and render phases with per-sample timings.
-   - Done when: all four real math PDFs complete with 46 questions, malformed equation count 0, overflow 0, and no column crossing.
+   - Current status: `verify_real_pdf_math_samples.py` now supports `--mode import|write|render|all`, records per-sample phase timings, and the four local real math PDFs completed render QA with 46 items, malformed equation count 0, overflow 0, and no column crossing.
+   - Next action: keep this as a regression gate and investigate any future timeout using the recorded `import`, `write_hwpx`, `inspect_hwpx`, and `render_hwpx` timings.
+   - Done when: this remains stable across the local four-sample set and any newly added real math PDFs.
 
 2. Reduce remaining real-PDF math placeholders.
    - Current status: raw PDF character/span geometry is preserved in `pdf_line_chars` and `pdf_line_spans`.
-   - Next action: use bbox geometry to reconstruct stacked fractions, roots, superscripts/subscripts, cases, and vector accents.
+   - Current status: imported problem layout metadata now carries `pdf_lines` with line text, bbox, char geometry, and span geometry; real PDF QA emits per-question placeholder reports with field, nearby text, inferred type, page/column, and bbox context.
+   - Next action: use the residual placeholder report to reconstruct stacked fractions, roots, superscripts/subscripts, cases, and vector accents.
    - Done when: remaining `□` counts are explained by type, and high-confidence structural cases are converted to native equations.
 
 3. Keep question sync as a non-negotiable gate.
@@ -61,14 +62,12 @@ Canonical references:
 ## P2 - Tooling And Reporting
 
 1. Add a residual-placeholder report.
-   - Group `□` by source file, question number, page, nearby text, and raw bbox context.
-   - Store examples for regression tests before adding new repair rules.
+   - Status: implemented in `scripts/verify_real_pdf_math_samples.py`; reports are written under `data/real_pdf_math_qa/exports/real_pdf_math_qa_report_<mode>.json`.
+   - Next action: promote representative fraction/root/script cases from the JSON report into focused regression fixtures before adding repair rules.
 
 2. Add per-phase performance logging.
-   - Import segmentation time.
-   - Native HWPX write time.
-   - rhwp render time.
-   - HWP COM open time if available.
+   - Status: real PDF QA now records setup, import, analysis, HWPX write, HWPX inspect, render, and total time per sample.
+   - Next action: add HWP COM open time if available.
 
 3. Make visual review easier.
    - Keep HTML review pages for sample outputs.

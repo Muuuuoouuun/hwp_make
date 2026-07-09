@@ -46,6 +46,7 @@ class RecognizedProblem:
     column_count: int = 0
     page_width_px: int = 0
     page_height_px: int = 0
+    line_geometries: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -94,6 +95,33 @@ def _problem_text(page: PageModel, blocks_by_id: dict[str, ContentBlock], unit_m
     blocks.sort(key=lambda b: b.reading_order)
     lines = [str(b.text).strip() for b in blocks if b.text and str(b.text).strip()]
     return "\n".join(lines)
+
+
+def _problem_line_geometries(
+    blocks_by_id: dict[str, ContentBlock],
+    unit_meta_ids: list[str],
+) -> list[dict[str, Any]]:
+    """문항에 속한 PDF 라인의 텍스트/bbox/char geometry를 QA와 수식 복원용으로 보존한다."""
+    blocks = [blocks_by_id[bid] for bid in unit_meta_ids if bid in blocks_by_id]
+    blocks.sort(key=lambda b: b.reading_order)
+    lines: list[dict[str, Any]] = []
+    for block in blocks:
+        chars = block.metadata.get("pdf_line_chars") or []
+        spans = block.metadata.get("pdf_line_spans") or []
+        if not chars and not spans:
+            continue
+        payload: dict[str, Any] = {
+            "block_id": block.block_id,
+            "block_type": str(block.block_type),
+            "text": _clean_pua(str(block.text or "")),
+            "bbox_px": [block.bbox.left, block.bbox.top, block.bbox.width, block.bbox.height],
+        }
+        if chars:
+            payload["pdf_line_chars"] = chars
+        if spans:
+            payload["pdf_line_spans"] = spans
+        lines.append(payload)
+    return lines
 
 
 def _is_pua(ch: str) -> bool:
@@ -301,6 +329,7 @@ def recognize_pdf(
         for unit in page.problems:
             block_ids = list(unit.stem_block_ids) + list(unit.choice_block_ids)
             raw_text = _problem_text(page, blocks_by_id, block_ids)
+            line_geometries = _problem_line_geometries(blocks_by_id, block_ids)
             number = int(unit.metadata.get("pdf_problem_number") or unit.metadata.get("problem_number") or 0)
 
             title_block = blocks_by_id.get(unit.metadata.get("title_block_id", ""))
@@ -342,6 +371,7 @@ def recognize_pdf(
                     column_count=int(page.metadata.get("column_count") or 0),
                     page_width_px=page.width_px,
                     page_height_px=page.height_px,
+                    line_geometries=line_geometries,
                 )
             )
 

@@ -90,6 +90,7 @@ python scripts/run_all_verify.py
 - `python scripts/verify_math_exam_pipeline.py`
 - `python scripts/verify_pdf_math_pipeline.py`
 - `python scripts/verify_real_pdf_math_samples.py`
+- `python scripts/verify_real_pdf_math_samples.py --mode import|write|render|all`
 - `python scripts/qa_hwp_math_samples.py`
 - `python scripts/verify_pdf_layout_export_api.py`
 - `python scripts/verify_pdf_layout_hwpx.py --render`
