@@ -862,7 +862,9 @@ def _patch_hancom_compatibility(path: Path) -> None:
     for name in list(payloads):
         if name.startswith("Contents/") and Path(name).name.startswith("section") and name.endswith(".xml"):
             section = etree.fromstring(payloads[name])
-            if _patch_text_box_paragraphs(section):
+            changed = _patch_text_box_paragraphs(section)
+            changed = _patch_initial_section_paragraph(section) or changed
+            if changed:
                 payloads[name] = _serialize_xml(section)
 
     if "Contents/header.xml" in payloads:
@@ -912,6 +914,46 @@ def _patch_hancom_compatibility(path: Path) -> None:
         except OSError:
             pass
         raise
+
+
+def _patch_initial_section_paragraph(section: Any) -> bool:
+    paragraphs = section.findall(_q("p"))
+    if len(paragraphs) < 2:
+        return False
+    first, second = paragraphs[0], paragraphs[1]
+    first_run = first.find(_q("run"))
+    second_run = second.find(_q("run"))
+    if first_run is None or second_run is None:
+        return False
+    if first_run.find(_q("secPr")) is None:
+        return False
+    if first.findall(f".//{_q('tbl')}") or first.findall(f".//{_q('pic')}"):
+        return False
+    if not second.findall(f"{_q('run')}/{_q('tbl')}"):
+        return False
+    nonempty_text = [
+        text.text
+        for text in first.findall(f".//{_q('t')}")
+        if text.text and text.text.strip()
+    ]
+    if nonempty_text:
+        return False
+    move_nodes = [
+        child
+        for child in list(first_run)
+        if child.tag in {_q("secPr"), _q("ctrl")}
+    ]
+    if not move_nodes:
+        return False
+    insert_at = 0
+    for child in move_nodes:
+        second_run.insert(insert_at, child)
+        insert_at += 1
+    parent = first.getparent()
+    if parent is None:
+        return False
+    parent.remove(first)
+    return True
 
 
 def _patch_text_box_paragraphs(section: Any) -> bool:
