@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import statistics
 import sys
 import tempfile
 import zipfile
@@ -214,6 +215,10 @@ _PDF_FONT_FACES = (
 _FLOW_CHAR_RATIO = 95
 _FLOW_CHAR_SPACING = -5
 _FLOW_BODY_LINE_SPACING = 165
+_FLOW_BOX_MIN_LINE_SPACING = 112
+_FLOW_BOX_MAX_LINE_SPACING = 165
+_FLOW_BOX_MIN_PADDING_PT = 1.2
+_FLOW_BOX_MAX_PADDING_PT = 12.0
 
 
 def _ensure_pdf_font_faces(header: Any) -> None:
@@ -1049,6 +1054,160 @@ def _span_text_runs(
         previous_rect = rect
         previous_size = size
     return runs
+
+
+def _median_float(values: list[float], default: float = 0.0) -> float:
+    clean = [float(value) for value in values if value is not None]
+    if not clean:
+        return default
+    return float(statistics.median(clean))
+
+
+def _line_median_font_size(line: dict[str, Any], default: float = 10.0) -> float:
+    sizes: list[float] = []
+    for span in line.get("spans", []):
+        try:
+            sizes.append(float(span.get("size") or default))
+        except (TypeError, ValueError):
+            continue
+    return _median_float(sizes, default)
+
+
+def _flow_box_line_spacing_percent(lines: list[dict[str, Any]]) -> int:
+    ordered = sorted(lines, key=lambda item: (fitz.Rect(item["bbox"]).y0, fitz.Rect(item["bbox"]).x0))
+    if len(ordered) < 2:
+        return 130
+    gaps: list[float] = []
+    for previous, current in zip(ordered, ordered[1:]):
+        prev_box = fitz.Rect(previous["bbox"])
+        cur_box = fitz.Rect(current["bbox"])
+        gap = cur_box.y0 - prev_box.y0
+        if 4.0 <= gap <= 28.0:
+            gaps.append(gap)
+    median_size = _median_float([_line_median_font_size(line) for line in ordered], 10.0)
+    if not gaps or median_size <= 0:
+        return 130
+    percent = int(round((_median_float(gaps, median_size * 1.3) / median_size) * 100.0))
+    return max(_FLOW_BOX_MIN_LINE_SPACING, min(_FLOW_BOX_MAX_LINE_SPACING, percent))
+
+
+def _flow_box_padding_pt(rect: fitz.Rect, lines: list[dict[str, Any]]) -> tuple[float, float, float, float]:
+    if not lines:
+        return (2.0, 2.0, 1.6, 1.6)
+    line_boxes = [fitz.Rect(line["bbox"]) for line in lines]
+    left = min(box.x0 for box in line_boxes) - rect.x0
+    right = rect.x1 - max(box.x1 for box in line_boxes)
+    top = min(box.y0 for box in line_boxes) - rect.y0
+    bottom = rect.y1 - max(box.y1 for box in line_boxes)
+
+    def clamp(value: float, fallback: float) -> float:
+        if value < 0:
+            value = fallback
+        return max(_FLOW_BOX_MIN_PADDING_PT, min(_FLOW_BOX_MAX_PADDING_PT, value))
+
+    return (
+        clamp(left, 2.0),
+        clamp(right, 2.0),
+        clamp(top, 1.6),
+        clamp(bottom, 1.6),
+    )
+
+
+def _flow_box_line_alignment(
+    line: dict[str, Any],
+    rect: fitz.Rect,
+    padding: tuple[float, float, float, float],
+) -> str:
+    bbox = fitz.Rect(line["bbox"])
+    pad_left, pad_right, _pad_top, _pad_bottom = padding
+    inner_left = rect.x0 + pad_left
+    inner_right = rect.x1 - pad_right
+    inner_width = max(1.0, inner_right - inner_left)
+    line_width = max(1.0, bbox.width)
+    left_gap = bbox.x0 - inner_left
+    right_gap = inner_right - bbox.x1
+    center_delta = abs(((bbox.x0 + bbox.x1) / 2.0) - ((inner_left + inner_right) / 2.0))
+    if line_width <= inner_width * 0.72 and center_delta <= max(4.0, inner_width * 0.08):
+        return "CENTER"
+    if left_gap >= max(10.0, inner_width * 0.18) and right_gap <= max(5.0, inner_width * 0.05):
+        return "RIGHT"
+    return "LEFT"
+
+
+def _flow_box_line_indent_hwp(
+    line: dict[str, Any],
+    rect: fitz.Rect,
+    padding: tuple[float, float, float, float],
+    alignment: str,
+) -> int:
+    if alignment != "LEFT":
+        return 0
+    bbox = fitz.Rect(line["bbox"])
+    pad_left, _pad_right, _pad_top, _pad_bottom = padding
+    indent_pt = bbox.x0 - (rect.x0 + pad_left)
+    if indent_pt <= 1.0:
+        return 0
+    return _pt_to_hwp(min(36.0, indent_pt))
+
+
+def _ensure_flow_para_format(
+    doc: HwpxDocument,
+    para_styles: dict[tuple[str, int, int], str],
+    *,
+    alignment: str,
+    line_spacing_percent: int,
+    left_margin_hwp: int = 0,
+) -> str:
+    safe_spacing = max(80, min(200, int(line_spacing_percent)))
+    safe_left = max(0, int(left_margin_hwp))
+    key = (alignment.upper(), safe_spacing, safe_left)
+    para_pr_id = para_styles.get(key)
+    if para_pr_id is None:
+        para_pr_id = doc.headers[0].ensure_paragraph_format(
+            alignment=alignment,
+            line_spacing_percent=safe_spacing,
+            margins={"left": safe_left, "prev": 0, "next": 0},
+        )
+        para_styles[key] = para_pr_id
+    return para_pr_id
+
+
+def _flow_box_host_indent_hwp(block: dict[str, Any], cell_width: int) -> int:
+    rect = block.get("rect")
+    if rect is None:
+        return 0
+    column_left = float(block.get("column_left_pt") or rect.x0)
+    indent_pt = max(0.0, float(rect.x0) - column_left)
+    indent_hwp = _pt_to_hwp(min(36.0, indent_pt))
+    return max(0, min(indent_hwp, max(0, cell_width - _pt_to_hwp(48.0))))
+
+
+def _flow_box_table_width_hwp(block: dict[str, Any], lines: list[dict[str, Any]], cell_width: int, indent_hwp: int) -> int:
+    rect = block.get("rect")
+    if rect is None:
+        line_bounds = _union_rect([fitz.Rect(line["bbox"]) for line in lines])
+        desired_pt = line_bounds.width + 6.0
+    else:
+        desired_pt = max(24.0, float(rect.width))
+    max_width = max(1, cell_width - indent_hwp - _pt_to_hwp(2.0))
+    return max(1, min(max_width, _pt_to_hwp(desired_pt)))
+
+
+def _flow_box_table_height_hwp(block: dict[str, Any], lines: list[dict[str, Any]]) -> int:
+    rect = block.get("rect")
+    if rect is not None:
+        return max(_pt_to_hwp(12.0), _pt_to_hwp(float(rect.height)))
+    line_height = sum(max(8.0, fitz.Rect(line["bbox"]).height + 1.5) for line in lines)
+    return max(_pt_to_hwp(12.0), _pt_to_hwp(line_height))
+
+
+def _flow_effective_item_bbox(item: dict[str, Any], boxes: list[fitz.Rect]) -> fitz.Rect:
+    bbox = _item_bbox(item)
+    if item.get("type") != "image":
+        box_index = _box_for_line(item, boxes)
+        if box_index is not None:
+            return boxes[box_index]
+    return bbox
 
 
 def _expanded_text_width(
@@ -2073,7 +2232,7 @@ def _ensure_box_border_fill(header: Any) -> str:
             border_fill.find(_hh(name))
             for name in ("leftBorder", "rightBorder", "topBorder", "bottomBorder")
         ]
-        if all(border is not None and border.get("type") == "SOLID" and border.get("width") == "0.2 mm" for border in borders):
+        if all(border is not None and border.get("type") == "SOLID" and border.get("width") == "0.12 mm" for border in borders):
             return str(border_fill.get("id") or "0")
     next_id = 1
     for border_fill in border_fills.findall(_hh("borderFill")):
@@ -2094,10 +2253,10 @@ def _ensure_box_border_fill(header: Any) -> str:
     for child_name, attrs in (
         ("slash", {"type": "NONE", "Crooked": "0", "isCounter": "0"}),
         ("backSlash", {"type": "NONE", "Crooked": "0", "isCounter": "0"}),
-        ("leftBorder", {"type": "SOLID", "width": "0.2 mm", "color": "#000000"}),
-        ("rightBorder", {"type": "SOLID", "width": "0.2 mm", "color": "#000000"}),
-        ("topBorder", {"type": "SOLID", "width": "0.2 mm", "color": "#000000"}),
-        ("bottomBorder", {"type": "SOLID", "width": "0.2 mm", "color": "#000000"}),
+        ("leftBorder", {"type": "SOLID", "width": "0.12 mm", "color": "#000000"}),
+        ("rightBorder", {"type": "SOLID", "width": "0.12 mm", "color": "#000000"}),
+        ("topBorder", {"type": "SOLID", "width": "0.12 mm", "color": "#000000"}),
+        ("bottomBorder", {"type": "SOLID", "width": "0.12 mm", "color": "#000000"}),
         ("diagonal", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
     ):
         element.append(element.makeelement(_hh(child_name), attrs))
@@ -2631,7 +2790,14 @@ def _flow_box_rects(page: fitz.Page) -> list[fitz.Rect]:
             area = float(rect.width * rect.height)
             if rect.width < 80 or rect.height < 18:
                 continue
-            if rect.width > page.rect.width * 0.55 or rect.height > page.rect.height * 0.33:
+            long_passage_box = (
+                page.rect.width * 0.22 <= rect.width <= page.rect.width * 0.55
+                and rect.height <= page.rect.height * 0.78
+                and _text_line_count_in_region(page, rect) >= 4
+            )
+            if rect.width > page.rect.width * 0.55 or (
+                rect.height > page.rect.height * 0.33 and not long_passage_box
+            ):
                 continue
             if area > page_area * 0.75:
                 continue
@@ -2719,6 +2885,13 @@ def _rail_box_rects(page: fitz.Page) -> list[fitz.Rect]:
         padded.y0 = max(0.0, padded.y0 - 2)
         padded.x1 = min(page.rect.width, padded.x1 + 2)
         padded.y1 = min(page.rect.height, padded.y1 + 2)
+        text_line_count = _text_line_count_in_region(page, padded)
+        if text_line_count < 4:
+            continue
+        if text_line_count > 52:
+            continue
+        if text_line_count >= 20 and padded.height / max(1, text_line_count) < 17.2:
+            continue
         boxes.append(padded)
         used.add(left_index)
         used.add(best_index)
@@ -2769,7 +2942,11 @@ def _drawing_box_rects(page: fitz.Page) -> list[fitz.Rect]:
             continue
         if bounds.width < page.rect.width * 0.18 or bounds.width > page.rect.width * 0.58:
             continue
-        if bounds.height < 20 or bounds.height > page.rect.height * 0.34:
+        long_passage_box = (
+            bounds.height <= page.rect.height * 0.78
+            and _text_line_count_in_region(page, bounds) >= 4
+        )
+        if bounds.height < 20 or (bounds.height > page.rect.height * 0.34 and not long_passage_box):
             continue
         padded = fitz.Rect(bounds)
         padded.x0 = max(0.0, padded.x0 - 2)
@@ -2806,12 +2983,18 @@ def _flow_column_blocks(page: fitz.Page, items: list[dict[str, Any]], boxes: lis
     result: list[list[dict[str, Any]]] = []
     for column_items in columns:
         column_items.sort(key=lambda item: (_item_bbox(item).y0, _item_bbox(item).x0))
+        column_left_candidates = [
+            _flow_effective_item_bbox(item, boxes).x0
+            for item in column_items
+            if item.get("type") != "gap"
+        ]
+        column_left_pt = min(column_left_candidates) if column_left_candidates else 0.0
         spaced_items: list[dict[str, Any]] = []
         previous_bottom: float | None = None
         previous_box: int | None = None
         for item in column_items:
-            bbox = _item_bbox(item)
             box_index = _box_for_line(item, boxes) if item.get("type") != "image" else None
+            bbox = _flow_effective_item_bbox(item, boxes)
             same_box = previous_box is not None and box_index == previous_box
             if previous_bottom is not None and not same_box:
                 gap_pt = bbox.y0 - previous_bottom
@@ -2828,7 +3011,12 @@ def _flow_column_blocks(page: fitz.Page, items: list[dict[str, Any]], boxes: lis
         for item in spaced_items:
             if item.get("type") in {"image", "gap"}:
                 if active_lines:
-                    blocks.append({"type": "box", "lines": active_lines, "rect": boxes[active_box] if active_box is not None else None})
+                    blocks.append({
+                        "type": "box",
+                        "lines": active_lines,
+                        "rect": boxes[active_box] if active_box is not None else None,
+                        "column_left_pt": column_left_pt,
+                    })
                     active_lines = []
                     active_box = None
                 if item.get("type") == "image":
@@ -2839,21 +3027,35 @@ def _flow_column_blocks(page: fitz.Page, items: list[dict[str, Any]], boxes: lis
             box_index = _box_for_line(item, boxes)
             if box_index is None:
                 if active_lines:
-                    blocks.append({"type": "box", "lines": active_lines, "rect": boxes[active_box] if active_box is not None else None})
+                    blocks.append({
+                        "type": "box",
+                        "lines": active_lines,
+                        "rect": boxes[active_box] if active_box is not None else None,
+                        "column_left_pt": column_left_pt,
+                    })
                     active_lines = []
                     active_box = None
                 blocks.append({"type": "line", "line": item})
                 continue
             if active_box is not None and box_index != active_box and active_lines:
-                blocks.append({"type": "box", "lines": active_lines, "rect": boxes[active_box]})
+                blocks.append({
+                    "type": "box",
+                    "lines": active_lines,
+                    "rect": boxes[active_box],
+                    "column_left_pt": column_left_pt,
+                })
                 active_lines = []
             active_box = box_index
             active_lines.append(item)
         if active_lines:
-            blocks.append({"type": "box", "lines": active_lines, "rect": boxes[active_box] if active_box is not None else None})
+            blocks.append({
+                "type": "box",
+                "lines": active_lines,
+                "rect": boxes[active_box] if active_box is not None else None,
+                "column_left_pt": column_left_pt,
+            })
         result.append(blocks)
     return result
-
 
 def _merge_same_row_flow_lines(page: fitz.Page, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     lines = [item for item in items if item.get("type") == "line"]
@@ -3093,6 +3295,7 @@ def _append_flow_block(
     block: dict[str, Any],
     *,
     styles: dict[tuple[str, float, bool], str],
+    para_styles: dict[tuple[str, int, int], str],
     para_pr_id_ref: str,
     cell_width: int,
     border_fill_id_ref: str,
@@ -3125,26 +3328,46 @@ def _append_flow_block(
     lines = [line for line in block.get("lines", []) if _line_text(line)]
     if not lines:
         return 0
-    height_pt = 14.0
     rect = block.get("rect")
-    if rect is not None:
-        height_pt = max(height_pt, min(float(rect.height), sum(max(8.0, fitz.Rect(line["bbox"]).height + 1.5) for line in lines)))
-    table = cell.add_table(
-        1,
-        1,
-        width=max(1, cell_width - _pt_to_hwp(4)),
-        height=max(_pt_to_hwp(height_pt), _pt_to_hwp(12)),
-        border_fill_id_ref=border_fill_id_ref,
+    if rect is None:
+        rect = _union_rect([fitz.Rect(line["bbox"]) for line in lines])
+    indent_hwp = _flow_box_host_indent_hwp(block, cell_width)
+    table_width = _flow_box_table_width_hwp(block, lines, cell_width, indent_hwp)
+    table_height = _flow_box_table_height_hwp(block, lines)
+    host_para = _ensure_flow_para_format(
+        doc,
+        para_styles,
+        alignment="LEFT",
+        line_spacing_percent=100,
+        left_margin_hwp=indent_hwp,
     )
+    host = cell.add_paragraph("", para_pr_id_ref=host_para, char_pr_id_ref="0")
+    table = host.add_table(1, 1, width=table_width, height=table_height, border_fill_id_ref=border_fill_id_ref)
     nested = table.cell(0, 0)
-    _set_cell_margin(nested, left_mm=1.0, right_mm=1.0, top_mm=0.6, bottom_mm=0.6)
+    padding = _flow_box_padding_pt(rect, lines)
+    pad_left, pad_right, pad_top, pad_bottom = padding
+    _set_cell_margin(
+        nested,
+        left_mm=_pt_to_mm(pad_left),
+        right_mm=_pt_to_mm(pad_right),
+        top_mm=_pt_to_mm(pad_top),
+        bottom_mm=_pt_to_mm(pad_bottom),
+    )
     _clear_cell_paragraphs(nested)
     count = 0
+    line_spacing = _flow_box_line_spacing_percent(lines)
     for line in lines:
-        if _append_cell_line(doc, nested, line, styles=styles, para_pr_id_ref=para_pr_id_ref):
+        alignment = _flow_box_line_alignment(line, rect, padding)
+        line_para = _ensure_flow_para_format(
+            doc,
+            para_styles,
+            alignment=alignment,
+            line_spacing_percent=line_spacing,
+            left_margin_hwp=_flow_box_line_indent_hwp(line, rect, padding, alignment),
+        )
+        if _append_cell_line(doc, nested, line, styles=styles, para_pr_id_ref=line_para):
             count += 1
     return count
-
 
 def write_pdf_flow_hwpx(
     pdf_path: str | Path,
@@ -3176,6 +3399,7 @@ def write_pdf_flow_hwpx(
     )
 
     styles: dict[tuple[str, float, bool], str] = {}
+    para_styles: dict[tuple[str, int, int], str] = {}
     page_count = 0
     line_count = 0
     boxed_count = 0
@@ -3307,6 +3531,7 @@ def write_pdf_flow_hwpx(
                         cell,
                         block,
                         styles=styles,
+                        para_styles=para_styles,
                         para_pr_id_ref=body_para,
                         cell_width=cell_width,
                         border_fill_id_ref=box_border_fill,
