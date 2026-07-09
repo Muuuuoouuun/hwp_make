@@ -38,6 +38,12 @@ Goal: produce KICE/school-exam HWPX/HWP output that preserves question sync, nat
    - Use regional image fallback only for diagrams/tables or unresolved math structures.
    - Avoid full-page raster fallback for the PDF original-layout HWPX path.
 
+4. Reduce HWP open friction.
+   - Ad prompts are usually controlled by the installed Hancom product, viewer/free edition, account state, or update channel. Generated HWPX content cannot reliably suppress them.
+   - Edit-permission/protected-view prompts are partly actionable. Check generated files for document protection flags, read-only attributes, Mark-of-the-Web zone metadata, temp/download paths, and locked output files.
+   - Next action: add an open-probe checklist that records whether Hancom opens the generated HWPX as editable, read-only, protected, or blocked by a permission tab.
+   - Done when: files generated into the app export directory open directly editable on a licensed Hancom install, with any remaining ad-only prompt documented as environment-level.
+
 ## P2 - Tooling And Reporting
 
 1. Add a residual-placeholder report.
