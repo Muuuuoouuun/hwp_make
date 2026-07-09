@@ -35,7 +35,11 @@ CONTAINER_PATH = "META-INF/container.xml"
 HEADER_PATH = "Contents/header.xml"
 VERSION_PATH = "version.xml"
 PREVIEW_TEXT_PATH = "Preview/PrvText.txt"
-RECOMMENDED_HANCOM_TARGET = "HWP2018"
+PREVIEW_IMAGE_PATH = "Preview/PrvImage.png"
+SETTINGS_PATH = "settings.xml"
+ODF_MANIFEST_PATH = "META-INF/manifest.xml"
+CONTAINER_RDF_PATH = "META-INF/container.rdf"
+RECOMMENDED_HANCOM_TARGET = "HWP201X"
 
 _XML_DECLARATION_RE = re.compile(br"^<\?xml\s+([^?]*?)\?>", re.IGNORECASE)
 _STANDALONE_YES_RE = re.compile(br"\bstandalone\s*=\s*(['\"])yes\1", re.IGNORECASE)
@@ -421,8 +425,38 @@ def _check_section_properties_location(
         None,
     )
     if section_properties is None:
-        _warning(issues, part_name, "missing hp:secPr section properties")
+        _error(issues, part_name, "missing hp:secPr section properties")
         return
+
+    required_attrs = (
+        "textDirection",
+        "spaceColumns",
+        "tabStop",
+        "tabStopVal",
+        "tabStopUnit",
+        "outlineShapeIDRef",
+        "memoShapeIDRef",
+        "textVerticalWidthHead",
+        "masterPageCnt",
+    )
+    for attr in required_attrs:
+        if section_properties.get(attr) is None:
+            _error(issues, part_name, f"hp:secPr missing Hancom-required {attr}")
+
+    required_children = (
+        "grid",
+        "startNum",
+        "visibility",
+        "lineNumberShape",
+        "pagePr",
+        "footNotePr",
+        "endNotePr",
+        "pageBorderFill",
+    )
+    child_names = {_local_name(child) for child in list(section_properties)}
+    for child_name in required_children:
+        if child_name not in child_names:
+            _error(issues, part_name, f"hp:secPr missing Hancom-required hp:{child_name}")
 
     first_paragraph = _first_child_by_local(root, "p")
     first_run = (
@@ -436,6 +470,21 @@ def _check_section_properties_location(
             part_name,
             "hp:secPr must be carried by the first paragraph's first hp:run",
         )
+    elif list(first_run) and _local_name(list(first_run)[0]) != "secPr":
+        _error(
+            issues,
+            part_name,
+            "hp:secPr must be the first child in the first paragraph's first hp:run",
+        )
+    if first_run is not None:
+        ctrl = _first_child_by_local(first_run, "ctrl")
+        col_pr = _first_child_by_local(ctrl, "colPr") if ctrl is not None else None
+        if col_pr is None:
+            _error(
+                issues,
+                part_name,
+                "first paragraph's first hp:run must include hp:ctrl/hp:colPr section column properties",
+            )
 
 
 def _check_header_editor_acceptance(
@@ -463,11 +512,11 @@ def _check_header_editor_acceptance(
             )
 
     version = root.get("version")
-    if version != "1.4":
+    if version != "1.5":
         _warning(
             issues,
             part_name,
-            f"hh:head version is {version!r}; '1.4' is the measured compatibility baseline",
+            f"hh:head version is {version!r}; '1.5' is the Hancom 2024 compatibility baseline",
         )
 
 
@@ -597,21 +646,30 @@ def validate_package(source: str | Path | bytes | BinaryIO) -> PackageValidation
             )
 
         if PREVIEW_TEXT_PATH not in name_set:
-            _warning(
+            _error(
                 issues,
                 PREVIEW_TEXT_PATH,
-                "missing Preview/PrvText.txt; macOS Hancom compatibility may require it",
+                "missing Preview/PrvText.txt; Hancom 2024 compatibility requires a preview text snapshot",
             )
         else:
             preview_bytes = _safe_read(zf, PREVIEW_TEXT_PATH)
             if preview_bytes is None:
                 _error(issues, PREVIEW_TEXT_PATH, "unable to read preview text entry")
+            elif not preview_bytes.strip():
+                _error(issues, PREVIEW_TEXT_PATH, "preview text entry is empty")
             elif len(preview_bytes) > 1024 * 1024:
                 _warning(
                     issues,
                     PREVIEW_TEXT_PATH,
                     "Preview/PrvText.txt is unusually large; expected a compact text snapshot",
                 )
+
+        for required_part in (SETTINGS_PATH, ODF_MANIFEST_PATH, CONTAINER_RDF_PATH, PREVIEW_IMAGE_PATH):
+            if required_part not in name_set:
+                _error(issues, required_part, "missing Hancom 2024 compatibility sidecar")
+        preview_image_bytes = _safe_read(zf, PREVIEW_IMAGE_PATH) if PREVIEW_IMAGE_PATH in name_set else None
+        if preview_image_bytes is not None and not preview_image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            _error(issues, PREVIEW_IMAGE_PATH, "preview image must be a PNG")
 
         xml_roots: dict[str, ET.Element] = {}
         for name in names:
@@ -677,6 +735,17 @@ def validate_package(source: str | Path | bytes | BinaryIO) -> PackageValidation
             known_parts=name_set,
         )
 
+        header_root = xml_roots.get(HEADER_PATH)
+        section_name_count = sum(1 for name in name_set if is_section_part_name(name))
+        if header_root is not None:
+            expected_sec_cnt = str(section_name_count)
+            if header_root.get("secCnt") != expected_sec_cnt:
+                _error(
+                    issues,
+                    HEADER_PATH,
+                    f"hh:head secCnt is {header_root.get('secCnt')!r}; expected {expected_sec_cnt!r}",
+                )
+
         for item in relationships.items:
             if item.resolved_path not in name_set:
                 _error(
@@ -690,6 +759,14 @@ def validate_package(source: str | Path | bytes | BinaryIO) -> PackageValidation
                 issues,
                 selected_rootfile.full_path,
                 f"spine itemref references missing manifest id {idref!r}",
+            )
+
+        manifest_paths = {item.resolved_path for item in relationships.items}
+        if SETTINGS_PATH not in manifest_paths:
+            _error(
+                issues,
+                selected_rootfile.full_path,
+                f"manifest does not reference required settings part {SETTINGS_PATH!r}",
             )
 
         section_paths = [path for path in relationships.spine_paths if is_section_part_name(path)]

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import base64
+import io
+import json
 import os
 import sys
 import tempfile
 import zipfile
 from pathlib import Path
+from urllib.parse import quote
 from xml.etree import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,11 +26,18 @@ except Exception:
     print("SKIP: PyMuPDF(fitz) unavailable")
     raise SystemExit(2)
 
+try:
+    from PIL import Image, ImageDraw
+except Exception:
+    print("SKIP: Pillow unavailable")
+    raise SystemExit(2)
+
 tmp = tempfile.TemporaryDirectory(prefix="hwp_make_pdf_layout_api_", ignore_cleanup_errors=True)
 os.environ["HWP_MAKE_DATA_DIR"] = tmp.name
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app import pdf_layout_fidelity  # noqa: E402
 from app.main import app  # noqa: E402
 from scripts.verify_pdf_layout_hwpx import verify  # noqa: E402
 
@@ -71,6 +81,88 @@ def make_pdf() -> bytes:
         fontname="times-roman",
     )
     return doc.tobytes()
+
+
+def make_two_page_pdf() -> bytes:
+    doc = fitz.open(stream=make_pdf(), filetype="pdf")
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((48, 38), "Second limited page", fontsize=12, fontname="helv")
+    page.insert_textbox(
+        fitz.Rect(48, 86, 270, 250),
+        "1. This page should be omitted when max_pages=1.",
+        fontsize=10,
+        fontname="times-roman",
+    )
+    return doc.tobytes()
+
+
+def make_image_only_pdf() -> bytes:
+    image = Image.new("RGB", (595, 842), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((45, 40, 550, 790), outline="black", width=3)
+    draw.rectangle((80, 120, 420, 160), fill="black")
+    draw.rectangle((80, 210, 360, 250), fill="black")
+    image_bytes = io.BytesIO()
+    image.save(image_bytes, format="PNG")
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_image(page.rect, stream=image_bytes.getvalue())
+    return doc.tobytes()
+
+
+def make_math_score_pdf() -> bytes:
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((48, 38), "Mock Math Test", fontsize=12, fontname="helv")
+    page.insert_textbox(
+        fitz.Rect(48, 86, 540, 190),
+        "1. $f(x)=\\sqrt{x^2+1}$ and $\\min_{x\\in A} f(x)$.\n"
+        "2. $P(A)=\\frac{1}{2}$, $\\lim_{x\\to0} \\frac{\\sin x}{x}=1$, and $x^2+y^2=1$.",
+        fontsize=10,
+        fontname="times-roman",
+    )
+    return doc.tobytes()
+
+
+def check_metric_guards() -> None:
+    source = Image.new("RGB", (360, 240), "white")
+    draw = ImageDraw.Draw(source)
+    draw.rectangle((60, 70, 220, 84), fill="black")
+    draw.rectangle((60, 100, 160, 114), fill="black")
+
+    blank = Image.new("RGB", source.size, "white")
+    blank_metrics = pdf_layout_fidelity._page_metrics(source, blank)
+    check(
+        "blank output foreground detection",
+        blank_metrics["source_foreground_pixels"] > 0
+        and blank_metrics["output_foreground_pixels"] == 0
+        and blank_metrics["foreground_overlap_ratio"] == 0.0,
+        repr(blank_metrics),
+    )
+    check(
+        "blank output strict alignment fails",
+        blank_metrics["strict_alignment_ratio"]
+        < pdf_layout_fidelity.STRICT_ALIGNMENT_REVIEW_THRESHOLD,
+        repr(blank_metrics),
+    )
+
+    text_like = Image.new("RGB", source.size, "white")
+    text_draw = ImageDraw.Draw(text_like)
+    shifted = Image.new("RGB", source.size, "white")
+    shifted_draw = ImageDraw.Draw(shifted)
+    for x in (60, 130, 215):
+        text_draw.rectangle((x, 70, x + 5, 90), fill="black")
+        text_draw.rectangle((x, 106, x + 5, 126), fill="black")
+        shifted_draw.rectangle((x + 40, 70, x + 45, 90), fill="black")
+        shifted_draw.rectangle((x + 40, 106, x + 45, 126), fill="black")
+    shifted_metrics = pdf_layout_fidelity._page_metrics(text_like, shifted)
+    check(
+        "shifted output foreground overlap guard",
+        shifted_metrics["foreground_overlap_ratio"]
+        < pdf_layout_fidelity.FOREGROUND_OVERLAP_REVIEW_THRESHOLD,
+        repr(shifted_metrics),
+    )
 
 
 def _inspect_flow_style(path: Path) -> dict[str, object]:
@@ -148,6 +240,7 @@ def _inspect_flow_style(path: Path) -> dict[str, object]:
 
 def main() -> int:
     try:
+        check_metric_guards()
         client = TestClient(app)
         rejected = client.post(
             "/api/pdf-layout-export",
@@ -171,13 +264,146 @@ def main() -> int:
         if response.status_code != 200:
             return 1
         payload = response.json()
-        check("mode", payload.get("mode") == "pdf_flow_hwpx", repr(payload.get("mode")))
+        mode = payload.get("mode")
+        check("mode", mode == "pdf_coordinate_hwpx", repr(mode))
         export = payload.get("export") or {}
         output_path = Path(tmp.name) / "exports" / str(export.get("name") or "")
         check("export exists", output_path.is_file(), str(output_path))
         stats = payload.get("stats") or {}
         check("stats pages", stats.get("pages") == 1, repr(stats))
         check("editable flow lines", int(stats.get("flow_lines") or 0) > 0, repr(stats))
+        check(
+            "source text line count",
+            int(stats.get("source_text_lines") or 0) >= int(stats.get("flow_lines") or 0),
+            repr(stats),
+        )
+        check("no full-page raster fallback", stats.get("full_page_raster_fallback") is False, repr(stats))
+        check("no full-page images", int(stats.get("full_page_images") or 0) == 0, repr(stats))
+        check(
+            "editable text coverage target",
+            float(stats.get("editable_text_coverage_ratio") or 0.0) >= 0.9,
+            repr(stats),
+        )
+        quality = payload.get("quality") or {}
+        check("quality target", quality.get("target_sync_ratio") == 0.94, repr(quality))
+        check("quality coverage pass", quality.get("meets_editable_text_target") is True, repr(quality))
+        check("visual sync target pass", bool(quality.get("meets_visual_sync_target")), repr(quality))
+        check("layout-view visual sync target pass", bool(quality.get("meets_layout_view_sync_target")), repr(quality))
+        check("objective score target", float(quality.get("objective_score_target") or 0.0) == 95.0, repr(quality))
+        check("objective score available", bool(quality.get("objective_score_available")), repr(quality))
+        check("objective score recorded", quality.get("objective_score") is not None, repr(quality))
+        components = quality.get("score_components") or {}
+        check(
+            "objective components present",
+            {"layout", "font", "math", "balance", "paging", "editable_text", "open_safety"}.issubset(
+                set(components)
+            ),
+            repr(components),
+        )
+        check(
+            "objective component weights",
+            abs(sum(float((component or {}).get("weight") or 0.0) for component in components.values()) - 1.0)
+            < 0.001,
+            repr(components),
+        )
+        check("font template target pass", quality.get("meets_font_template_target") is True, repr(quality))
+        check("native math target n/a", quality.get("meets_native_math_target") is None, repr(quality))
+        check("math visual sync target", quality.get("meets_math_visual_sync_target") is True, repr(quality))
+        check("paging target pass", quality.get("meets_paging_target") is True, repr(quality))
+        check("open safety target", quality.get("meets_open_safety_target") is True, repr(quality))
+        check("quality no max-page limit", quality.get("limited_by_max_pages") is False, repr(quality))
+        check("quality no full-page raster fallback", quality.get("full_page_raster_fallback") is False, repr(quality))
+        check(
+            "layout-view sync ratio >= 94%",
+            float(quality.get("layout_view_sync_ratio") or 0.0) >= 0.94,
+            repr(quality),
+        )
+        check(
+            "whole-page visual sync ratio recorded",
+            float(quality.get("whole_page_visual_sync_ratio") or 0.0) > 0.0,
+            repr(quality),
+        )
+        check("visual review flags clean", quality.get("visual_review_flags") == [], repr(quality))
+        style_profile = payload.get("style_profile") or {}
+        check("style profile available", style_profile.get("available") is True, repr(style_profile))
+        check("style profile font target", style_profile.get("has_required_font_faces") is True, repr(style_profile))
+        check("style profile char metrics", style_profile.get("char_metric_ok") is True, repr(style_profile))
+        check("style profile font bucket", style_profile.get("font_size_bucket_ok") is True, repr(style_profile))
+        check("style profile line spacing", style_profile.get("uses_165_line_spacing") is True, repr(style_profile))
+        open_safety = payload.get("open_safety") or {}
+        check("open safety ok", open_safety.get("ok") is True, repr(open_safety))
+        fidelity = payload.get("fidelity") or {}
+        check("fidelity has no error", not fidelity.get("error"), repr(fidelity))
+        check("fidelity available", bool(fidelity.get("available")) and not fidelity.get("skipped"), repr(fidelity))
+        check("fidelity pages", int(fidelity.get("pages_compared") or 0) == 1, repr(fidelity))
+        check("fidelity meets target", bool(fidelity.get("meets_target")), repr(fidelity))
+        check("fidelity page counts", fidelity.get("pdf_page_count") == 1 and fidelity.get("hwpx_page_count") == 1, repr(fidelity))
+        check("fidelity max pages", fidelity.get("max_pages") == 1, repr(fidelity))
+        check("fidelity not truncated", fidelity.get("truncated") is False, repr(fidelity))
+        check("fidelity page count matched", fidelity.get("page_count_mismatch") is False, repr(fidelity))
+        check("fidelity review flags clean", fidelity.get("review_flags") == [], repr(fidelity))
+        check("fidelity artifact dir", str(fidelity.get("artifact_dir") or "").endswith("/fidelity_renders"), repr(fidelity))
+        run = payload.get("run") or {}
+        report = run.get("report") or {}
+        report_path = Path(tmp.name) / "exports" / str(report.get("name") or "")
+        check("run report exists", report_path.is_file(), str(report_path))
+        if report_path.is_file():
+            report_payload = json.loads(report_path.read_text(encoding="utf-8"))
+            check("run report stats", report_payload.get("stats") == stats, repr(report_payload.get("stats")))
+            check("run report quality", report_payload.get("quality") == quality, repr(report_payload.get("quality")))
+            check("run report fidelity", report_payload.get("fidelity") == fidelity, repr(report_payload.get("fidelity")))
+            check(
+                "run report style profile",
+                report_payload.get("style_profile") == style_profile,
+                repr(report_payload.get("style_profile")),
+            )
+            check(
+                "run report open safety",
+                report_payload.get("open_safety") == open_safety,
+                repr(report_payload.get("open_safety")),
+            )
+        run_folder = str(run.get("folder") or "")
+        expected_render_url_prefix = f"/files/exports/{quote(run_folder, safe='/')}/fidelity_renders/"
+        artifact_mode = str(fidelity.get("artifact_mode") or "all")
+        target_ratio = float(fidelity.get("target_sync_ratio") or 0.0)
+        for page in fidelity.get("pages") or []:
+            render_sizes: dict[str, tuple[int, int]] = {}
+            check("fidelity page aspect ok", page.get("aspect_ratio_mismatch") is False, repr(page))
+            check("fidelity page aspect delta", float(page.get("aspect_ratio_delta") or 1.0) < 0.02, repr(page))
+            check("fidelity page foreground source", int(page.get("source_foreground_pixels") or 0) > 0, repr(page))
+            check("fidelity page foreground output", int(page.get("output_foreground_pixels") or 0) > 0, repr(page))
+            source_fg = int(page.get("source_foreground_pixels") or 0)
+            output_fg = int(page.get("output_foreground_pixels") or 0)
+            foreground_ratio = (output_fg / source_fg) if source_fg else 1.0
+            check("fidelity page foreground ratio", 0.1 <= foreground_ratio <= 10.0, repr(page))
+            page_below_target = float(page.get("layout_view_sync_ratio") or 0.0) < target_ratio
+            expect_render_artifacts = artifact_mode == "all" or (
+                artifact_mode == "failures" and page_below_target
+            )
+            for key in ("source_png", "output_png", "diff_png"):
+                render_path = report_path.parent / "fidelity_renders" / str(page.get(key) or "")
+                url_key = f"{key}_url"
+                url = str(page.get(url_key) or "")
+                if expect_render_artifacts:
+                    check(f"fidelity render {key}", render_path.is_file(), str(render_path))
+                    check(f"fidelity render {key} non-empty", render_path.exists() and render_path.stat().st_size > 0, str(render_path))
+                    check(
+                        f"fidelity render {url_key}",
+                        url.startswith(expected_render_url_prefix) and ":" not in url,
+                        url,
+                    )
+                else:
+                    check(f"fidelity render {key} skipped for passing page", not render_path.exists(), str(render_path))
+                    check(f"fidelity render {url_key} skipped for passing page", url == "", url)
+                if render_path.is_file():
+                    with Image.open(render_path) as image:
+                        render_sizes[key] = image.size
+                        check(f"fidelity render {key} plausible size", image.width >= 300 and image.height >= 300, repr(image.size))
+            if render_sizes:
+                check("fidelity render dimensions match", len(set(render_sizes.values())) == 1, repr(render_sizes))
+        source_copy = ((payload.get("source") or {}).get("copy") or {})
+        source_copy_path = Path(tmp.name) / "exports" / str(source_copy.get("name") or "")
+        check("source copy exists", source_copy_path.is_file(), str(source_copy_path))
         if output_path.is_file():
             issues = verify(output_path, render=False)
             check("HWPX structure", not issues, "; ".join(issues[:5]))
@@ -192,9 +418,150 @@ def main() -> int:
                 "1000" in metric_heights and not (metric_heights & old_dense_heights),
                 repr(sorted(metric_heights)),
             )
-            check("flow line spacing 165", bool(style["uses_165"]))
-            check("flow middle divider", bool(style["divider_ok"]))
-            check("flow cell margins", bool(style["margin_ok"]))
+            if mode == "pdf_flow_hwpx":
+                check("flow line spacing 165", bool(style["uses_165"]))
+                check("flow middle divider", bool(style["divider_ok"]))
+                check("flow cell margins", bool(style["margin_ok"]))
+            check(
+                "coordinate text lines",
+                int(stats.get("text_lines") or 0) >= int(stats.get("source_text_lines") or 0),
+                repr(stats),
+            )
+            check("coordinate line rects", int(stats.get("line_rects") or 0) >= 1, repr(stats))
+
+        math_response = client.post(
+            "/api/pdf-layout-export",
+            json={
+                "filename": "mock_math_score.pdf",
+                "data_base64": base64.b64encode(make_math_score_pdf()).decode("ascii"),
+                "boxed_passages": True,
+            },
+        )
+        check("math score status", math_response.status_code == 200, math_response.text[:240])
+        if math_response.status_code == 200:
+            math_payload = math_response.json()
+            math_stats = math_payload.get("stats") or {}
+            math_quality = math_payload.get("quality") or {}
+            math_style = math_payload.get("style_profile") or {}
+            math_open_safety = math_payload.get("open_safety") or {}
+            math_export = math_payload.get("export") or {}
+            math_output_path = Path(tmp.name) / "exports" / str(math_export.get("name") or "")
+            check("math source segments", int(math_stats.get("source_math_segments") or 0) >= 5, repr(math_stats))
+            check("math visual-first mode", math_stats.get("native_math_enabled") is False, repr(math_stats))
+            check("math native equations disabled", int(math_stats.get("native_equations") or 0) == 0, repr(math_stats))
+            check("math no full-page raster fallback", math_stats.get("full_page_raster_fallback") is False, repr(math_stats))
+            check("math objective recorded", math_quality.get("objective_score") is not None, repr(math_quality))
+            check("math native target n/a", math_quality.get("meets_native_math_target") is None, repr(math_quality))
+            check("math visual target", math_quality.get("meets_math_visual_sync_target") is True, repr(math_quality))
+            math_components = math_quality.get("score_components") or {}
+            math_component = math_components.get("math") or {}
+            check("math component visual-first", math_component.get("visual_first") is True, repr(math_component))
+            check("math visual score >= 95", float(math_component.get("math_visual_score") or 0.0) >= 95.0, repr(math_component))
+            check("math style native equations disabled", int(math_style.get("native_equations") or 0) == 0, repr(math_style))
+            check("math font target", math_quality.get("meets_font_template_target") is True, repr(math_quality))
+            check("math paging target", math_quality.get("meets_paging_target") is True, repr(math_quality))
+            check("math open safety", math_open_safety.get("ok") is True, repr(math_open_safety))
+            if math_output_path.is_file():
+                math_issues = verify(math_output_path, render=False)
+                check("math HWPX structure", not math_issues, "; ".join(math_issues[:5]))
+        limited_response = client.post(
+            "/api/pdf-layout-export",
+            json={
+                "filename": "mock_two_page_limit.pdf",
+                "data_base64": base64.b64encode(make_two_page_pdf()).decode("ascii"),
+                "max_pages": 1,
+                "boxed_passages": True,
+            },
+        )
+        check("max_pages status", limited_response.status_code == 200, limited_response.text[:240])
+        if limited_response.status_code == 200:
+            limited_payload = limited_response.json()
+            limited_stats = limited_payload.get("stats") or {}
+            limited_quality = limited_payload.get("quality") or {}
+            limited_fidelity = limited_payload.get("fidelity") or {}
+            check("max_pages stats pages", limited_stats.get("pages") == 1, repr(limited_stats))
+            check("max_pages quality limited", limited_quality.get("limited_by_max_pages") is True, repr(limited_quality))
+            check("max_pages visual target", limited_quality.get("meets_visual_sync_target") is True, repr(limited_quality))
+            check("max_pages layout-view target", limited_quality.get("meets_layout_view_sync_target") is True, repr(limited_quality))
+            check("max_pages raw mismatch retained", limited_fidelity.get("raw_page_count_mismatch") is True, repr(limited_fidelity))
+            check("max_pages mismatch allowed", limited_fidelity.get("page_count_mismatch") is False, repr(limited_fidelity))
+            check("max_pages fidelity target", limited_fidelity.get("meets_target") is True, repr(limited_fidelity))
+
+        image_response = client.post(
+            "/api/pdf-layout-export",
+            json={
+                "filename": "mock_image_only.pdf",
+                "data_base64": base64.b64encode(make_image_only_pdf()).decode("ascii"),
+                "boxed_passages": True,
+            },
+        )
+        check("image-only status", image_response.status_code == 200, image_response.text[:240])
+        if image_response.status_code == 200:
+            image_payload = image_response.json()
+            image_stats = image_payload.get("stats") or {}
+            image_quality = image_payload.get("quality") or {}
+            image_export = image_payload.get("export") or {}
+            image_output_path = Path(tmp.name) / "exports" / str(image_export.get("name") or "")
+            check("image-only full-page image count", int(image_stats.get("full_page_images") or 0) >= 1, repr(image_stats))
+            check(
+                "image-only coverage fails",
+                float(image_stats.get("editable_text_coverage_ratio", 1.0)) == 0.0,
+                repr(image_stats),
+            )
+            check("image-only quality coverage fails", image_quality.get("meets_editable_text_target") is False, repr(image_quality))
+            check("image-only fallback flagged", image_quality.get("full_page_raster_fallback") is True, repr(image_quality))
+            check("image-only fallback count", int(image_quality.get("full_page_images") or 0) >= 1, repr(image_quality))
+            check("image-only objective fails", image_quality.get("meets_objective_score_target") is False, repr(image_quality))
+            if image_output_path.is_file():
+                image_issues = verify(image_output_path, render=False)
+                check(
+                    "image-only structure catches full-page raster",
+                    any("full-page raster fallback" in issue for issue in image_issues),
+                    repr(image_issues),
+                )
+        original_rhwp = pdf_layout_fidelity.rhwp
+        try:
+            pdf_layout_fidelity.rhwp = None
+            skipped_response = client.post(
+                "/api/pdf-layout-export",
+                json={
+                    "filename": "mock_no_rhwp.pdf",
+                    "data_base64": base64.b64encode(make_pdf()).decode("ascii"),
+                    "boxed_passages": True,
+                },
+            )
+        finally:
+            pdf_layout_fidelity.rhwp = original_rhwp
+        check("optional rhwp status", skipped_response.status_code == 200, skipped_response.text[:240])
+        if skipped_response.status_code == 200:
+            skipped_payload = skipped_response.json()
+            skipped_fidelity = skipped_payload.get("fidelity") or {}
+            skipped_quality = skipped_payload.get("quality") or {}
+            check("optional rhwp fidelity skipped", skipped_fidelity.get("available") is False and skipped_fidelity.get("skipped") is True, repr(skipped_fidelity))
+            check("optional rhwp visual target unknown", skipped_quality.get("meets_visual_sync_target") is None, repr(skipped_quality))
+            check("optional rhwp layout-view target unknown", skipped_quality.get("meets_layout_view_sync_target") is None, repr(skipped_quality))
+            skipped_report = ((skipped_payload.get("run") or {}).get("report") or {})
+            skipped_report_path = Path(tmp.name) / "exports" / str(skipped_report.get("name") or "")
+            check("optional rhwp report exists", skipped_report_path.is_file(), str(skipped_report_path))
+            if skipped_report_path.is_file():
+                skipped_report_payload = json.loads(skipped_report_path.read_text(encoding="utf-8"))
+                check(
+                    "optional rhwp report fidelity",
+                    skipped_report_payload.get("fidelity") == skipped_fidelity,
+                    repr(skipped_report_payload.get("fidelity")),
+                )
+        history = client.get("/api/exports")
+        check("export history status", history.status_code == 200, history.text[:240])
+        if history.status_code == 200:
+            history_items = history.json().get("items") or []
+            check(
+                "export history includes nested HWPX",
+                any(item.get("name") == export.get("name") for item in history_items),
+                repr(history_items[:3]),
+            )
+        delete_response = client.delete(f"/api/exports/{quote(str(export.get('name') or ''), safe='')}")
+        check("delete nested export", delete_response.status_code == 200, delete_response.text[:240])
+        check("deleted nested HWPX missing", not output_path.exists(), str(output_path))
         return 1 if _failures else 0
     finally:
         tmp.cleanup()

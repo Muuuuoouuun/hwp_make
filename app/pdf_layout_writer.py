@@ -21,17 +21,45 @@ import fitz
 from lxml import etree
 from PIL import Image
 
+from . import math_text
+from .hwpx_writer import _equation_placeholder, _equation_size, _hancom_eqn_script
+
 _VENDOR = Path(__file__).resolve().parent / "_vendor"
 if str(_VENDOR) not in sys.path:
     sys.path.insert(0, str(_VENDOR))
 from hwpx import HwpxDocument  # noqa: E402
 
 HP = "http://www.hancom.co.kr/hwpml/2011/paragraph"
+HS = "http://www.hancom.co.kr/hwpml/2011/section"
 XML = "http://www.w3.org/XML/1998/namespace"
 HWP_PER_PT = 100.0
 OPF = "http://www.idpf.org/2007/opf/"
 HH = "http://www.hancom.co.kr/hwpml/2011/head"
 HV = "http://www.hancom.co.kr/hwpml/2011/version"
+HA = "http://www.hancom.co.kr/hwpml/2011/app"
+HC = "http://www.hancom.co.kr/hwpml/2011/core"
+CONFIG = "urn:oasis:names:tc:opendocument:xmlns:config:1.0"
+RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+HWPX_PKG_META = "http://www.hancom.co.kr/hwpml/2016/meta/pkg#"
+ODF_MANIFEST = "urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"
+
+HWPX_COMPAT_NAMESPACES = {
+    "ha": HA,
+    "hp": HP,
+    "hp10": "http://www.hancom.co.kr/hwpml/2016/paragraph",
+    "hs": HS,
+    "hc": HC,
+    "hh": HH,
+    "hhs": "http://www.hancom.co.kr/hwpml/2011/history",
+    "hm": "http://www.hancom.co.kr/hwpml/2011/master-page",
+    "hpf": "http://www.hancom.co.kr/schema/2011/hpf",
+    "dc": "http://purl.org/dc/elements/1.1/",
+    "opf": OPF,
+    "ooxmlchart": "http://www.hancom.co.kr/hwpml/2016/ooxmlchart",
+    "hwpunitchar": "http://www.hancom.co.kr/hwpml/2016/HwpUnitChar",
+    "epub": "http://www.idpf.org/2007/ops",
+    "config": CONFIG,
+}
 
 
 def _q(tag: str) -> str:
@@ -46,8 +74,35 @@ def _hh(tag: str) -> str:
     return f"{{{HH}}}{tag}"
 
 
+def _hc(tag: str) -> str:
+    return f"{{{HC}}}{tag}"
+
+
+def _append_xml_child(parent: Any, tag: str, attributes: dict[str, str] | None = None) -> Any:
+    child = parent.makeelement(tag, attributes or {})
+    parent.append(child)
+    return child
+
+
+def _insert_before_child(parent: Any, child: Any, before: Any | None) -> None:
+    if before is None:
+        parent.append(child)
+        return
+    children = list(parent)
+    try:
+        index = children.index(before)
+    except ValueError:
+        parent.append(child)
+        return
+    parent.insert(index, child)
+
+
 def _hwp(value_pt: float) -> int:
     return int(round(float(value_pt) * HWP_PER_PT))
+
+
+def _pdf_page_orientation(page: fitz.Page) -> str:
+    return "WIDELY" if page.rect.width > page.rect.height else "PORTRAIT"
 
 
 def _set_common_size(element: Any, width_pt: float, height_pt: float) -> None:
@@ -310,34 +365,134 @@ def _add_text_box(
     _set_abs_position(element, x_pt, y_pt, width_pt, height_pt)
     _set_invisible_line_shape(element)
 
-    draw = etree.Element(_q("drawText"))
+    draw = element.makeelement(_q("drawText"), {})
     draw.set("lastWidth", str(max(1, _hwp(width_pt))))
     draw.set("name", "")
     draw.set("editable", "1")
-    margin = etree.SubElement(draw, _q("textMargin"))
+    margin = _append_xml_child(draw, _q("textMargin"))
     for key in ("left", "right", "top", "bottom"):
         margin.set(key, "0")
-    sub = etree.SubElement(draw, _q("subList"))
+    sub = _append_xml_child(draw, _q("subList"))
     _set_text_box_sublist_attrs(sub, width_pt, height_pt)
-    paragraph = etree.SubElement(sub, _q("p"))
+    paragraph = _append_xml_child(sub, _q("p"))
     paragraph.set("id", _paragraph_id())
     paragraph.set("paraPrIDRef", str(para_pr_id_ref))
     paragraph.set("styleIDRef", "0")
     paragraph.set("pageBreak", "0")
     paragraph.set("columnBreak", "0")
     paragraph.set("merged", "0")
-    run = etree.SubElement(paragraph, _q("run"))
+    run = _append_xml_child(paragraph, _q("run"))
     run.set("charPrIDRef", str(char_pr_id_ref))
-    node = etree.SubElement(run, _q("t"))
+    node = _append_xml_child(run, _q("t"))
     node.set(f"{{{XML}}}space", "preserve")
     node.text = text
     _append_text_box_lineseg(paragraph, width_pt, height_pt)
 
     shadow = element.find(_q("shadow"))
-    if shadow is not None:
-        element.insert(element.index(shadow), draw)
-    else:
-        element.append(draw)
+    _insert_before_child(element, draw, shadow)
+
+
+def _append_pdf_equation(run: Any, script: str, equation_index: int) -> None:
+    equation = _append_xml_child(
+        run,
+        _q("equation"),
+        {
+            "id": str(1900000000 + equation_index),
+            "zOrder": str(equation_index),
+            "numberingType": "EQUATION",
+            "textWrap": "TOP_AND_BOTTOM",
+            "textFlow": "BOTH_SIDES",
+            "lock": "0",
+            "dropcapstyle": "None",
+            "version": "Equation Version 60",
+            "baseLine": "0",
+            "textColor": "#000000",
+            "baseUnit": "1000",
+            "lineMode": "CHAR",
+            "font": "HancomEQN",
+        },
+    )
+    _append_xml_child(
+        equation,
+        _q("sz"),
+        {"width": "0", "widthRelTo": "ABSOLUTE", "height": "0", "heightRelTo": "ABSOLUTE", "protect": "0"},
+    )
+    _append_xml_child(
+        equation,
+        _q("pos"),
+        {
+            "treatAsChar": "1",
+            "affectLSpacing": "0",
+            "flowWithText": "1",
+            "allowOverlap": "0",
+            "holdAnchorAndSO": "0",
+            "vertRelTo": "PARA",
+            "horzRelTo": "PARA",
+            "vertAlign": "TOP",
+            "horzAlign": "LEFT",
+            "vertOffset": "0",
+            "horzOffset": "0",
+        },
+    )
+    _append_xml_child(equation, _q("outMargin"), {"left": "56", "right": "56", "top": "0", "bottom": "0"})
+    comment = _append_xml_child(equation, _q("shapeComment"))
+    comment.text = "수식입니다."
+    script_node = _append_xml_child(equation, _q("script"))
+    script_node.text = script
+    placeholder = _append_xml_child(run, _q("t"))
+    placeholder.set(f"{{{XML}}}space", "preserve")
+    placeholder.text = _equation_placeholder(script)
+
+
+def _append_pdf_text_run(paragraph: Any, text: str, char_pr_id_ref: str) -> None:
+    run = _append_xml_child(paragraph, _q("run"))
+    run.set("charPrIDRef", str(char_pr_id_ref))
+    node = _append_xml_child(run, _q("t"))
+    node.set(f"{{{XML}}}space", "preserve")
+    node.text = text
+
+
+def _append_pdf_runs(
+    paragraph: Any,
+    runs: list[tuple[str, str]],
+    *,
+    equation_counter: list[int] | None = None,
+    native_math: bool = False,
+) -> dict[str, int]:
+    stats = {"native_equations": 0, "source_math_segments": 0}
+    for text, char_pr_id_ref in runs:
+        if text == "":
+            continue
+        for segment, is_math in math_text.split_math_text(text):
+            if segment == "":
+                continue
+            if is_math:
+                stats["source_math_segments"] += 1
+            if is_math and native_math and equation_counter is not None:
+                script = _hancom_eqn_script(segment)
+                if script:
+                    equation_counter[0] += 1
+                    stats["native_equations"] += 1
+                    run = _append_xml_child(paragraph, _q("run"))
+                    run.set("charPrIDRef", str(char_pr_id_ref))
+                    _append_pdf_equation(run, script, equation_counter[0])
+                    continue
+            _append_pdf_text_run(paragraph, segment, char_pr_id_ref)
+    return stats
+
+
+def _text_runs_height_pt(runs: list[tuple[str, str]], height_pt: float, *, native_math: bool = False) -> float:
+    result = float(height_pt)
+    if not native_math:
+        return result
+    for text, _ in runs:
+        for segment, is_math in math_text.split_math_text(text):
+            if not is_math:
+                continue
+            script = _hancom_eqn_script(segment)
+            if script:
+                result = max(result, (_equation_size(script)[1] / HWP_PER_PT) + 2.0)
+    return result
 
 
 def _add_text_box_runs(
@@ -351,9 +506,12 @@ def _add_text_box_runs(
     runs: list[tuple[str, str]],
     para_pr_id_ref: str,
     z_order: int,
-) -> None:
+    equation_counter: list[int] | None = None,
+    native_math: bool = False,
+) -> dict[str, int]:
     if not runs:
-        return
+        return {"native_equations": 0, "source_math_segments": 0}
+    height_pt = _text_runs_height_pt(runs, height_pt, native_math=native_math)
     shape = doc.add_rectangle(
         width=max(1, _hwp(width_pt)),
         height=max(1, _hwp(height_pt)),
@@ -367,37 +525,33 @@ def _add_text_box_runs(
     _set_abs_position(element, x_pt, y_pt, width_pt, height_pt)
     _set_invisible_line_shape(element)
 
-    draw = etree.Element(_q("drawText"))
+    draw = element.makeelement(_q("drawText"), {})
     draw.set("lastWidth", str(max(1, _hwp(width_pt))))
     draw.set("name", "")
     draw.set("editable", "1")
-    margin = etree.SubElement(draw, _q("textMargin"))
+    margin = _append_xml_child(draw, _q("textMargin"))
     for key in ("left", "right", "top", "bottom"):
         margin.set(key, "0")
-    sub = etree.SubElement(draw, _q("subList"))
+    sub = _append_xml_child(draw, _q("subList"))
     _set_text_box_sublist_attrs(sub, width_pt, height_pt)
-    paragraph = etree.SubElement(sub, _q("p"))
+    paragraph = _append_xml_child(sub, _q("p"))
     paragraph.set("id", _paragraph_id())
     paragraph.set("paraPrIDRef", str(para_pr_id_ref))
     paragraph.set("styleIDRef", "0")
     paragraph.set("pageBreak", "0")
     paragraph.set("columnBreak", "0")
     paragraph.set("merged", "0")
-    for text, char_pr_id_ref in runs:
-        if text == "":
-            continue
-        run = etree.SubElement(paragraph, _q("run"))
-        run.set("charPrIDRef", str(char_pr_id_ref))
-        node = etree.SubElement(run, _q("t"))
-        node.set(f"{{{XML}}}space", "preserve")
-        node.text = text
+    run_stats = _append_pdf_runs(
+        paragraph,
+        runs,
+        equation_counter=equation_counter or [0],
+        native_math=native_math,
+    )
     _append_text_box_lineseg(paragraph, width_pt, height_pt)
 
     shadow = element.find(_q("shadow"))
-    if shadow is not None:
-        element.insert(element.index(shadow), draw)
-    else:
-        element.append(draw)
+    _insert_before_child(element, draw, shadow)
+    return run_stats
 
 
 def _set_text_box_sublist_attrs(sub: Any, width_pt: float, height_pt: float) -> None:
@@ -415,8 +569,8 @@ def _set_text_box_sublist_attrs(sub: Any, width_pt: float, height_pt: float) -> 
 
 def _append_text_box_lineseg(paragraph: Any, width_pt: float, height_pt: float) -> None:
     height = max(1, _hwp(height_pt))
-    line_seg_array = etree.SubElement(paragraph, _q("linesegarray"))
-    etree.SubElement(
+    line_seg_array = _append_xml_child(paragraph, _q("linesegarray"))
+    _append_xml_child(
         line_seg_array,
         _q("lineseg"),
         {
@@ -447,7 +601,8 @@ def _add_filled_rect(
     shape = doc.add_rectangle(
         width=max(1, _hwp(width_pt)),
         height=max(1, _hwp(height_pt)),
-        line_width="0",
+        line_color=color,
+        line_width="1",
         fill_color=color,
         treat_as_char=False,
         paragraph=anchor,
@@ -563,13 +718,36 @@ def _add_straight_line(
 
 
 def _is_hidden_header_rect(rect: fitz.Rect) -> bool:
-    return rect.x0 < 210 and rect.y1 < 150
+    # Exam-form badges and header rules live in this area and matter for
+    # whole-page sync. Preserve them instead of treating them as hidden chrome.
+    return False
+
+
+def _line_dedupe_key(
+    kind: str,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    width_pt: float,
+    color: str,
+) -> tuple[str, int, int, int, int, int, str]:
+    return (
+        kind,
+        int(round(x0 * 10)),
+        int(round(y0 * 10)),
+        int(round(x1 * 10)),
+        int(round(y1 * 10)),
+        int(round(width_pt * 100)),
+        color,
+    )
 
 
 def _add_line_rects(doc: HwpxDocument, anchor: Any, page: fitz.Page, z_counter: list[int]) -> int:
     count = 0
+    seen: set[tuple[str, int, int, int, int, int, str]] = set()
     for drawing in page.get_drawings():
-        width_pt = max(0.4, float(drawing.get("width") or 0.6))
+        width_pt = max(0.25, float(drawing.get("width") or 0.6))
         color_hex = _pdf_color_hex(drawing.get("color"), "#000000")
         fill_hex = _pdf_color_hex(drawing.get("fill"), "")
         items = drawing.get("items", [])
@@ -605,6 +783,10 @@ def _add_line_rects(doc: HwpxDocument, anchor: Any, page: fitz.Page, z_counter: 
             if kind == "l":
                 p0, p1 = item[1], item[2]
                 x0, y0, x1, y1 = float(p0.x), float(p0.y), float(p1.x), float(p1.y)
+                key = _line_dedupe_key("l", x0, y0, x1, y1, width_pt, color_hex)
+                if key in seen:
+                    continue
+                seen.add(key)
                 if abs(y1 - y0) <= 0.35:
                     _add_straight_line(
                         doc,
@@ -634,6 +816,18 @@ def _add_line_rects(doc: HwpxDocument, anchor: Any, page: fitz.Page, z_counter: 
             elif kind == "re":
                 rect = item[1]
                 if fill_hex and fill_hex.upper() not in {"#FFFFFF", "#FFFFFE"}:
+                    key = _line_dedupe_key(
+                        "re_fill",
+                        float(rect.x0),
+                        float(rect.y0),
+                        float(rect.x1),
+                        float(rect.y1),
+                        width_pt,
+                        fill_hex,
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
                     _add_filled_rect(
                         doc,
                         anchor,
@@ -646,6 +840,18 @@ def _add_line_rects(doc: HwpxDocument, anchor: Any, page: fitz.Page, z_counter: 
                     )
                     count += 1
                 if drawing.get("color") is not None:
+                    key = _line_dedupe_key(
+                        "re_outline",
+                        float(rect.x0),
+                        float(rect.y0),
+                        float(rect.x1),
+                        float(rect.y1),
+                        width_pt,
+                        color_hex,
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
                     _add_rect_outline(
                         doc,
                         anchor,
@@ -668,13 +874,20 @@ def _pdf_color_hex(color: Any, default: str) -> str:
 
 
 def _png_from_extracted_image(data: bytes, ext: str) -> bytes:
-    fmt = ext.lower().lstrip(".")
-    if fmt == "png":
-        return data
     image = Image.open(io.BytesIO(data))
     out = io.BytesIO()
-    image.convert("RGB").save(out, format="PNG")
+    if image.mode not in {"RGB", "RGBA"}:
+        image = image.convert("RGB")
+    image.save(out, format="PNG")
     return out.getvalue()
+
+
+def _image_info_colorspace(info: dict[str, Any]) -> str:
+    for key in ("cs-name", "colorspace", "color_space", "colorspace_name"):
+        value = info.get(key)
+        if value:
+            return str(value)
+    return ""
 
 
 def _rect_intersection_area(a: fitz.Rect, b: fitz.Rect) -> float:
@@ -695,6 +908,12 @@ def _overlaps_text(rect: fitz.Rect, text_rects: list[fitz.Rect]) -> bool:
     return False
 
 
+def _covers_page_area(page: fitz.Page, rect: fitz.Rect, *, threshold: float = 0.5) -> bool:
+    page_area = max(1.0, float(page.rect.width * page.rect.height))
+    covered_area = _rect_intersection_area(page.rect, rect)
+    return covered_area / page_area >= threshold
+
+
 def _add_pdf_images(
     doc: HwpxDocument,
     anchor: Any,
@@ -702,8 +921,9 @@ def _add_pdf_images(
     page: fitz.Page,
     text_rects: list[fitz.Rect],
     z_counter: list[int],
-) -> int:
+) -> tuple[int, int]:
     count = 0
+    full_page_count = 0
     for info in page.get_image_info(xrefs=True):
         rect = fitz.Rect(info["bbox"])
         if rect.width < 2 or rect.height < 2:
@@ -714,8 +934,8 @@ def _add_pdf_images(
         if xref <= 0:
             continue
         try:
-            extracted = pdf_doc.extract_image(xref)
-            image_data = _png_from_extracted_image(extracted["image"], extracted.get("ext", "png"))
+            pix = page.get_pixmap(matrix=fitz.Matrix(3.0, 3.0), clip=rect, alpha=False)
+            image_data = pix.tobytes("png")
         except Exception:
             continue
         item_id = doc.add_image(image_data, "png")
@@ -728,7 +948,9 @@ def _add_pdf_images(
         _set_z_order(pic.element, _next_z(z_counter))
         _set_abs_position(pic.element, rect.x0, rect.y0, rect.width, rect.height)
         count += 1
-    return count
+        if _covers_page_area(page, rect):
+            full_page_count += 1
+    return count, full_page_count
 
 
 def _iter_text_spans(page: fitz.Page) -> list[dict[str, Any]]:
@@ -814,7 +1036,7 @@ def _span_text_runs(
     previous_rect: fitz.Rect | None = None
     previous_size = 10.0
     for span in spans:
-        text = str(span.get("text") or "")
+        text = math_text.normalize_recognized_math_text(str(span.get("text") or ""))
         if text == "":
             continue
         rect = fitz.Rect(span["bbox"])
@@ -854,59 +1076,730 @@ def _serialize_xml(root: Any) -> bytes:
     )
 
 
+def _ensure_compatible_document(header: Any) -> Any:
+    compatible = header.find(_hh("compatibleDocument"))
+    if compatible is None:
+        compatible = header.makeelement(_hh("compatibleDocument"), {})
+        header.append(compatible)
+    compatible.set("targetProgram", "HWP201X")
+    if compatible.find(_hh("layoutCompatibility")) is None:
+        compatible.append(compatible.makeelement(_hh("layoutCompatibility"), {}))
+    return compatible
+
+
+def _ensure_begin_num(header: Any) -> Any:
+    begin_num = header.find(_hh("beginNum"))
+    if begin_num is None:
+        begin_num = header.makeelement(_hh("beginNum"), {})
+        header.insert(0, begin_num)
+    for name in ("page", "footnote", "endnote", "pic", "tbl", "equation"):
+        begin_num.set(name, begin_num.get(name) or "1")
+    return begin_num
+
+
+def _ensure_doc_option(header: Any) -> Any:
+    doc_option = header.find(_hh("docOption"))
+    if doc_option is None:
+        doc_option = header.makeelement(_hh("docOption"), {})
+        header.append(doc_option)
+    link_info = doc_option.find(_hh("linkinfo"))
+    if link_info is None:
+        link_info = doc_option.makeelement(_hh("linkinfo"), {})
+        doc_option.append(link_info)
+    link_info.set("path", link_info.get("path") or "")
+    link_info.set("pageInherit", link_info.get("pageInherit") or "0")
+    link_info.set("footnoteInherit", link_info.get("footnoteInherit") or "0")
+    return doc_option
+
+
+def _ensure_header_text_child(header: Any, name: str, text: str) -> Any:
+    child = header.find(_hh(name))
+    if child is None:
+        child = header.makeelement(_hh(name), {})
+        header.append(child)
+    if not (child.text or "").strip():
+        child.text = text
+    return child
+
+
+def _ensure_track_change_config(header: Any) -> Any:
+    config = header.find(_hh("trackchageConfig"))
+    if config is None:
+        config = header.makeelement(_hh("trackchageConfig"), {})
+        header.append(config)
+    config.set("flags", config.get("flags") or "56")
+    return config
+
+
+def _ensure_hancom_header_shell(header: Any, *, section_count: int | None = None) -> None:
+    header.set("version", "1.5")
+    if section_count is not None:
+        header.set("secCnt", str(max(1, int(section_count))))
+
+    ordered_children = [
+        _ensure_begin_num(header),
+        header.find(_hh("refList")),
+        _ensure_compatible_document(header),
+        _ensure_doc_option(header),
+        _ensure_header_text_child(header, "metaTag", '{"name":""}'),
+        _ensure_track_change_config(header),
+    ]
+
+    existing = list(header)
+    ordered_ids = {id(child) for child in ordered_children if child is not None}
+    remaining = [child for child in existing if id(child) not in ordered_ids]
+    for child in existing:
+        header.remove(child)
+    for child in ordered_children:
+        if child is not None:
+            header.append(child)
+    for child in remaining:
+        header.append(child)
+
+
+def _ensure_section_root_namespace(section: Any) -> bool:
+    if etree.QName(section).localname != "sec" or section.tag == f"{{{HS}}}sec":
+        return False
+    section.tag = f"{{{HS}}}sec"
+    return True
+
+
+def _section_names_from_payloads(payloads: dict[str, bytes]) -> list[str]:
+    names = [
+        name
+        for name in payloads
+        if re.fullmatch(r"Contents/section\d+\.xml", name)
+    ]
+    return sorted(names, key=lambda value: int(re.search(r"section(\d+)", value).group(1)))  # type: ignore[union-attr]
+
+
+def _ensure_attributes(element: Any, defaults: dict[str, str], *, overwrite: bool = False) -> bool:
+    changed = False
+    for key, value in defaults.items():
+        if overwrite or element.get(key) is None:
+            if element.get(key) != value:
+                element.set(key, value)
+                changed = True
+    return changed
+
+
+def _ensure_single_child(parent: Any, local_name: str, attrs: dict[str, str] | None = None) -> tuple[Any, bool]:
+    children = parent.findall(_q(local_name))
+    changed = False
+    if children:
+        child = children[0]
+        for duplicate in children[1:]:
+            parent.remove(duplicate)
+            changed = True
+    else:
+        child = parent.makeelement(_q(local_name), {})
+        parent.append(child)
+        changed = True
+    if attrs:
+        changed = _ensure_attributes(child, attrs) or changed
+    return child, changed
+
+
+def _ensure_note_properties(sec_pr: Any, local_name: str, *, end_note: bool) -> tuple[Any, bool]:
+    note, changed = _ensure_single_child(sec_pr, local_name)
+    specs = [
+        ("autoNumFormat", {"type": "DIGIT", "userChar": "", "prefixChar": "", "suffixChar": ")", "supscript": "0"}),
+        (
+            "noteLine",
+            {
+                "length": "14692344" if end_note else "-1",
+                "type": "SOLID",
+                "width": "0.12 mm",
+                "color": "#000000",
+            },
+        ),
+        (
+            "noteSpacing",
+            {
+                "betweenNotes": "0" if end_note else "283",
+                "belowLine": "567",
+                "aboveLine": "850",
+            },
+        ),
+        ("numbering", {"type": "CONTINUOUS", "newNum": "1"}),
+        ("placement", {"place": "END_OF_DOCUMENT" if end_note else "EACH_COLUMN", "beneathText": "0"}),
+    ]
+    ordered: list[Any] = []
+    for child_name, attrs in specs:
+        child, child_changed = _ensure_single_child(note, child_name, attrs)
+        ordered.append(child)
+        changed = child_changed or changed
+    changed = _reorder_children(note, ordered) or changed
+    return note, changed
+
+
+def _ensure_page_border_fills(sec_pr: Any, border_fill_id_ref: str) -> tuple[list[Any], bool]:
+    changed = False
+    by_type: dict[str, Any] = {}
+    for element in list(sec_pr.findall(_q("pageBorderFill"))):
+        border_type = element.get("type") or ""
+        if border_type in {"BOTH", "EVEN", "ODD"} and border_type not in by_type:
+            by_type[border_type] = element
+            continue
+        sec_pr.remove(element)
+        changed = True
+
+    ordered: list[Any] = []
+    for border_type in ("BOTH", "EVEN", "ODD"):
+        element = by_type.get(border_type)
+        if element is None:
+            element = sec_pr.makeelement(_q("pageBorderFill"), {})
+            sec_pr.append(element)
+            changed = True
+        changed = _ensure_attributes(
+            element,
+            {
+                "type": border_type,
+                "borderFillIDRef": border_fill_id_ref,
+                "textBorder": "PAPER",
+                "headerInside": "0",
+                "footerInside": "0",
+                "fillArea": "PAPER",
+            },
+            overwrite=True,
+        ) or changed
+        offset, offset_changed = _ensure_single_child(
+            element,
+            "offset",
+            {"left": "1417", "right": "1417", "top": "1417", "bottom": "1417"},
+        )
+        changed = offset_changed or changed
+        changed = _reorder_children(element, [offset]) or changed
+        ordered.append(element)
+    return ordered, changed
+
+
+def _reorder_children(parent: Any, ordered_children: list[Any]) -> bool:
+    existing = list(parent)
+    ordered_ids = {id(child) for child in ordered_children}
+    remaining = [child for child in existing if id(child) not in ordered_ids]
+    target = [*ordered_children, *remaining]
+    if existing == target:
+        return False
+    for child in existing:
+        parent.remove(child)
+    for child in target:
+        parent.append(child)
+    return True
+
+
+def _ensure_section_properties_shell(section: Any, *, border_fill_id_ref: str) -> bool:
+    sec_pr = section.find(f".//{_q('secPr')}")
+    if sec_pr is None:
+        return False
+    changed = _ensure_attributes(
+        sec_pr,
+        {
+            "id": "",
+            "textDirection": "HORIZONTAL",
+            "spaceColumns": "1134",
+            "tabStop": "8000",
+            "tabStopVal": "4000",
+            "tabStopUnit": "HWPUNIT",
+            "outlineShapeIDRef": "1",
+            "memoShapeIDRef": "0",
+            "textVerticalWidthHead": "0",
+            "masterPageCnt": "0",
+        },
+    )
+    grid, child_changed = _ensure_single_child(
+        sec_pr,
+        "grid",
+        {"lineGrid": "0", "charGrid": "0", "wonggojiFormat": "0"},
+    )
+    changed = child_changed or changed
+    start_num, child_changed = _ensure_single_child(
+        sec_pr,
+        "startNum",
+        {"pageStartsOn": "BOTH", "page": "0", "pic": "0", "tbl": "0", "equation": "0"},
+    )
+    changed = child_changed or changed
+    changed = _ensure_attributes(
+        start_num,
+        {"pageStartsOn": "BOTH", "page": "0", "pic": "0", "tbl": "0", "equation": "0"},
+        overwrite=True,
+    ) or changed
+    visibility, child_changed = _ensure_single_child(
+        sec_pr,
+        "visibility",
+        {
+            "hideFirstHeader": "0",
+            "hideFirstFooter": "0",
+            "hideFirstMasterPage": "0",
+            "border": "SHOW_ALL",
+            "fill": "SHOW_ALL",
+            "hideFirstPageNum": "0",
+            "hideFirstEmptyLine": "0",
+            "showLineNumber": "0",
+        },
+    )
+    changed = child_changed or changed
+    line_number_shape, child_changed = _ensure_single_child(
+        sec_pr,
+        "lineNumberShape",
+        {"restartType": "0", "countBy": "0", "distance": "0", "startNumber": "0"},
+    )
+    changed = child_changed or changed
+    page_pr, child_changed = _ensure_single_child(
+        sec_pr,
+        "pagePr",
+        {"landscape": "PORTRAIT", "width": "59528", "height": "84188", "gutterType": "LEFT_ONLY"},
+    )
+    changed = child_changed or changed
+    margin, child_changed = _ensure_single_child(
+        page_pr,
+        "margin",
+        {"left": "0", "right": "0", "top": "0", "bottom": "0", "header": "0", "footer": "0", "gutter": "0"},
+    )
+    changed = child_changed or changed
+    changed = _reorder_children(page_pr, [margin]) or changed
+    foot_note, child_changed = _ensure_note_properties(sec_pr, "footNotePr", end_note=False)
+    changed = child_changed or changed
+    end_note, child_changed = _ensure_note_properties(sec_pr, "endNotePr", end_note=True)
+    changed = child_changed or changed
+    page_borders, child_changed = _ensure_page_border_fills(sec_pr, border_fill_id_ref)
+    changed = child_changed or changed
+    changed = _reorder_children(
+        sec_pr,
+        [grid, start_num, visibility, line_number_shape, page_pr, foot_note, end_note, *page_borders],
+    ) or changed
+    return changed
+
+
+def _ensure_section_run_shell(section: Any) -> bool:
+    first_paragraph = section.find(_q("p"))
+    if first_paragraph is None:
+        return False
+    first_run = first_paragraph.find(_q("run"))
+    if first_run is None:
+        first_run = first_paragraph.makeelement(_q("run"), {"charPrIDRef": "0"})
+        first_paragraph.insert(0, first_run)
+
+    changed = False
+    sec_pr = first_run.find(_q("secPr"))
+    if sec_pr is None:
+        sec_pr = first_paragraph.find(f".//{_q('secPr')}")
+        if sec_pr is None:
+            return changed
+        parent = sec_pr.getparent()
+        if parent is not None:
+            parent.remove(sec_pr)
+        first_run.insert(0, sec_pr)
+        changed = True
+
+    text_nodes = [child for child in list(first_run) if child.tag == _q("t")]
+    moved_text = False
+    if text_nodes:
+        text_run = first_paragraph.makeelement(_q("run"), {"charPrIDRef": first_run.get("charPrIDRef") or "0"})
+        for text_node in text_nodes:
+            first_run.remove(text_node)
+            text_run.append(text_node)
+        first_paragraph.insert(list(first_paragraph).index(first_run) + 1, text_run)
+        moved_text = True
+        changed = True
+
+    ctrl = first_run.find(_q("ctrl"))
+    if ctrl is None:
+        ctrl = first_run.makeelement(_q("ctrl"), {})
+        changed = True
+    col_pr = ctrl.find(_q("colPr"))
+    if col_pr is None:
+        col_pr = ctrl.makeelement(_q("colPr"), {})
+        ctrl.append(col_pr)
+        changed = True
+    changed = _ensure_attributes(
+        col_pr,
+        {
+            "id": "",
+            "type": "NEWSPAPER",
+            "layout": "LEFT",
+            "colCount": "1",
+            "sameSz": "1",
+            "sameGap": "0",
+        },
+        overwrite=True,
+    ) or changed
+
+    changed = _reorder_children(first_run, [sec_pr, ctrl]) or changed
+    has_text = any(child.tag == _q("t") for run in first_paragraph.findall(_q("run")) for child in list(run))
+    if not moved_text and not has_text:
+        text_run = first_paragraph.makeelement(_q("run"), {"charPrIDRef": first_run.get("charPrIDRef") or "0"})
+        text_run.append(text_run.makeelement(_q("t"), {}))
+        first_paragraph.insert(list(first_paragraph).index(first_run) + 1, text_run)
+        changed = True
+    return changed
+
+
+def _ensure_no_border_fill_element(header: Any) -> tuple[str, bool]:
+    changed = False
+    ref_list = header.find(_hh("refList"))
+    if ref_list is None:
+        ref_list = header.makeelement(_hh("refList"), {})
+        header.append(ref_list)
+        changed = True
+    border_fills = ref_list.find(_hh("borderFills"))
+    if border_fills is None:
+        border_fills = ref_list.makeelement(_hh("borderFills"), {"itemCnt": "0"})
+        ref_list.append(border_fills)
+        changed = True
+
+    border_child_names = ("leftBorder", "rightBorder", "topBorder", "bottomBorder")
+    for border_fill in border_fills.findall(_hh("borderFill")):
+        borders = [border_fill.find(_hh(name)) for name in border_child_names]
+        if borders and all(border is not None and (border.get("type") or "").upper() == "NONE" for border in borders):
+            return str(border_fill.get("id") or "0"), changed
+
+    next_id = 1
+    for border_fill in border_fills.findall(_hh("borderFill")):
+        try:
+            next_id = max(next_id, int(border_fill.get("id") or 0) + 1)
+        except ValueError:
+            continue
+    element = border_fills.makeelement(
+        _hh("borderFill"),
+        {
+            "id": str(next_id),
+            "threeD": "0",
+            "shadow": "0",
+            "centerLine": "NONE",
+            "breakCellSeparateLine": "0",
+        },
+    )
+    for child_name, attrs in (
+        ("slash", {"type": "NONE", "Crooked": "0", "isCounter": "0"}),
+        ("backSlash", {"type": "NONE", "Crooked": "0", "isCounter": "0"}),
+        ("leftBorder", {"type": "NONE", "width": "0.1 mm", "color": "#000000"}),
+        ("rightBorder", {"type": "NONE", "width": "0.1 mm", "color": "#000000"}),
+        ("topBorder", {"type": "NONE", "width": "0.1 mm", "color": "#000000"}),
+        ("bottomBorder", {"type": "NONE", "width": "0.1 mm", "color": "#000000"}),
+        ("diagonal", {"type": "NONE", "width": "0.1 mm", "color": "#000000"}),
+    ):
+        element.append(element.makeelement(_hh(child_name), attrs))
+    border_fills.append(element)
+    border_fills.set("itemCnt", str(len(border_fills.findall(_hh("borderFill")))))
+    return str(next_id), True
+
+
+def _ensure_package_item(
+    manifest: Any,
+    *,
+    item_id: str,
+    href: str,
+    media_type: str,
+    properties: str | None = None,
+) -> tuple[Any, bool]:
+    changed = False
+    item = None
+    for candidate in manifest.findall(_opf("item")):
+        if candidate.get("id") == item_id or candidate.get("href") == href:
+            item = candidate
+            break
+    if item is None:
+        item = manifest.makeelement(_opf("item"), {})
+        manifest.append(item)
+        changed = True
+    attrs = {"id": item_id, "href": href, "media-type": media_type}
+    if properties is not None:
+        attrs["properties"] = properties
+    changed = _ensure_attributes(item, attrs, overwrite=True) or changed
+    return item, changed
+
+
+def _media_type_for_bindata_name(name: str) -> str:
+    ext = Path(name).suffix.lower().lstrip(".")
+    return {
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "png": "image/png",
+        "gif": "image/gif",
+        "bmp": "image/bmp",
+        "tif": "image/tiff",
+        "tiff": "image/tiff",
+        "svg": "image/svg+xml",
+    }.get(ext, "application/octet-stream")
+
+
+def _ensure_spine_itemref(spine: Any, *, idref: str, linear: str = "yes") -> tuple[Any, bool]:
+    changed = False
+    itemref = None
+    for candidate in spine.findall(_opf("itemref")):
+        if candidate.get("idref") == idref:
+            itemref = candidate
+            break
+    if itemref is None:
+        itemref = spine.makeelement(_opf("itemref"), {})
+        spine.append(itemref)
+        changed = True
+    changed = _ensure_attributes(itemref, {"idref": idref, "linear": linear}, overwrite=True) or changed
+    return itemref, changed
+
+
+def _ensure_content_hpf_shell(
+    package: Any,
+    section_names: list[str],
+    *,
+    bindata_names: list[str] | None = None,
+) -> bool:
+    changed = False
+    package.set("version", package.get("version") or "")
+    package.set("unique-identifier", package.get("unique-identifier") or "")
+    package.set("id", package.get("id") or "")
+    metadata = package.find(_opf("metadata"))
+    if metadata is None:
+        metadata = package.makeelement(_opf("metadata"), {})
+        package.insert(0, metadata)
+        changed = True
+    manifest = package.find(_opf("manifest"))
+    if manifest is None:
+        manifest = package.makeelement(_opf("manifest"), {})
+        package.append(manifest)
+        changed = True
+    spine = package.find(_opf("spine"))
+    if spine is None:
+        spine = package.makeelement(_opf("spine"), {})
+        package.append(spine)
+        changed = True
+
+    ordered_manifest: list[Any] = []
+    for item_id, href, media_type, properties in [
+        ("version", "version.xml", "application/xml", "version"),
+        ("header", "Contents/header.xml", "application/xml", None),
+        *[
+            (f"section{index}", section_name, "application/xml", None)
+            for index, section_name in enumerate(section_names)
+        ],
+        ("settings", "settings.xml", "application/xml", None),
+    ]:
+        item, item_changed = _ensure_package_item(
+            manifest,
+            item_id=item_id,
+            href=href,
+            media_type=media_type,
+            properties=properties,
+        )
+        ordered_manifest.append(item)
+        changed = item_changed or changed
+
+    for name in sorted(set(bindata_names or [])):
+        if not name:
+            continue
+        href = f"BinData/{name}"
+        item, item_changed = _ensure_package_item(
+            manifest,
+            item_id=Path(name).stem,
+            href=href,
+            media_type=_media_type_for_bindata_name(name),
+        )
+        if item.get("isEmbeded") != "1":
+            item.set("isEmbeded", "1")
+            item_changed = True
+        ordered_manifest.append(item)
+        changed = item_changed or changed
+
+    ordered_spine: list[Any] = []
+    itemref, itemref_changed = _ensure_spine_itemref(spine, idref="header", linear="yes")
+    ordered_spine.append(itemref)
+    changed = itemref_changed or changed
+    for index, _section_name in enumerate(section_names):
+        itemref, itemref_changed = _ensure_spine_itemref(spine, idref=f"section{index}", linear="yes")
+        ordered_spine.append(itemref)
+        changed = itemref_changed or changed
+
+    changed = _reorder_children(manifest, ordered_manifest) or changed
+    changed = _reorder_children(spine, ordered_spine) or changed
+    changed = _reorder_children(package, [metadata, manifest, spine]) or changed
+    return changed
+
+
+def _normalize_content_hpf_root(package: Any) -> tuple[Any, bool]:
+    if all(package.nsmap.get(prefix) == uri for prefix, uri in HWPX_COMPAT_NAMESPACES.items()):
+        return package, False
+    normalized = etree.Element(_opf("package"), nsmap=HWPX_COMPAT_NAMESPACES)
+    for key, value in package.attrib.items():
+        normalized.set(key, value)
+    normalized.text = package.text
+    normalized.tail = package.tail
+    for child in list(package):
+        package.remove(child)
+        normalized.append(child)
+    return normalized, True
+
+
+def _hancom_settings_xml() -> bytes:
+    root = etree.Element(f"{{{HA}}}HWPApplicationSetting", nsmap={"ha": HA, "config": CONFIG})
+    etree.SubElement(root, f"{{{HA}}}CaretPosition", {"listIDRef": "0", "paraIDRef": "0", "pos": "0"})
+    return _serialize_xml(root)
+
+
+def _hancom_manifest_xml() -> bytes:
+    root = etree.Element(f"{{{ODF_MANIFEST}}}manifest", nsmap={"odf": ODF_MANIFEST})
+    return _serialize_xml(root)
+
+
+def _hancom_container_xml() -> bytes:
+    ocf = "urn:oasis:names:tc:opendocument:xmlns:container"
+    root = etree.Element(f"{{{ocf}}}container", nsmap={"ocf": ocf, "hpf": HWPX_COMPAT_NAMESPACES["hpf"]})
+    rootfiles = etree.SubElement(root, f"{{{ocf}}}rootfiles")
+    for full_path, media_type in (
+        ("Contents/content.hpf", "application/hwpml-package+xml"),
+        ("Preview/PrvText.txt", "text/plain"),
+        ("META-INF/container.rdf", "application/rdf+xml"),
+    ):
+        etree.SubElement(rootfiles, f"{{{ocf}}}rootfile", {"full-path": full_path, "media-type": media_type})
+    return _serialize_xml(root)
+
+
+def _hancom_container_rdf(section_names: list[str]) -> bytes:
+    root = etree.Element(f"{{{RDF}}}RDF", nsmap={"rdf": RDF})
+
+    def add_part(resource: str, type_name: str) -> None:
+        owner = etree.SubElement(root, f"{{{RDF}}}Description", {f"{{{RDF}}}about": ""})
+        etree.SubElement(owner, f"{{{HWPX_PKG_META}}}hasPart", {f"{{{RDF}}}resource": resource})
+        part = etree.SubElement(root, f"{{{RDF}}}Description", {f"{{{RDF}}}about": resource})
+        etree.SubElement(part, f"{{{RDF}}}type", {f"{{{RDF}}}resource": HWPX_PKG_META + type_name})
+
+    add_part("Contents/header.xml", "HeaderFile")
+    for section_name in section_names:
+        add_part(section_name, "SectionFile")
+    document = etree.SubElement(root, f"{{{RDF}}}Description", {f"{{{RDF}}}about": ""})
+    etree.SubElement(document, f"{{{RDF}}}type", {f"{{{RDF}}}resource": HWPX_PKG_META + "Document"})
+    return _serialize_xml(root)
+
+
+def _preview_image_png() -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (160, 226), "#FFFFFF").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _preview_text_from_payloads(payloads: dict[str, bytes], *, limit: int = 200000) -> str:
+    texts: list[str] = []
+    for name in sorted(payloads):
+        if not (name.startswith("Contents/") and Path(name).name.startswith("section") and name.endswith(".xml")):
+            continue
+        try:
+            section = etree.fromstring(payloads[name])
+        except Exception:
+            continue
+        for node in section.findall(f".//{_q('t')}"):
+            if node.text:
+                texts.append(node.text)
+                if sum(len(text) for text in texts) >= limit:
+                    break
+        if sum(len(text) for text in texts) >= limit:
+            break
+    preview = "\r\n".join(texts).strip()
+    if not preview:
+        preview = "HWP Make PDF layout export"
+    return preview[:limit]
+
+
 def _patch_hancom_compatibility(path: Path) -> None:
     with zipfile.ZipFile(path, "r") as archive:
         infos = archive.infolist()
         payloads = {info.filename: archive.read(info.filename) for info in infos}
 
-    for name in list(payloads):
-        if name.startswith("Contents/") and Path(name).name.startswith("section") and name.endswith(".xml"):
-            section = etree.fromstring(payloads[name])
-            changed = _patch_text_box_paragraphs(section)
-            changed = _patch_initial_section_paragraph(section) or changed
-            if changed:
-                payloads[name] = _serialize_xml(section)
+    section_names = _section_names_from_payloads(payloads)
+    page_border_fill_id = "0"
 
     if "Contents/header.xml" in payloads:
         header = etree.fromstring(payloads["Contents/header.xml"])
-        header.set("version", "1.4")
-        compatible = header.find(f".//{{{HH}}}compatibleDocument")
-        if compatible is not None:
-            compatible.set("targetProgram", "HWP2018")
+        _ensure_hancom_header_shell(header, section_count=len(section_names))
+        page_border_fill_id, _ = _ensure_no_border_fill_element(header)
         payloads["Contents/header.xml"] = _serialize_xml(header)
+
+    for name in section_names:
+        section = etree.fromstring(payloads[name])
+        changed = _ensure_section_root_namespace(section)
+        changed = _patch_rect_point_namespaces(section) or changed
+        changed = _patch_line_point_namespaces(section) or changed
+        changed = _patch_rect_shape_model(section) or changed
+        changed = _ensure_section_properties_shell(section, border_fill_id_ref=page_border_fill_id) or changed
+        changed = _patch_text_box_paragraphs(section) or changed
+        changed = _patch_section_paragraph_linesegs(section) or changed
+        changed = _patch_initial_section_paragraph(section) or changed
+        changed = _ensure_section_run_shell(section) or changed
+        if changed:
+            payloads[name] = _serialize_xml(section)
 
     if "Contents/content.hpf" in payloads:
         package = etree.fromstring(payloads["Contents/content.hpf"])
-        manifest = package.find(_opf("manifest"))
-        if manifest is not None:
-            has_version = any(
-                "version" in " ".join(
-                    str(item.get(attr) or "").lower()
-                    for attr in ("id", "href", "media-type", "properties")
-                )
-                for item in manifest.findall(_opf("item"))
-            )
-            if not has_version:
-                item = etree.Element(
-                    _opf("item"),
-                    {"id": "version", "href": "version.xml", "media-type": "application/xml"},
-                )
-                manifest.append(item)
+        package, _ = _normalize_content_hpf_root(package)
+        bindata_names = [
+            Path(name).name
+            for name in payloads
+            if name.startswith("BinData/") and Path(name).name
+        ]
+        _ensure_content_hpf_shell(package, section_names, bindata_names=bindata_names)
         payloads["Contents/content.hpf"] = _serialize_xml(package)
 
     if "version.xml" in payloads:
         version = etree.fromstring(payloads["version.xml"])
         if version.tag == f"{{{HV}}}HCFVersion":
-            version.set("xmlVersion", "1.4")
+            version.set("xmlVersion", "1.5")
+            version.set("os", version.get("os") or "1")
+            version.set("application", version.get("application") or "Hancom Office Hangul")
+            version.set("appVersion", version.get("appVersion") or "13, 0, 0, 3622 WIN32LEWindows_10")
         payloads["version.xml"] = _serialize_xml(version)
+
+    if "Preview/PrvText.txt" not in payloads:
+        payloads["Preview/PrvText.txt"] = _preview_text_from_payloads(payloads).encode("utf-8")
+    payloads["META-INF/container.xml"] = _hancom_container_xml()
+    if "settings.xml" not in payloads:
+        payloads["settings.xml"] = _hancom_settings_xml()
+    if "META-INF/manifest.xml" not in payloads:
+        payloads["META-INF/manifest.xml"] = _hancom_manifest_xml()
+    if "META-INF/container.rdf" not in payloads:
+        payloads["META-INF/container.rdf"] = _hancom_container_rdf(section_names)
+    if "Preview/PrvImage.png" not in payloads:
+        payloads["Preview/PrvImage.png"] = _preview_image_png()
 
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=path.suffix + ".tmp")
     os.close(fd)
     tmp_path = Path(tmp_name)
     try:
         with zipfile.ZipFile(tmp_path, "w") as out:
+            info_by_name = {info.filename: info for info in infos}
+            preferred_order = [
+                "mimetype",
+                "version.xml",
+                "Contents/header.xml",
+                *section_names,
+                "Preview/PrvText.txt",
+                "settings.xml",
+                "Preview/PrvImage.png",
+                "META-INF/container.rdf",
+                "Contents/content.hpf",
+                "META-INF/container.xml",
+                "META-INF/manifest.xml",
+            ]
+            written = set()
+            for name in preferred_order:
+                if name not in payloads or name in written:
+                    continue
+                info = info_by_name.get(name)
+                if info is None:
+                    compress_type = zipfile.ZIP_STORED if name == "mimetype" else zipfile.ZIP_DEFLATED
+                    out.writestr(name, payloads[name], compress_type=compress_type)
+                else:
+                    if name == "mimetype":
+                        info.compress_type = zipfile.ZIP_STORED
+                    out.writestr(info, payloads[name])
+                written.add(name)
             for info in infos:
+                if info.filename in written:
+                    continue
                 out.writestr(info, payloads[info.filename])
+                written.add(info.filename)
+            for name in sorted(payloads):
+                if name in written:
+                    continue
+                out.writestr(name, payloads[name], compress_type=zipfile.ZIP_DEFLATED)
         os.replace(tmp_path, path)
     except BaseException:
         try:
@@ -984,6 +1877,85 @@ def _patch_text_box_paragraphs(section: Any) -> bool:
     return changed
 
 
+def _patch_section_paragraph_linesegs(section: Any) -> bool:
+    changed = False
+    width = _section_text_width(section)
+    height = 1000
+    for paragraph in section.findall(f".//{_q('p')}"):
+        if not paragraph.get("id"):
+            paragraph.set("id", _paragraph_id())
+            changed = True
+        if paragraph.find(f"{_q('linesegarray')}/{_q('lineseg')}") is None:
+            _append_text_box_lineseg_hwp(paragraph, width, height)
+            changed = True
+    return changed
+
+
+def _patch_rect_point_namespaces(section: Any) -> bool:
+    changed = False
+    for rect in section.findall(f".//{_q('rect')}"):
+        for point_name in ("pt0", "pt1", "pt2", "pt3"):
+            point = rect.find(_q(point_name))
+            if point is not None:
+                point.tag = _hc(point_name)
+                changed = True
+    return changed
+
+
+def _patch_line_point_namespaces(section: Any) -> bool:
+    changed = False
+    for line in section.findall(f".//{_q('line')}"):
+        for point_name in ("startPt", "endPt"):
+            point = line.find(_q(point_name))
+            if point is not None:
+                point.tag = _hc(point_name)
+                changed = True
+    return changed
+
+
+def _patch_rect_shape_model(section: Any) -> bool:
+    changed = False
+    for rect in section.findall(f".//{_q('rect')}"):
+        for key, value in (
+            ("textWrap", "SQUARE"),
+            ("textFlow", "BOTH_SIDES"),
+            ("reverse", "0"),
+        ):
+            if rect.get(key) != value:
+                rect.set(key, value)
+                changed = True
+        for child in rect:
+            local_name = etree.QName(child).localname
+            if local_name == "fillBrush" and child.tag != _hc("fillBrush"):
+                child.tag = _hc("fillBrush")
+                changed = True
+            if local_name == "winBrush" and child.tag != _hc("winBrush"):
+                child.tag = _hc("winBrush")
+                changed = True
+            for grandchild in child:
+                if etree.QName(grandchild).localname == "winBrush" and grandchild.tag != _hc("winBrush"):
+                    grandchild.tag = _hc("winBrush")
+                    changed = True
+        if rect.find(_q("shapeComment")) is None:
+            _append_xml_child(rect, _q("shapeComment"))
+            changed = True
+    return changed
+
+
+def _section_text_width(section: Any) -> int:
+    page_pr = section.find(f".//{_q('pagePr')}")
+    if page_pr is None:
+        return 42520
+    width = _positive_int(page_pr.get("width")) or 42520
+    margin = page_pr.find(_q("margin"))
+    if margin is None:
+        return width
+    left = _positive_int(margin.get("left")) or 0
+    right = _positive_int(margin.get("right")) or 0
+    gutter = _positive_int(margin.get("gutter")) or 0
+    return max(1, width - left - right - gutter)
+
+
 def _positive_int(value: Any) -> int | None:
     try:
         parsed = int(str(value))
@@ -1013,14 +1985,35 @@ def _append_text_box_lineseg_hwp(paragraph: Any, width: int, height: int) -> Non
 
 def _prepare_hancom_compatibility(doc: HwpxDocument) -> None:
     header = doc.headers[0]
-    header.element.set("version", "1.4")
-    compatible = header.element.find(f".//{{{HH}}}compatibleDocument")
-    if compatible is not None:
-        compatible.set("targetProgram", "HWP2018")
+    _ensure_hancom_header_shell(header.element)
     header.mark_dirty()
 
-    doc.package.version_info.set("xmlVersion", "1.4")
+    doc.package.version_info.set("xmlVersion", "1.5")
     doc.package.add_manifest_item("version", "version.xml", "application/xml")
+
+
+def _save_hancom_compatible_document(doc: HwpxDocument, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(output_path.parent), suffix=output_path.suffix + ".tmp")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+
+    try:
+        tmp_path.write_bytes(doc._to_bytes_for_validation())
+        _patch_hancom_compatibility(tmp_path)
+
+        from hwpx.tools.package_validator import validate_editor_open_safety
+
+        report = validate_editor_open_safety(tmp_path)
+        if not report.ok:
+            raise RuntimeError("Generated HWPX package failed Hancom compatibility validation: " + report.summary)
+        os.replace(tmp_path, output_path)
+    except BaseException:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _ensure_no_border_fill(header: Any) -> str:
@@ -2187,6 +3180,7 @@ def write_pdf_flow_hwpx(
     line_count = 0
     boxed_count = 0
     image_count = 0
+    source_text_lines = 0
 
     with fitz.open(pdf_path) as pdf_doc:
         if not pdf_doc:
@@ -2203,11 +3197,12 @@ def write_pdf_flow_hwpx(
         cell_width = max(1, table_width // 2)
         margin_top_pt = margin_top_mm * 72.0 / 25.4
         margin_bottom_pt = margin_bottom_mm * 72.0 / 25.4
+        page_orientation = _pdf_page_orientation(first)
 
         doc.set_page_setup(
             width_mm=width_mm,
             height_mm=height_mm,
-            orientation="PORTRAIT",
+            orientation=page_orientation,
             margin_left_mm=margin_left_mm,
             margin_right_mm=margin_right_mm,
             margin_top_mm=margin_top_mm,
@@ -2230,11 +3225,12 @@ def write_pdf_flow_hwpx(
             native_image_items = _merge_flow_images(native_image_items)
             native_image_items, textual_image_regions = _convert_textual_image_regions(page, native_image_items)
             excluded_text_regions = table_regions + textual_image_regions
+            page_text_lines = [line for line in _iter_text_lines(page) if _line_text(line)]
+            source_text_lines += len(page_text_lines)
             line_items = [
                 {"type": "line", "bbox": fitz.Rect(line["bbox"]), "spans": line["spans"]}
-                for line in _iter_text_lines(page)
-                if _line_text(line)
-                and not _is_flow_footer_line(page, line)
+                for line in page_text_lines
+                if not _is_flow_footer_line(page, line)
                 and not _inside_any_region(fitz.Rect(line["bbox"]), excluded_text_regions)
             ]
             image_items = native_image_items + table_image_items
@@ -2319,11 +3315,15 @@ def write_pdf_flow_hwpx(
             page_count += 1
 
     _prepare_hancom_compatibility(doc)
-    doc.save(str(output_path))
-    _patch_hancom_compatibility(output_path)
+    _save_hancom_compatible_document(doc, output_path)
+    editable_coverage = 1.0
+    if source_text_lines > 0:
+        editable_coverage = min(1.0, line_count / source_text_lines)
     return {
         "pages": page_count,
+        "source_text_lines": source_text_lines,
         "flow_lines": line_count,
+        "editable_text_coverage_ratio": round(editable_coverage, 4),
         "boxed_blocks": boxed_count,
         "images": image_count,
     }
@@ -2337,6 +3337,7 @@ def write_pdf_layout_hwpx(
     include_images: bool = True,
     include_lines: bool = True,
     text_mode: Literal["line", "span"] = "line",
+    native_math: bool = False,
 ) -> dict[str, int]:
     pdf_path = Path(pdf_path)
     output_path = Path(output_path)
@@ -2345,39 +3346,70 @@ def write_pdf_layout_hwpx(
     doc = HwpxDocument.new()
     header = doc.headers[0]
     _ensure_pdf_font_faces(header)
-    para_left = header.ensure_paragraph_alignment("LEFT")
+    para_left = header.ensure_paragraph_format(
+        alignment="LEFT",
+        line_spacing_percent=_FLOW_BODY_LINE_SPACING,
+    )
 
     text_count = 0
     image_count = 0
     line_count = 0
     page_count = 0
+    source_text_lines = 0
+    full_page_image_count = 0
+    native_equation_count = 0
+    source_math_segment_count = 0
     styles: dict[tuple[str, float, bool], str] = {}
     z_counter = [0]
+    equation_counter = [0]
 
     with fitz.open(pdf_path) as pdf_doc:
         if not pdf_doc:
             raise ValueError(f"empty PDF: {pdf_path}")
-        first = pdf_doc[0]
-        doc.set_page_size(width=_hwp(first.rect.width), height=_hwp(first.rect.height), orientation="PORTRAIT")
-        doc.set_page_margins(left=0, right=0, top=0, bottom=0, header=0, footer=0, gutter=0)
 
         total_pages = len(pdf_doc) if max_pages is None else min(len(pdf_doc), max_pages)
         for page_index in range(total_pages):
             page = pdf_doc[page_index]
+            section = doc.sections[0] if page_index == 0 else doc.add_section()
+            doc.set_page_size(
+                width=_hwp(page.rect.width),
+                height=_hwp(page.rect.height),
+                orientation=_pdf_page_orientation(page),
+                section=section,
+            )
+            doc.set_page_margins(
+                left=0,
+                right=0,
+                top=0,
+                bottom=0,
+                header=0,
+                footer=0,
+                gutter=0,
+                section=section,
+            )
             attrs = {"inherit_style": False, "include_run": False}
-            if page_index > 0:
-                attrs["pageBreak"] = "1"
-            anchor = doc.add_paragraph("", **attrs)
+            anchor = doc.add_paragraph("", section=section, **attrs)
             spans = _iter_text_spans(page)
+            page_text_lines = [line for line in _iter_text_lines(page) if _line_text(line)]
+            source_text_lines += len(page_text_lines)
             text_rects = _text_rects(spans)
 
             if include_images:
-                image_count += _add_pdf_images(doc, anchor, pdf_doc, page, text_rects, z_counter)
+                added_images, added_full_page_images = _add_pdf_images(
+                    doc,
+                    anchor,
+                    pdf_doc,
+                    page,
+                    text_rects,
+                    z_counter,
+                )
+                image_count += added_images
+                full_page_image_count += added_full_page_images
             if include_lines:
                 line_count += _add_line_rects(doc, anchor, page, z_counter)
 
             if text_mode == "line":
-                for line in _iter_text_lines(page):
+                for line in page_text_lines:
                     line_spans = line["spans"]
                     bbox = fitz.Rect(line["bbox"])
                     runs = _span_text_runs(doc, styles, line_spans)
@@ -2386,7 +3418,7 @@ def write_pdf_layout_hwpx(
                     pad_x = 1.5
                     pad_y = 1.0
                     x_pt = max(0.0, bbox.x0 - 0.3)
-                    _add_text_box_runs(
+                    run_stats = _add_text_box_runs(
                         doc,
                         anchor,
                         x_pt=x_pt,
@@ -2402,17 +3434,21 @@ def write_pdf_layout_hwpx(
                         runs=runs,
                         para_pr_id_ref=para_left,
                         z_order=_next_z(z_counter),
+                        equation_counter=equation_counter,
+                        native_math=native_math,
                     )
+                    native_equation_count += int(run_stats.get("native_equations") or 0)
+                    source_math_segment_count += int(run_stats.get("source_math_segments") or 0)
                     text_count += 1
             else:
                 for span in spans:
-                    text = str(span.get("text") or "")
+                    text = math_text.normalize_recognized_math_text(str(span.get("text") or ""))
                     bbox = fitz.Rect(span["bbox"])
                     char_pr = _ensure_char_pr(doc, styles, span)
                     pad_x = 1.2
                     pad_y = 1.0
                     x_pt = max(0.0, bbox.x0 - 0.2)
-                    _add_text_box(
+                    run_stats = _add_text_box_runs(
                         doc,
                         anchor,
                         x_pt=x_pt,
@@ -2425,24 +3461,141 @@ def write_pdf_layout_hwpx(
                             extra_right_pt=6.0,
                         ),
                         height_pt=max(2.0, bbox.height + pad_y * 2),
-                        text=text,
-                        char_pr_id_ref=char_pr,
+                        runs=[(text, char_pr)],
                         para_pr_id_ref=para_left,
                         z_order=_next_z(z_counter),
+                        equation_counter=equation_counter,
+                        native_math=native_math,
                     )
+                    native_equation_count += int(run_stats.get("native_equations") or 0)
+                    source_math_segment_count += int(run_stats.get("source_math_segments") or 0)
                     text_count += 1
             page_count += 1
 
     _prepare_hancom_compatibility(doc)
-    doc.save(str(output_path))
-    _patch_hancom_compatibility(output_path)
+    _save_hancom_compatible_document(doc, output_path)
+    editable_coverage = 1.0
+    if source_text_lines > 0:
+        editable_coverage = min(1.0, text_count / source_text_lines)
+    elif full_page_image_count > 0:
+        editable_coverage = 0.0
     return {
         "pages": page_count,
+        "source_text_lines": source_text_lines,
+        "editable_text_coverage_ratio": round(editable_coverage, 4),
         "text_items": text_count,
+        "flow_lines": text_count if text_mode == "line" else 0,
         "text_lines": text_count if text_mode == "line" else 0,
         "text_spans": text_count if text_mode == "span" else 0,
         "images": image_count,
+        "full_page_images": full_page_image_count,
+        "full_page_raster_fallback": full_page_image_count > 0,
         "line_rects": line_count,
+        "native_math_enabled": bool(native_math),
+        "native_equations": native_equation_count,
+        "source_math_segments": source_math_segment_count,
+        "native_math_coverage_ratio": (
+            round(min(1.0, native_equation_count / source_math_segment_count), 4)
+            if source_math_segment_count > 0
+            else 1.0
+        ),
+    }
+
+
+_LAYOUT_REQUIRED_FONT_FACES = ("신명 중명조", "Times New Roman", "돋움")
+_LAYOUT_OLD_DENSE_HEIGHTS = ("840", "940", "1080")
+
+
+def _section_part_names(archive: zipfile.ZipFile) -> list[str]:
+    names = []
+    for name in archive.namelist():
+        if re.fullmatch(r"Contents/section\d+\.xml", name):
+            names.append(name)
+    return sorted(names, key=lambda value: int(re.search(r"section(\d+)", value).group(1)))  # type: ignore[union-attr]
+
+
+def inspect_layout_template_profile(path: str | Path) -> dict[str, Any]:
+    """Inspect the generated coordinate-layout HWPX for exam template guards."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            header = etree.fromstring(archive.read("Contents/header.xml"))
+            sections = [etree.fromstring(archive.read(name)) for name in _section_part_names(archive)]
+    except Exception as exc:  # noqa: BLE001 - caller records this as an objective quality failure.
+        return {"available": False, "error": str(exc)}
+
+    faces = sorted({font.get("face") for font in header.findall(f".//{_hh('font')}") if font.get("face")})
+    missing_faces = [face for face in _LAYOUT_REQUIRED_FONT_FACES if face not in faces]
+
+    char_metric_ok = False
+    metric_heights: set[str] = set()
+    for char_pr in header.findall(f".//{_hh('charPr')}"):
+        ratio = char_pr.find(_hh("ratio"))
+        spacing = char_pr.find(_hh("spacing"))
+        if ratio is None or spacing is None:
+            continue
+        if (
+            ratio.get("hangul") == str(_FLOW_CHAR_RATIO)
+            and ratio.get("latin") == str(_FLOW_CHAR_RATIO)
+            and spacing.get("hangul") == str(_FLOW_CHAR_SPACING)
+            and spacing.get("latin") == str(_FLOW_CHAR_SPACING)
+        ):
+            char_metric_ok = True
+            if char_pr.get("height"):
+                metric_heights.add(str(char_pr.get("height")))
+
+    para_165_ids: set[str] = set()
+    for para_pr in header.findall(f".//{_hh('paraPr')}"):
+        line_spacing = para_pr.find(f".//{_hh('lineSpacing')}")
+        if (
+            line_spacing is not None
+            and line_spacing.get("type") == "PERCENT"
+            and line_spacing.get("value") == str(_FLOW_BODY_LINE_SPACING)
+        ):
+            para_id = para_pr.get("id")
+            if para_id:
+                para_165_ids.add(str(para_id))
+    uses_165 = any(
+        (paragraph.get("paraPrIDRef") or "") in para_165_ids
+        for section in sections
+        for paragraph in section.findall(f".//{_q('p')}")
+    )
+
+    metric_height_values = sorted(metric_heights)
+    old_dense_used = sorted(set(metric_height_values) & set(_LAYOUT_OLD_DENSE_HEIGHTS))
+    font_size_bucket_ok = "1000" in metric_heights and not old_dense_used
+    native_equations = sum(len(section.findall(f".//{_q('equation')}")) for section in sections)
+    page_breaks = sum(
+        1
+        for section in sections
+        for paragraph in section.findall(f".//{_q('p')}")
+        if paragraph.get("pageBreak") == "1"
+    )
+    page_pr_ok = True
+    for section in sections:
+        page_pr = section.find(f".//{_q('pagePr')}")
+        if page_pr is None:
+            page_pr_ok = False
+            continue
+        try:
+            page_pr_ok = page_pr_ok and int(page_pr.get("width") or "0") > 0 and int(page_pr.get("height") or "0") > 0
+        except ValueError:
+            page_pr_ok = False
+
+    return {
+        "available": True,
+        "required_font_faces": list(_LAYOUT_REQUIRED_FONT_FACES),
+        "faces": faces,
+        "missing_required_font_faces": missing_faces,
+        "has_required_font_faces": not missing_faces,
+        "char_metric_ok": char_metric_ok,
+        "metric_heights": metric_height_values,
+        "font_size_bucket_ok": font_size_bucket_ok,
+        "old_dense_metric_heights": old_dense_used,
+        "uses_165_line_spacing": uses_165,
+        "native_equations": native_equations,
+        "page_break_count": page_breaks,
+        "section_count": len(sections),
+        "page_pr_ok": page_pr_ok,
     }
 
 
@@ -2459,6 +3612,7 @@ def write_pdf_raster_hwpx(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     doc = HwpxDocument.new()
+    _ensure_pdf_font_faces(doc.headers[0])
     doc.set_page_margins(left=0, right=0, top=0, bottom=0, header=0, footer=0, gutter=0)
     page_count = 0
     z_counter = [0]
@@ -2467,11 +3621,35 @@ def write_pdf_raster_hwpx(
     with fitz.open(pdf_path) as pdf_doc:
         if not pdf_doc:
             raise ValueError(f"empty PDF: {pdf_path}")
-        first = pdf_doc[0]
-        doc.set_page_size(width=_hwp(first.rect.width), height=_hwp(first.rect.height), orientation="PORTRAIT")
         total_pages = len(pdf_doc) if max_pages is None else min(len(pdf_doc), max_pages)
+        current_section = doc.sections[0]
+        current_signature: tuple[int, int, str] | None = None
         for page_index in range(total_pages):
             page = pdf_doc[page_index]
+            page_width = _hwp(page.rect.width)
+            page_height = _hwp(page.rect.height)
+            orientation = _pdf_page_orientation(page)
+            signature = (page_width, page_height, orientation)
+            starts_new_section = current_signature is None or signature != current_signature
+            if starts_new_section:
+                current_section = doc.sections[0] if page_index == 0 else doc.add_section()
+                current_signature = signature
+                doc.set_page_size(
+                    width=page_width,
+                    height=page_height,
+                    orientation=orientation,
+                    section=current_section,
+                )
+                doc.set_page_margins(
+                    left=0,
+                    right=0,
+                    top=0,
+                    bottom=0,
+                    header=0,
+                    footer=0,
+                    gutter=0,
+                    section=current_section,
+                )
             pix = page.get_pixmap(matrix=matrix, alpha=False)
             image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
             out = io.BytesIO()
@@ -2479,14 +3657,14 @@ def write_pdf_raster_hwpx(
             image_data = out.getvalue()
 
             attrs = {"inherit_style": False, "include_run": False}
-            if page_index > 0:
+            if page_index > 0 and not starts_new_section:
                 attrs["pageBreak"] = "1"
-            anchor = doc.add_paragraph("", **attrs)
+            anchor = doc.add_paragraph("", section=current_section, **attrs)
             item_id = doc.add_image(image_data, "png")
             pic = anchor.add_picture(
                 item_id,
-                width=max(1, _hwp(page.rect.width)),
-                height=max(1, _hwp(page.rect.height)),
+                width=max(1, page_width),
+                height=max(1, page_height),
                 treat_as_char=False,
             )
             _set_z_order(pic.element, _next_z(z_counter))
@@ -2494,6 +3672,5 @@ def write_pdf_raster_hwpx(
             page_count += 1
 
     _prepare_hancom_compatibility(doc)
-    doc.save(str(output_path))
-    _patch_hancom_compatibility(output_path)
+    _save_hancom_compatible_document(doc, output_path)
     return {"pages": page_count, "page_images": page_count}
