@@ -488,6 +488,58 @@ if choice_unit_fraction_choices != [r"\frac{1}{5}", r"-\frac{1}{3}", "2□3"]:
         f"PDF choice unit fraction repair failed {choice_unit_fraction_choices!r} "
         f"stem={choice_unit_fraction_stem!r}"
     )
+
+
+def _pdf_line(text: str, x: float, y: float, width: float = 48.0, height: float = 24.0) -> dict[str, object]:
+    return {"text": text, "bbox_px": [x, y, width, height]}
+
+
+choice_labels = ["\u2460", "\u2461", "\u2462", "\u2463", "\u2464"]
+full_fraction_lines = [_pdf_line("15. stem", 0, 0, 500, 24)]
+for offset, value in enumerate(("15", "27", "39", "51", "63")):
+    full_fraction_lines.append(_pdf_line(value, 220 + offset * 120, 100))
+for offset, label in enumerate(choice_labels):
+    full_fraction_lines.append(_pdf_line(f"{label}\u25a1", 220 + offset * 120, 120, 66, 36))
+for offset in range(5):
+    full_fraction_lines.append(_pdf_line("4", 220 + offset * 120, 145))
+full_fraction_split = importers._split_stem_and_choices_from_pdf_geometry(
+    "\n".join(str(line["text"]) for line in full_fraction_lines),
+    full_fraction_lines,
+)
+if full_fraction_split is None or full_fraction_split[1] != [
+    r"\frac{15}{4}",
+    r"\frac{27}{4}",
+    r"\frac{39}{4}",
+    r"\frac{51}{4}",
+    r"\frac{63}{4}",
+]:
+    failures.append(f"PDF choice geometry repair: full fraction row failed {full_fraction_split!r}")
+
+mixed_fraction_lines = [_pdf_line("6. stem", 0, 0, 500, 24)]
+for x, value in ((220, "15"), (460, "17"), (700, "19")):
+    mixed_fraction_lines.append(_pdf_line(value, x, 100))
+for x, value in (
+    (220, "\u2460\u25a1"),
+    (340, "\u24618"),
+    (460, "\u2462\u25a1"),
+    (580, "\u24639"),
+    (700, "\u2464\u25a1"),
+):
+    mixed_fraction_lines.append(_pdf_line(value, x, 120, 66, 36))
+for x in (220, 460, 700):
+    mixed_fraction_lines.append(_pdf_line("2", x, 145))
+mixed_fraction_split = importers._split_stem_and_choices_from_pdf_geometry(
+    "\n".join(str(line["text"]) for line in mixed_fraction_lines),
+    mixed_fraction_lines,
+)
+if mixed_fraction_split is None or mixed_fraction_split[1] != [
+    r"\frac{15}{2}",
+    "8",
+    r"\frac{17}{2}",
+    "9",
+    r"\frac{19}{2}",
+]:
+    failures.append(f"PDF choice geometry repair: mixed fraction row failed {mixed_fraction_split!r}")
 p_over_q_placeholder = math_text.normalize_recognized_math_layout_text(
     "\ud655\ub960\uc740 \ue06dp\np+q\uc758 \uac12\uc744 \uad6c\ud558\uc2dc\uc624. (\ub2e8, p\uc640 q\ub294 \uc11c\ub85c\uc18c)"
 )

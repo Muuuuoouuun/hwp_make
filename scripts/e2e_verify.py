@@ -50,9 +50,30 @@ def discover_samples(explicit: list[str], take_all: bool) -> list[Path]:
         ext = path.suffix.lower().lstrip(".")
         if path.is_file() and ext in found:
             found[ext].append(path)
+    baseline_names_by_ext: dict[str, list[str]] = {ext: [] for ext in SUPPORTED}
+    if BASELINE_PATH.exists() and not take_all:
+        try:
+            baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            baseline = []
+        for item in baseline if isinstance(baseline, list) else []:
+            if not isinstance(item, dict):
+                continue
+            ext = str(item.get("ext") or "").lower()
+            name = str(item.get("name") or "")
+            if ext in baseline_names_by_ext and name:
+                baseline_names_by_ext[ext].append(name)
     picked: list[Path] = []
     for ext in SUPPORTED:
-        picked.extend(found[ext] if take_all else found[ext][:1])
+        if take_all:
+            picked.extend(found[ext])
+            continue
+        by_name = {path.name: path for path in found[ext]}
+        baseline_pick = next(
+            (by_name[name] for name in baseline_names_by_ext.get(ext, []) if name in by_name),
+            None,
+        )
+        picked.extend([baseline_pick] if baseline_pick is not None else found[ext][:1])
     return picked
 
 

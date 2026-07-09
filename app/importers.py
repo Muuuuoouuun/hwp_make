@@ -65,6 +65,9 @@ PDF_CHOICE_UNIT_FRACTION_RE = re.compile(
 PDF_CHOICE_FRACTION_PART_RE = re.compile(
     r"^[A-Za-z0-9α-ωΑ-Ωπ∞√∑∫+\-./*(){}\[\]\\_=^]+$"
 )
+PDF_CHOICE_GEOMETRY_LABEL_RE = re.compile(
+    rf"^\s*(?P<label>[{PDF_CHOICE_FRACTION_LABELS}])\s*(?P<body>.*)$"
+)
 ANSWER_LINE_RE = re.compile(r"^\s*(?:정답|답)(?:\s*[:：]|\s+)(?P<value>.+?)\s*$")
 EXPLANATION_LINE_RE = re.compile(r"^\s*(?:해설|풀이)(?:(?:\s*[:：]|\s+)(?P<value>.*))?\s*$")
 SCORE_MARKER_RE = re.compile(r"\[\s*\d+\s*점\s*\]")
@@ -278,6 +281,18 @@ def _import_pdf_recognized(
             stem_text, choices = "", []
         else:
             stem_text, choices = _split_stem_and_choices(prob.text)
+            geometry_split = _split_stem_and_choices_from_pdf_geometry(
+                prob.text,
+                list(getattr(prob, "line_geometries", []) or []),
+            )
+            if geometry_split is not None:
+                geometry_stem, geometry_choices = geometry_split
+                if (
+                    len(geometry_choices) >= len(choices)
+                    and _placeholder_count_in_fields(geometry_stem, geometry_choices)
+                    < _placeholder_count_in_fields(stem_text, choices)
+                ):
+                    stem_text, choices = geometry_stem, geometry_choices
 
         number = str(prob.number) if prob.number else ""
         loose_key = _recognized_pdf_loose_duplicate_key(number, stem_text) if loose_dedup_enabled else ""
@@ -810,6 +825,182 @@ def _repair_pdf_choice_fraction_layout(text: str) -> str:
         index += 1
 
     return "\n".join(repaired)
+
+
+def _bbox_center(bbox: Any) -> tuple[float, float] | None:
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        return None
+    try:
+        left, top, width, height = [float(value) for value in bbox]
+    except (TypeError, ValueError):
+        return None
+    return left + width / 2.0, top + height / 2.0
+
+
+def _bbox_top(bbox: Any) -> float | None:
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        return None
+    try:
+        return float(bbox[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _pdf_choice_geometry_part(text: str) -> bool:
+    return _pdf_choice_fraction_part(text) and not PDF_CHOICE_GEOMETRY_LABEL_RE.match(str(text or "").strip())
+
+
+def _pdf_choice_geometry_label_body(label_line: str) -> tuple[str, str] | None:
+    match = PDF_CHOICE_GEOMETRY_LABEL_RE.match(str(label_line or "").strip())
+    if not match:
+        return None
+    return match.group("label"), match.group("body").strip()
+
+
+def _nearest_pdf_choice_part(
+    indexed_lines: list[tuple[int, dict[str, Any]]],
+    *,
+    label_index: int,
+    label_center_x: float,
+    label_top: float,
+    above: bool,
+    used: set[int],
+) -> tuple[int, str] | None:
+    candidates: list[tuple[float, float, int, str]] = []
+    for index, line in indexed_lines:
+        if index == label_index or index in used:
+            continue
+        text = str(line.get("text") or "").strip()
+        if not _pdf_choice_geometry_part(text):
+            continue
+        bbox = line.get("bbox_px")
+        center = _bbox_center(bbox)
+        top = _bbox_top(bbox)
+        if center is None or top is None:
+            continue
+        center_x, _ = center
+        x_distance = abs(center_x - label_center_x)
+        if x_distance > 90:
+            continue
+        vertical = label_top - top if above else top - label_top
+        if vertical <= 0 or vertical > 90:
+            continue
+        candidates.append((vertical, x_distance, index, text))
+    if not candidates:
+        return None
+    _, _, index, text = sorted(candidates)[0]
+    return index, text
+
+
+def _pdf_choice_from_geometry_body(
+    body: str,
+    numerator: str | None,
+    denominator: str | None,
+) -> str:
+    text = str(body or "").strip()
+    if not any(char in text for char in PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS):
+        return _normalize_pdf_choice_body(text)
+    exponent_match = PDF_CHOICE_EXPONENT_FRACTION_RE.match(f"①{text}")
+    fraction_match = PDF_CHOICE_FRACTION_RE.match(f"①{text}")
+    if exponent_match and numerator and denominator and _pdf_choice_exponent_base(exponent_match.group("base")):
+        return f"{exponent_match.group('base')}^{{\\frac{{{numerator}}}{{{denominator}}}}}"
+    if fraction_match:
+        sign = "-" if fraction_match.groupdict().get("sign") else ""
+        inline_denominator = (fraction_match.groupdict().get("den") or "").strip()
+        denominator = denominator or inline_denominator or None
+        if numerator and denominator:
+            return f"{sign}\\frac{{{numerator}}}{{{denominator}}}"
+        if denominator:
+            return f"{sign}\\frac{{1}}{{{denominator}}}"
+    return text
+
+
+def _split_stem_and_choices_from_pdf_geometry(
+    text: str,
+    line_geometries: list[dict[str, Any]],
+) -> tuple[str, list[str]] | None:
+    """Use PDF line bbox geometry to rejoin fraction choices split across rows."""
+    if not line_geometries:
+        return None
+    indexed_lines = [
+        (index, line)
+        for index, line in enumerate(line_geometries)
+        if isinstance(line, dict) and str(line.get("text") or "").strip()
+    ]
+    label_entries: list[dict[str, Any]] = []
+    for index, line in indexed_lines:
+        parsed = _pdf_choice_geometry_label_body(str(line.get("text") or ""))
+        if parsed is None:
+            continue
+        label, body = parsed
+        bbox = line.get("bbox_px")
+        center = _bbox_center(bbox)
+        top = _bbox_top(bbox)
+        if center is None or top is None:
+            continue
+        label_entries.append(
+            {
+                "index": index,
+                "label": label,
+                "body": body,
+                "center_x": center[0],
+                "top": top,
+            }
+        )
+    if len(label_entries) < 2:
+        return None
+
+    used: set[int] = {int(entry["index"]) for entry in label_entries}
+    choices_by_label: dict[str, str] = {}
+    for entry in sorted(label_entries, key=lambda item: _pdf_choice_label_order(str(item["label"]))):
+        label = str(entry["label"])
+        body = str(entry["body"])
+        numerator: str | None = None
+        denominator: str | None = None
+        if any(char in body for char in PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS):
+            numerator_item = _nearest_pdf_choice_part(
+                indexed_lines,
+                label_index=int(entry["index"]),
+                label_center_x=float(entry["center_x"]),
+                label_top=float(entry["top"]),
+                above=True,
+                used=used,
+            )
+            if numerator_item is not None:
+                used.add(numerator_item[0])
+                numerator = numerator_item[1]
+            denominator_item = _nearest_pdf_choice_part(
+                indexed_lines,
+                label_index=int(entry["index"]),
+                label_center_x=float(entry["center_x"]),
+                label_top=float(entry["top"]),
+                above=False,
+                used=used,
+            )
+            if denominator_item is not None:
+                used.add(denominator_item[0])
+                denominator = denominator_item[1]
+        choices_by_label[label] = _pdf_choice_from_geometry_body(body, numerator, denominator)
+
+    labels = sorted(choices_by_label, key=_pdf_choice_label_order)
+    if len(labels) < 2:
+        return None
+    choices = [choices_by_label[label] for label in labels]
+    if not choices:
+        return None
+
+    stem_lines: list[str] = []
+    for index, line in indexed_lines:
+        if index in used:
+            continue
+        stem_lines.append(str(line.get("text") or "").strip())
+    stem = re.sub(r"\n{3,}", "\n\n", "\n".join(stem_lines)).strip()
+    return stem, [_normalize_pdf_choice_body(choice) for choice in choices]
+
+
+def _placeholder_count_in_fields(stem: str, choices: list[str]) -> int:
+    values = [stem, *choices]
+    return sum(str(value or "").count("\u25a1") + str(value or "").count("\u25a2") for value in values)
 
 
 def _normalize_pdf_choice_body(value: str) -> str:

@@ -18,7 +18,8 @@ Canonical references:
 2. Reduce remaining real-PDF math placeholders.
    - Current status: raw PDF character/span geometry is preserved in `pdf_line_chars` and `pdf_line_spans`.
    - Current status: imported problem layout metadata now carries `pdf_lines` with line text, bbox, char geometry, and span geometry; real PDF QA emits per-question placeholder reports with field, nearby text, inferred type, page/column, and bbox context.
-   - Next action: use the residual placeholder report to reconstruct stacked fractions, roots, superscripts/subscripts, cases, and vector accents.
+   - Current status: geometry-based choice fraction repair removes all remaining `choice□` placeholders in the four local real math PDFs while keeping render overflow 0.
+   - Next action: use the residual stem placeholder report to reconstruct stacked fractions, roots, superscripts/subscripts, cases, and vector accents.
    - Done when: remaining `□` counts are explained by type, and high-confidence structural cases are converted to native equations.
 
 3. Keep question sync as a non-negotiable gate.
