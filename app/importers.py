@@ -212,8 +212,9 @@ def import_pdf(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[
     """PDF 가져오기.
 
     1순위: 인식 파이프라인(app.recognition) — born-digital 시험지를 문항 단위로 분리하고
-           그림/문항 이미지를 추출한다(수식 폰트로 텍스트가 깨지는 수학·과학은 문항 전체를
-           충실 이미지로 첨부). 2순위(스캔/텍스트레이어 없음): 기존 pypdf+OCR 경로.
+           텍스트, 수식 PUA, 라인/문자 좌표, 그림 후보를 보존한다. 텍스트 신뢰도가 낮은
+           일부 영역만 보존용 이미지 fallback을 붙인다.
+    2순위: 스캔/텍스트레이어 없음 등 결정론적 인식이 불가능한 경우 pypdf+OCR 경로.
     """
     recognized = _import_pdf_recognized(filename, payload, metadata)
     if recognized is not None:
@@ -276,10 +277,8 @@ def _import_pdf_recognized(
             if rp:
                 image_paths.append(rp)
 
-        # 규칙: 문항 전체 crop 이미지가 있으면(=그림이 딸렸거나 수식폰트로 텍스트가 깨진 경우)
-        #   그 이미지가 번호·본문·선지·그림을 모두 담으므로 텍스트는 버리고 이미지-only 로 낸다
-        #   → 텍스트+이미지 중복 없이 원본과 픽셀 동일하게 재현(수학 전부, 과탐 그림문항).
-        # 그림 없고 텍스트가 신뢰 가능한 순수 텍스트 문항만 편집 가능한 stem/choices 로 낸다.
+        # 텍스트가 신뢰 불가인 문항만 image-only fallback으로 보존한다. 신뢰 가능한 PDF 라인은
+        # stem/choices와 좌표 메타데이터를 유지해 이후 native equation 복원에 사용한다.
         if image_only_fallback:
             stem_text, choices = "", []
         else:

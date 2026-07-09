@@ -6,10 +6,18 @@ Product B는 입력 PDF/HWP/HWPX를 평가원/교육청 시험지에 가까운 �
 
 핵심 목표는 보기만 비슷한 문서가 아닙니다. 문항 번호가 싱크되고, 수식이 네이티브 수식으로 살아 있고, 폰트/간격이 시험지 기준에 맞으며, 렌더링에서 겹침과 overflow가 없어야 합니다.
 
+## 문서 정리 원칙
+
+- 현재 기준은 이 문서의 `현재 Canonical 기준`과 `기준 적용 체크리스트`를 우선합니다.
+- 날짜가 지난 조사 메모, 코드 주석, 임시 QA 결과가 이 문서와 충돌하면 이 문서를 기준으로 업데이트합니다.
+- 옛 기준은 조용히 되살아나지 않도록 `삭제 또는 폐기한 옛 기준`에 명시하고, 필요하면 코드 주석과 사용자 notice도 함께 고칩니다.
+- README에는 실행과 검증 입구만 남기고, 제품 판단 기준은 이 문서에 모읍니다.
+
 ## 현재 상태 스냅샷
 
 - 수학 PDF/HWP 복원은 수식 구현과 레이아웃 겹침 방지를 최우선으로 둡니다.
-- 네 개 로컬 수학 PDF 샘플 기준으로 선택지 분수 placeholder는 제거되었고, 단순 stem stacked fraction과 확정 split vector residue까지 복원되었습니다.
+- 네 개 로컬 수학 PDF 샘플 기준으로 선택지 분수 placeholder는 제거되었고, 단순 stem stacked fraction, log-base residue, 확정 split vector residue까지 복원되었습니다.
+- 현재 로컬 baseline은 `stem□` 48개, malformed equation 0, render overflow 0입니다. residual bucket은 fraction 13, root 7, vector/arrow 6, cases/grouping 13, adjacent script/structure 9입니다.
 - 남은 핵심 병목은 mixed fraction, root, super/subscript, cases, bbox 기반 vector base 추론입니다. QA 리포트는 실제 출력 잔여 placeholder와 원본 PDF 구조 힌트를 분리해서 기록합니다.
 - PDF 원본 레이아웃 HWPX는 흐름 기반 writer가 canonical입니다. 절대좌표 글상자 방식은 한컴 호환성과 편집성 문제가 있어 실험 기준으로만 둡니다.
 - 폰트/간격 기본 profile은 평가원형 `신명조/HY신명조/신명 중명조 + Times New Roman + 돋움/중고딕`, 본문 10-11pt, 줄간격 160-170%, 장평 약 95, 자간 약 -5입니다.
@@ -121,6 +129,12 @@ XML 유효성만으로는 충분하지 않습니다. 합격 기준은 rhwp 렌�
 12. `한글 GUI 광고/계정 탭을 생성 파일에서 제거해야 통과` 기준은 폐기합니다.
     광고 탭은 환경 변수에 가깝고, 개발 기준은 생성 파일의 편집 가능성, 보호 플래그, Mark-of-the-Web, 렌더/구조 검증입니다.
 
+13. `수학/과학 PDF는 문항 전체 이미지로 가져오면 충분` 기준은 폐기합니다.
+    문제은행 import에서 텍스트 신뢰도가 낮은 일부 문항은 임시 이미지 fallback을 가질 수 있지만, Product B 성공 기준은 편집 가능한 텍스트, 네이티브 수식, 좌표 기반 구조 복원입니다.
+
+14. `사용자 notice나 코드 주석에 남은 옛 설명은 동작과 무관하므로 방치` 기준은 폐기합니다.
+    개발 판단을 흐리므로 현재 기준과 충돌하는 설명은 구현 변경과 별개로 즉시 정리합니다.
+
 ## 다음 우선순위
 
 1. 실제 PDF QA의 import, HWPX write, render phase 분리와 샘플별 시간 기록을 regression gate로 유지합니다.
@@ -128,6 +142,7 @@ XML 유효성만으로는 충분하지 않습니다. 합격 기준은 rhwp 렌�
 3. bbox 기반 복원은 choice fraction, 단순 stem stacked fraction, 확정된 split vector residue까지 구현되었습니다. 다음은 mixed fraction, root index/radicand, super/subscript, cases, bbox 기반 vector base 추론입니다.
 4. 문항 inventory report를 강화해 원본 페이지/컬럼/문항 번호/choice split/image fallback 상태를 비교합니다.
 5. HWP open probe checklist를 추가해 editable/read-only/protected/ad prompt를 구분해서 기록합니다.
+6. 코드 주석과 사용자 notice에서 폐기된 기준이 다시 보이면 이 문서에 맞춰 업데이트합니다.
 
 ## 검증 관문
 

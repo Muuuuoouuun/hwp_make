@@ -4,6 +4,14 @@ HWP Make는 PDF, HWP/HWPX, DOCX, 이미지, 텍스트, CSV/SQLite 자료를 문�
 
 현재 개발의 최우선 목표는 수학 시험지 기준입니다. 즉, 문항 번호 싱크, 네이티브 한글 수식, 실제 시험지 타이포그래피, 2단 레이아웃, 겹침 없는 렌더링을 동시에 만족하는 HWPX를 만드는 것입니다. Product B의 세부 기준과 폐기한 옛 기준은 `docs/product_b_bottleneck_specs.md`를 canonical 문서로 봅니다.
 
+## 문서 역할
+
+- `README.md`: 실행 방법, 주요 경로, 현재 판정 기준, 검증 명령을 빠르게 확인하는 입구입니다.
+- `docs/product_b_bottleneck_specs.md`: Product B의 현재 기준과 폐기한 옛 기준을 관리하는 canonical 문서입니다.
+- `docs/priority_work_queue.md`: 지금 막아야 하는 P0/P1/P2 작업 큐입니다.
+- `docs/reference_samples_manifest.md`: 로컬 레퍼런스 시험지 목록과 사용 목적만 기록합니다. 파일 자체는 커밋하지 않습니다.
+- `docs/hwp_open_probe_checklist.md`: 한글 GUI 광고/수정권한/보호보기 이슈를 구분하는 체크리스트입니다.
+
 ## 실행
 
 PowerShell에서:
@@ -116,7 +124,7 @@ python scripts/run_all_verify.py
 
 - `app/main.py`: API 진입점
 - `app/recognition/pdf_segment.py`: PDF 페이지/블록/문항/좌표 인식
-- `app/pipeline.py`: 인식 결과를 문항 모델로 변환
+- `app/recognition/pipeline.py`: 인식 결과를 문항 모델로 변환
 - `app/importers.py`: 파일별 import 배선
 - `app/math_text.py`: 수식 텍스트 감지와 Hancom EQN 변환 보조
 - `app/hancom_pua_map.py`: HyhwpEQ PUA 매핑

@@ -40,8 +40,9 @@ Canonical references:
 
 4. Keep current standards from drifting back to old criteria.
    - Current status: README and Product B docs separate active standards from retired investigation notes.
+   - Current status: Product B docs now explicitly retire "math/science PDF as whole-problem image is enough" and stale code-comment/user-notice standards.
    - Next action: when changing PDF import/export or HWPX writer behavior, check against the retired-standards list before accepting the change.
-   - Done when: no code path treats pypdf-only import, full-page raster fallback, GUI-open-only QA, or committed reference exams as a success criterion.
+   - Done when: no code path treats pypdf-only import, whole-problem image fallback, full-page raster fallback, GUI-open-only QA, or committed reference exams as a success criterion.
 
 ## P1 - Fidelity Improvements
 
@@ -103,5 +104,6 @@ Canonical references:
 - The current best path is not OCR-first. Born-digital PDF text plus geometry is strong enough for many KICE math structures, and OCR should remain a fallback.
 - Do not reintroduce full-page raster fallback as a pass condition for PDF original-layout HWPX.
 - Do not commit reference exam PDFs/HWPs by default. Keep them local/private unless a rights and storage policy is explicitly chosen.
+- Do not describe math/science PDF import as "image fallback is enough." Image fallback is a temporary/local preservation path; Product B success is editable text, native equations, and layout verification.
 - Every repair rule needs a regression case in `scripts/verify_importers.py` or the relevant PDF QA script.
 - Layout success means rendered output, not only XML validity: no overlap, no overflow, no column crossing, and readable native equations.

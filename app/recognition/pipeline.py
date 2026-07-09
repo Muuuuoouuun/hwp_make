@@ -25,8 +25,8 @@ from app.recognition.pdf_segment import segment_pdf
 from app.exam_header import masthead_from_text
 from app.math_text import is_recoverable_pua_math_char, normalize_recognized_math_layout_text
 
-# 문항 본문에서 이 비율 이상이 PUA(수식폰트로 깨진 글리프)면 텍스트를 믿지 않고
-# 문항 전체를 이미지로 crop 한다. 수학/과학 born-digital PDF 가 대표적.
+# 문항 본문에서 이 비율 이상이 아직 복원되지 않은 PUA이면 텍스트만으로는 부족하다고 본다.
+# 이 경우 보존용 crop을 붙이되, 가능한 라인/문자 좌표는 계속 남겨 후속 수식 복원에 쓴다.
 _PUA_UNRELIABLE_RATIO = 0.12
 
 
@@ -335,15 +335,13 @@ def recognize_pdf(
             title_block = blocks_by_id.get(unit.metadata.get("title_block_id", ""))
             box = title_block.bbox if title_block else None
 
-            # 텍스트 신뢰도: PUA(수식폰트) 비율이 높으면 본문을 믿지 않는다.
+            # 텍스트 신뢰도: 아직 복원되지 않은 PUA 비율이 높으면 본문 텍스트만 믿지 않는다.
             text_reliable = _pua_ratio(raw_text) < _PUA_UNRELIABLE_RATIO
             text = _clean_pua(raw_text)
             has_figure = _problem_has_figure(box, figures, text)
 
-            # 문항 전체 crop 을 붙이는 경우:
-            #   (a) 텍스트 불안정(수식폰트) → 이미지가 본체
-            #   (b) 그림/도형/표가 딸린 문항 → 텍스트만으로 재현 불가하므로 충실 이미지 첨부
-            # 취약한 '그림만 정밀 crop' 대신 문항 전체를 담아 그림 누락을 원천 차단한다.
+            # 문항 전체 crop은 텍스트가 신뢰 불가인 경우의 보존 장치다. 그림/도표는 가능하면
+            # 지역 crop으로 분리하고, 텍스트/좌표는 후속 native equation 복원용으로 유지한다.
             figure_pngs: list[bytes] = []
             problem_image_png: bytes | None = None
             if page_img is not None and box is not None:
@@ -388,8 +386,8 @@ def recognize_pdf(
             else " OCR/AI 폴백으로 텍스트 추출을 시도할 수 있습니다."
         )
         result.notices.append(
-            f"{image_fallback}개 문항은 수식 폰트(PUA)로 본문 텍스트가 깨져 "
-            f"문항 전체를 이미지로 가져왔습니다(수학/과학에서 흔함).{extra}"
+            f"{image_fallback}개 문항은 아직 복원되지 않은 수식 PUA 비율이 높아 "
+            f"보존용 문항 이미지를 함께 가져왔습니다.{extra}"
         )
 
     if result.empty_page_numbers:
