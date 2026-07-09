@@ -19,8 +19,9 @@ Canonical references:
    - Current status: raw PDF character/span geometry is preserved in `pdf_line_chars` and `pdf_line_spans`.
    - Current status: imported problem layout metadata now carries `pdf_lines` with line text, bbox, char geometry, and span geometry; real PDF QA emits per-question placeholder reports with field, nearby text, inferred type, page/column, and bbox context.
    - Current status: geometry-based choice fraction repair removes all remaining `choice□` placeholders in the four local real math PDFs while keeping render overflow 0.
-   - Current status: char-bbox-based stem fraction repair converts high-confidence stacked fractions, including `y=\frac{3}{x-1}`-style curves and `\frac{x2}{9}-\frac{y2}{16}`-style conics; the four local real math PDFs now report 50 total `stem□` placeholders, down from 66 before this repair, with render overflow 0.
-   - Next action: use the residual stem placeholder report to reconstruct mixed multi-line fractions, roots, superscripts/subscripts, cases, and vector accents.
+   - Current status: char-bbox-based stem fraction repair converts high-confidence stacked fractions, including `y=\frac{3}{x-1}`-style curves and `\frac{x2}{9}-\frac{y2}{16}`-style conics; the four local real math PDFs now report 49 total `stem□` placeholders, down from 66 before this repair series, with render overflow 0.
+   - Current status: split vector residue cleanup removes a `□⃗` line only when the following line is already a confirmed `\vec{...}` token.
+   - Next action: use the residual stem placeholder report to reconstruct mixed multi-line fractions, roots, superscripts/subscripts, cases, and vector accents whose base must be inferred from bbox.
    - Done when: remaining `□` counts are explained by type, and high-confidence structural cases are converted to native equations.
 
 3. Keep question sync as a non-negotiable gate.
@@ -40,6 +41,7 @@ Canonical references:
    - Roots: root index, radicand bbox, and radical bar/placeholder grouping.
    - Exponents: y-offset and font-size based superscript/subscript reconstruction.
    - Cases: brace fragments plus aligned condition/value rows.
+   - Vectors: simple PUA/vector residue cleanup is implemented; next vector work must infer the base from bbox rather than text adjacency alone.
 
 2. Improve KICE typography calibration.
    - Keep Shinmyeongjo/HY Shinmyeongjo for Korean body, Times New Roman for English/variables, and Dotum/JungGothic for numbers/titles.
@@ -65,8 +67,8 @@ Canonical references:
 
 1. Add a residual-placeholder report.
    - Status: implemented in `scripts/verify_real_pdf_math_samples.py`; reports are written under `data/real_pdf_math_qa/exports/real_pdf_math_qa_report_<mode>.json`.
-   - Status: representative choice-fraction and simple stem-fraction cases are promoted into `scripts/verify_importers.py`.
-   - Next action: promote representative root/script/cases and mixed-fraction cases from the JSON report into focused regression fixtures before adding repair rules.
+   - Status: representative choice-fraction, simple stem-fraction, and split-vector-residue cases are promoted into `scripts/verify_importers.py`.
+   - Next action: promote representative root/script/cases, bbox-vector, and mixed-fraction cases from the JSON report into focused regression fixtures before adding repair rules.
 
 2. Add per-phase performance logging.
    - Status: real PDF QA now records setup, import, analysis, HWPX write, HWPX inspect, render, and total time per sample.

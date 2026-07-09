@@ -100,7 +100,7 @@ XML 유효성만으로는 충분하지 않습니다. 합격 기준은 rhwp 렌�
 
 1. 실제 PDF QA의 import, HWPX write, render phase 분리와 샘플별 시간 기록을 regression gate로 유지합니다.
 2. residual square placeholder report를 기준으로 새 복원 규칙을 만들고, 대표 케이스를 `scripts/verify_importers.py` fixture로 승격합니다.
-3. bbox 기반 복원은 choice fraction과 단순 stem stacked fraction까지 구현되었습니다. 다음은 mixed fraction, root index/radicand, super/subscript, cases입니다.
+3. bbox 기반 복원은 choice fraction, 단순 stem stacked fraction, 확정된 split vector residue까지 구현되었습니다. 다음은 mixed fraction, root index/radicand, super/subscript, cases, bbox 기반 vector base 추론입니다.
 4. 문항 inventory report를 강화해 원본 페이지/컬럼/문항 번호/choice split/image fallback 상태를 비교합니다.
 5. HWP open probe checklist를 추가해 editable/read-only/protected/ad prompt를 구분해서 기록합니다.
 

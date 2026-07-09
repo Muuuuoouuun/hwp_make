@@ -395,6 +395,14 @@ if hwpx_writer._hancom_eqn_script(recognized_trailing_vector) != "vec {BC}":
     failures.append(
         f"HWPX native math: trailing vector accent PUA conversion failed {recognized_trailing_vector!r}"
     )
+recognized_split_vector_residue = math_text.normalize_recognized_math_text(
+    "|\u25a1\u20d7\n\\vec{XB}\nXC|"
+)
+if "\u25a1\u20d7" in recognized_split_vector_residue or not recognized_split_vector_residue.startswith(r"|\vec{XB}"):
+    failures.append(
+        "Recognized math normalization: split vector residue was not removed "
+        f"{recognized_split_vector_residue!r}"
+    )
 recognized_radical = math_text.normalize_recognized_math_text("\ue05c\ue06d\ue036")
 if recognized_radical != "√3":
     failures.append(f"Recognized math normalization: radical filler PUA failed {recognized_radical!r}")

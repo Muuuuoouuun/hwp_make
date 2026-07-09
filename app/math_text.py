@@ -129,6 +129,10 @@ HANCOM_VECTOR_ACCENT_RE = re.compile(
 HANCOM_TRAILING_VECTOR_ACCENT_RE = re.compile(
     rf"(?P<base>[A-Z]{{1,3}})\s*-\s*[{HANCOM_MATH_PLACEHOLDER_CHARS}\s]*\u20d7"
 )
+HANCOM_SPLIT_VECTOR_RESIDUE_RE = re.compile(
+    rf"[{HANCOM_MATH_PLACEHOLDER_CHARS}]\s*\u20d7[ \t]*\n\s*"
+    rf"(?P<vector>\\vec\{{[A-Za-z{GREEK_RANGE}]{{1,3}}\}})"
+)
 HANCOM_RADICAL_FILLER_RE = re.compile(
     rf"(\u221a)\s*[{HANCOM_MATH_PLACEHOLDER_CHARS}]+"
 )
@@ -412,6 +416,7 @@ def normalize_recognized_math_text(text: str) -> str:
     value = HANCOM_RADICAL_FILLER_RE.sub(r"\1", value)
     value = HANCOM_TRAILING_VECTOR_ACCENT_RE.sub(r"\\vec{\g<base>}", value)
     value = HANCOM_VECTOR_ACCENT_RE.sub(r"\\vec{\1}", value)
+    value = HANCOM_SPLIT_VECTOR_RESIDUE_RE.sub(r"\g<vector>", value)
     value = HANCOM_XBAR_RE.sub(r"\\overline{\1}", value)
     return HANCOM_SEGMENT_OVERLINE_RE.sub(r"\\overline{\1}", value)
 
