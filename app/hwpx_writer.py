@@ -105,10 +105,28 @@ def _read_parenthesized(source: str, index: int) -> tuple[str, int] | None:
     return None
 
 
-def _read_latex_delimiter(source: str, index: int) -> tuple[str, int] | None:
+def _skip_spaces(source: str, index: int) -> int:
     cursor = index
     while cursor < len(source) and source[cursor].isspace():
         cursor += 1
+    return cursor
+
+
+def _read_latex_arg(source: str, index: int) -> tuple[str, int] | None:
+    cursor = _skip_spaces(source, index)
+    braced = _read_braced(source, cursor)
+    if braced is not None:
+        return braced
+    command = _read_command(source, cursor)
+    if command is not None:
+        return source[cursor : command[1]], command[1]
+    if cursor < len(source):
+        return source[cursor : cursor + 1], cursor + 1
+    return None
+
+
+def _read_latex_delimiter(source: str, index: int) -> tuple[str, int] | None:
+    cursor = _skip_spaces(source, index)
     if cursor >= len(source):
         return None
     named = {
@@ -116,6 +134,14 @@ def _read_latex_delimiter(source: str, index: int) -> tuple[str, int] | None:
         r"\}": "}",
         r"\langle": "〈",
         r"\rangle": "〉",
+        r"\lceil": "⌈",
+        r"\rceil": "⌉",
+        r"\lfloor": "⌊",
+        r"\rfloor": "⌋",
+        r"\lvert": "|",
+        r"\rvert": "|",
+        r"\lVert": "∥",
+        r"\rVert": "∥",
         r"\|": "∥",
     }
     for token, value in named.items():
@@ -234,8 +260,13 @@ def _hancom_environment_script(env_name: str, body: str) -> str | None:
         "array": "matrix",
         "pmatrix": "pmatrix",
         "bmatrix": "bmatrix",
+        "vmatrix": "dmatrix",
+        "Vmatrix": "dmatrix",
         "cases": "cases",
         "aligned": "eqalign",
+        "align": "eqalign",
+        "gathered": "eqalign",
+        "split": "eqalign",
     }.get(env)
     if command is None:
         return None
@@ -395,6 +426,7 @@ _UNICODE_GREEK_EQN = {
 _EQN_COMMANDS = {
     **_GREEK_EQN_COMMANDS,
     "nabla": "nabla",
+    "partial": "Partial",
     "le": "<=",
     "leq": "<=",
     "ge": ">=",
@@ -402,16 +434,40 @@ _EQN_COMMANDS = {
     "ne": "!=",
     "neq": "!=",
     "approx": "approx",
+    "sim": "SIM",
+    "simeq": "SIMEQ",
+    "cong": "CONG",
+    "equiv": "==",
+    "propto": "PROPTO",
+    "asymp": "ASYMP",
+    "ll": "<<",
+    "gg": ">>",
+    "lll": "<<<",
+    "ggg": ">>>",
+    "prec": "PREC",
+    "succ": "SUCC",
     "times": "times",
     "cdot": "cdot",
     "div": "div",
     "pm": "+-",
     "mp": "-+",
     "infty": "inf",
+    "infinity": "inf",
+    "emptyset": "EMPTYSET",
+    "varnothing": "EMPTYSET",
+    "forall": "FORALL",
+    "exists": "EXIST",
     "in": "∈",
     "notin": "∉",
     "cup": "∪",
     "cap": "∩",
+    "oplus": "OPLUS",
+    "ominus": "OMINUS",
+    "otimes": "OTIMES",
+    "oslash": "ODIV",
+    "odot": "ODOT",
+    "lor": "LOR",
+    "land": "LAND",
     "subset": "⊂",
     "supset": "⊃",
     "subseteq": "⊆",
@@ -433,21 +489,98 @@ _EQN_COMMANDS = {
     "therefore": "therefore",
     "to": "->",
     "rightarrow": "->",
-    "leftarrow": "<-",
+    "longrightarrow": "->",
+    "leftarrow": "larrow",
+    "longleftarrow": "larrow",
+    "leftrightarrow": "<->",
+    "longleftrightarrow": "<->",
+    "Rightarrow": "RARROW",
+    "Longrightarrow": "RARROW",
+    "Leftarrow": "LARROW",
+    "Longleftarrow": "LARROW",
+    "Leftrightarrow": "LRARROW",
+    "Longleftrightarrow": "LRARROW",
+    "uparrow": "uparrow",
+    "downarrow": "downarrow",
+    "Uparrow": "UPARROW",
+    "Downarrow": "DOWNARROW",
+    "updownarrow": "udarrow",
+    "Updownarrow": "UDARROW",
+    "mapsto": "MAPSTO",
+    "hookleftarrow": "HOOKLEFT",
+    "hookrightarrow": "HOOKRIGHT",
+    "nearrow": "NEARROW",
+    "nwarrow": "NWARROW",
+    "searrow": "SEARROW",
+    "swarrow": "SWARROW",
     "sin": "sin",
     "cos": "cos",
     "tan": "tan",
+    "arcsin": "arcsin",
+    "arccos": "arccos",
+    "arctan": "arctan",
+    "sinh": "sinh",
+    "cosh": "cosh",
+    "tanh": "tanh",
     "sec": "sec",
     "csc": "csc",
     "cot": "cot",
     "log": "log",
     "ln": "ln",
     "lim": "lim",
+    "min": "min",
+    "max": "max",
+    "arg": "arg",
+    "argmin": "argmin",
+    "argmax": "argmax",
+    "exp": "exp",
+    "det": "det",
+    "gcd": "gcd",
+    "lcm": "lcm",
+    "Pr": "Pr",
+    "lceil": "⌈",
+    "rceil": "⌉",
+    "lfloor": "⌊",
+    "rfloor": "⌋",
+    "langle": "〈",
+    "rangle": "〉",
 }
 
 
-_NARY_EQN = {"sum": "sum", "prod": "prod", "int": "int", "iint": "iint"}
-_FUNCTION_COMMANDS = {"sin", "cos", "tan", "sec", "csc", "cot", "log", "ln"}
+_NARY_EQN = {
+    "sum": "sum",
+    "prod": "prod",
+    "int": "int",
+    "iint": "dint",
+    "iiint": "tint",
+    "oint": "oint",
+}
+_FUNCTION_COMMANDS = {
+    "sin",
+    "cos",
+    "tan",
+    "arcsin",
+    "arccos",
+    "arctan",
+    "sinh",
+    "cosh",
+    "tanh",
+    "sec",
+    "csc",
+    "cot",
+    "log",
+    "ln",
+    "min",
+    "max",
+    "arg",
+    "argmin",
+    "argmax",
+    "exp",
+    "det",
+    "gcd",
+    "lcm",
+    "Pr",
+}
 _LATEX_SPACING_COMMANDS = {
     ",",
     ":",
@@ -461,20 +594,65 @@ _LATEX_SPACING_COMMANDS = {
     "thickspace",
 }
 _LATEX_NEGATIVE_SPACING_COMMANDS = {"!"}
+_LATEX_IGNORED_COMMANDS = {
+    "limits",
+    "nolimits",
+    "displaystyle",
+    "textstyle",
+    "scriptstyle",
+    "scriptscriptstyle",
+}
+_LATEX_DELIMITER_SIZE_COMMANDS = {
+    "big",
+    "Big",
+    "bigg",
+    "Bigg",
+    "bigl",
+    "bigr",
+    "Bigl",
+    "Bigr",
+    "biggl",
+    "biggr",
+    "Biggl",
+    "Biggr",
+}
+_NEGATED_COMMANDS = {
+    "in": "∉",
+    "subset": "⊄",
+    "supset": "⊅",
+    "subseteq": "⊈",
+    "supseteq": "⊉",
+    "=": "!=",
+}
 _ACCENT_EQN = {
     "overline": "bar",
     "bar": "bar",
     "underline": "under",
     "vec": "vec",
     "overrightarrow": "vec",
+    "overleftrightarrow": "dyad",
     "widehat": "hat",
     "hat": "hat",
+    "widetilde": "tilde",
     "tilde": "tilde",
+    "acute": "acute",
+    "grave": "grave",
     "dot": "dot",
     "ddot": "ddot",
     "check": "check",
 }
-_TEXT_WRAPPER_COMMANDS = {"mathrm", "mathbf", "text", "operatorname"}
+_TEXT_WRAPPER_COMMANDS = {
+    "mathrm",
+    "mathbf",
+    "text",
+    "operatorname",
+    "mathcal",
+    "mathsf",
+    "mathtt",
+    "mathit",
+    "mathnormal",
+    "boldsymbol",
+}
 _MATHBB_MAP = str.maketrans(
     {
         "N": "ℕ",
@@ -484,6 +662,68 @@ _MATHBB_MAP = str.maketrans(
         "C": "ℂ",
     }
 )
+_EQN_SPACED_TOKENS = {
+    "SIM",
+    "SIMEQ",
+    "CONG",
+    "PROPTO",
+    "ASYMP",
+    "PREC",
+    "SUCC",
+    "OPLUS",
+    "OMINUS",
+    "OTIMES",
+    "ODIV",
+    "ODOT",
+    "LOR",
+    "LAND",
+    "FORALL",
+    "EXIST",
+    "EMPTYSET",
+    "larrow",
+    "<->",
+    "RARROW",
+    "LARROW",
+    "LRARROW",
+    "uparrow",
+    "downarrow",
+    "UPARROW",
+    "DOWNARROW",
+    "udarrow",
+    "UDARROW",
+    "MAPSTO",
+    "HOOKLEFT",
+    "HOOKRIGHT",
+    "NEARROW",
+    "NWARROW",
+    "SEARROW",
+    "SWARROW",
+    "times",
+    "cdot",
+    "div",
+    "approx",
+    "angle",
+    "triangle",
+    "parallel",
+    "perp",
+    "because",
+    "therefore",
+}
+
+
+def _append_eqn_token(output: list[str], token: str, source: str, next_cursor: int) -> None:
+    if token not in _EQN_SPACED_TOKENS:
+        output.append(token)
+        return
+    if output:
+        previous = output[-1]
+        if previous and not previous.endswith((" ", "(", "[", "{")) and previous[-1] not in "+-*/=<>^_":
+            output.append(" ")
+    output.append(token)
+    if next_cursor < len(source):
+        next_char = source[next_cursor]
+        if not next_char.isspace() and next_char not in ".,;:)]}+-*/=<>^_":
+            output.append(" ")
 
 
 def _normalize_hancom_eqn_script(script: str) -> str:
@@ -562,7 +802,40 @@ def _hancom_eqn_script(source: str) -> str | None:
                     output.append(" ")
                 cursor = next_cursor
                 continue
-            if name in _LATEX_NEGATIVE_SPACING_COMMANDS:
+            if name in _LATEX_NEGATIVE_SPACING_COMMANDS or name in _LATEX_IGNORED_COMMANDS:
+                cursor = next_cursor
+                continue
+            if name in _LATEX_DELIMITER_SIZE_COMMANDS:
+                delimiter = _read_latex_delimiter(expr, next_cursor)
+                if delimiter is None:
+                    return None
+                token, cursor = delimiter
+                output.append(_display_delimiter(token))
+                continue
+            if name == "not":
+                lookahead = _skip_spaces(expr, next_cursor)
+                negated = _read_command(expr, lookahead)
+                if negated is not None and negated[0] in _NEGATED_COMMANDS:
+                    output.append(_NEGATED_COMMANDS[negated[0]])
+                    cursor = negated[1]
+                    continue
+                if lookahead < len(expr) and expr[lookahead] in _NEGATED_COMMANDS:
+                    output.append(_NEGATED_COMMANDS[expr[lookahead]])
+                    cursor = lookahead + 1
+                    continue
+                output.append("not")
+                cursor = next_cursor
+                continue
+            if name in {"pmod", "pod"}:
+                modulus = _read_latex_arg(expr, next_cursor)
+                if modulus is None:
+                    return None
+                body = _hancom_eqn_script(modulus[0]) or modulus[0].strip()
+                output.append(f" mod {body}")
+                cursor = modulus[1]
+                continue
+            if name == "bmod":
+                output.append(" mod ")
                 cursor = next_cursor
                 continue
             if name == "begin":
@@ -586,10 +859,10 @@ def _hancom_eqn_script(source: str) -> str | None:
                 output.append(f"{_display_delimiter(begin_token)}{body_script}{_display_delimiter(end_token)}")
                 continue
             if name in {"frac", "dfrac", "tfrac"}:
-                numerator = _read_braced(expr, next_cursor)
+                numerator = _read_latex_arg(expr, next_cursor)
                 if numerator is None:
                     return None
-                denominator = _read_braced(expr, numerator[1])
+                denominator = _read_latex_arg(expr, numerator[1])
                 if denominator is None:
                     return None
                 num = _hancom_eqn_script(numerator[0])
@@ -612,7 +885,7 @@ def _hancom_eqn_script(source: str) -> str | None:
                     output.append(f"^{degree}sqrt {{{body}}}")
                     cursor = base[1]
                     continue
-                base = _read_braced(expr, next_cursor)
+                base = _read_braced(expr, next_cursor) or _read_radical_arg(expr, next_cursor)
                 if base is None:
                     return None
                 body = _hancom_eqn_script(base[0])
@@ -622,16 +895,35 @@ def _hancom_eqn_script(source: str) -> str | None:
                 cursor = base[1]
                 continue
             if name in {"binom", "dbinom", "tbinom"}:
-                top = _read_braced(expr, next_cursor)
+                top = _read_latex_arg(expr, next_cursor)
                 if top is None:
                     return None
-                bottom = _read_braced(expr, top[1])
+                bottom = _read_latex_arg(expr, top[1])
                 if bottom is None:
                     return None
                 upper = _hancom_eqn_script(top[0]) or top[0].strip()
                 lower = _hancom_eqn_script(bottom[0]) or bottom[0].strip()
                 output.append(f"{{{upper}}} choose {{{lower}}}")
                 cursor = bottom[1]
+                continue
+            if name in {"boxed", "fbox"}:
+                base = _read_braced(expr, next_cursor)
+                if base is None:
+                    return None
+                body = _hancom_eqn_script(base[0])
+                output.append(f"BOX {{{body}}}" if body is not None else f"BOX {{{base[0].strip()}}}")
+                cursor = base[1]
+                continue
+            if name in {"overbrace", "underbrace"}:
+                base = _read_braced(expr, next_cursor)
+                if base is None:
+                    return None
+                body = _hancom_eqn_script(base[0])
+                command_name = "OVERBRACE" if name == "overbrace" else "UNDERBRACE"
+                output.append(
+                    f"{command_name} {{{body}}}" if body is not None else f"{command_name} {{{base[0].strip()}}}"
+                )
+                cursor = base[1]
                 continue
             if name in _ACCENT_EQN:
                 base = _read_braced(expr, next_cursor)
@@ -662,7 +954,7 @@ def _hancom_eqn_script(source: str) -> str | None:
                 cursor = next_cursor
                 continue
             if name in _EQN_COMMANDS:
-                output.append(_EQN_COMMANDS[name])
+                _append_eqn_token(output, _EQN_COMMANDS[name], expr, next_cursor)
                 if name in _FUNCTION_COMMANDS and next_cursor < len(expr) and expr[next_cursor] == "\\":
                     output.append(" ")
                 cursor = next_cursor
@@ -762,9 +1054,9 @@ def _equation_size(script: str) -> tuple[int, int]:
     height = 1300
     if " over " in text or "sqrt" in text or "choose" in text:
         height = 2100
-    if any(token in text for token in ("int", "sum", "prod", "lim")):
+    if any(token in text for token in ("int", "dint", "tint", "oint", "sum", "prod", "lim")):
         height = max(height, 2300)
-    if any(token in text for token in ("int_", "sum_", "prod_", "lim_")) or ("^{" in text and "_" in text):
+    if any(token in text for token in ("int_", "dint_", "tint_", "oint_", "sum_", "prod_", "lim_")) or ("^{" in text and "_" in text):
         height = max(height, 2700)
     if len(text) > 90:
         height = max(height, 1900)

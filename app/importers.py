@@ -290,10 +290,20 @@ def _import_pdf_recognized(
             )
             if geometry_split is not None:
                 geometry_stem, geometry_choices = geometry_split
+                geometry_placeholder_count = _placeholder_count_in_fields(geometry_stem, geometry_choices)
+                text_placeholder_count = _placeholder_count_in_fields(stem_text, choices)
+                geometry_nonempty = sum(1 for choice in geometry_choices if str(choice or "").strip())
+                text_nonempty = sum(1 for choice in choices if str(choice or "").strip())
                 if (
-                    len(geometry_choices) >= len(choices)
-                    and _placeholder_count_in_fields(geometry_stem, geometry_choices)
-                    < _placeholder_count_in_fields(stem_text, choices)
+                    (
+                        len(geometry_choices) >= len(choices)
+                        and geometry_placeholder_count < text_placeholder_count
+                    )
+                    or (
+                        len(geometry_choices) > len(choices)
+                        and geometry_placeholder_count <= text_placeholder_count
+                        and geometry_nonempty >= max(text_nonempty, min(4, len(geometry_choices)))
+                    )
                 ):
                     stem_text, choices = geometry_stem, geometry_choices
             geometry_stem = _repair_pdf_stem_fractions_from_geometry(stem_text, pdf_line_geometries)
@@ -1089,10 +1099,27 @@ def _pdf_choice_from_geometry_body(
     denominator: str | None,
 ) -> str:
     text = str(body or "").strip()
+    sample_label = PDF_CHOICE_FRACTION_LABELS[0]
+
+    def fraction(num: str, den: str, sign: str = "") -> str:
+        return f"{sign}\\frac{{{num.strip()}}}{{{den.strip()}}}"
+
     if not any(char in text for char in PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS):
+        body_denominator = text
+        sign = ""
+        if body_denominator.startswith(("-", "\u2212")):
+            sign = "-"
+            body_denominator = body_denominator[1:].strip()
+        if numerator and body_denominator and _pdf_choice_fraction_part(body_denominator):
+            return fraction(numerator, body_denominator, sign)
+        if numerator and denominator and (not text or text in {"-", "\u2212", "+"}):
+            return fraction(numerator, denominator, "-" if text in {"-", "\u2212"} else "")
+        if numerator and denominator and not text:
+            return fraction(numerator, denominator)
         return _normalize_pdf_choice_body(text)
-    exponent_match = PDF_CHOICE_EXPONENT_FRACTION_RE.match(f"①{text}")
-    fraction_match = PDF_CHOICE_FRACTION_RE.match(f"①{text}")
+
+    exponent_match = PDF_CHOICE_EXPONENT_FRACTION_RE.match(f"{sample_label}{text}")
+    fraction_match = PDF_CHOICE_FRACTION_RE.match(f"{sample_label}{text}")
     if exponent_match and numerator and denominator and _pdf_choice_exponent_base(exponent_match.group("base")):
         return f"{exponent_match.group('base')}^{{\\frac{{{numerator}}}{{{denominator}}}}}"
     if fraction_match:
@@ -1148,7 +1175,17 @@ def _split_stem_and_choices_from_pdf_geometry(
         body = str(entry["body"])
         numerator: str | None = None
         denominator: str | None = None
-        if any(char in body for char in PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS):
+        body_text = body.strip()
+        has_placeholder = any(char in body_text for char in PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS)
+        body_is_sign = body_text in {"-", "\u2212", "+"}
+        body_can_be_denominator = bool(
+            body_text
+            and not body_is_sign
+            and _pdf_choice_fraction_part(body_text.lstrip("-\u2212+"))
+        )
+        needs_above_part = has_placeholder or not body_text or body_is_sign or body_can_be_denominator
+        needs_below_part = has_placeholder or not body_text or body_is_sign
+        if needs_above_part:
             numerator_item = _nearest_pdf_choice_part(
                 indexed_lines,
                 label_index=int(entry["index"]),
@@ -1160,6 +1197,7 @@ def _split_stem_and_choices_from_pdf_geometry(
             if numerator_item is not None:
                 used.add(numerator_item[0])
                 numerator = numerator_item[1]
+        if needs_below_part:
             denominator_item = _nearest_pdf_choice_part(
                 indexed_lines,
                 label_index=int(entry["index"]),

@@ -309,6 +309,39 @@ def _patch_hwpx_native_math_linesegs(path: Path) -> int:
     return total
 
 
+def _save_hwpx_with_hancom_compat(doc: Any, path: Path, *, native_math: bool) -> None:
+    """Save a python-hwpx document after applying Hancom 2024 safety sidecars."""
+
+    from hwpx.tools.package_validator import validate_editor_open_safety
+
+    from .pdf_layout_writer import _patch_hancom_compatibility
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), suffix=target.suffix + ".tmp")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        tmp_path.write_bytes(doc._to_bytes_for_validation())
+        _patch_hancom_compatibility(tmp_path)
+        if native_math:
+            _patch_hwpx_native_math_linesegs(tmp_path)
+
+        report = validate_editor_open_safety(tmp_path)
+        if not report.ok:
+            raise ValueError("Generated HWPX package failed open-safety validation: " + report.summary)
+        os.replace(tmp_path, target)
+        mark_clean = getattr(doc, "_mark_save_clean", None)
+        if callable(mark_clean):
+            mark_clean()
+    except BaseException:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def _is_passage_label(label: Any) -> bool:
     return bool(_PASSAGE_LABEL_RE.match(str(label or "")))
 
@@ -1394,9 +1427,7 @@ def write_hwpx(
                     para(line, "body")
                 para("")
 
-    doc.save_to_path(str(path))
-    if native_math:
-        _patch_hwpx_native_math_linesegs(Path(path))
+    _save_hwpx_with_hancom_compat(doc, Path(path), native_math=native_math)
 
 
 def _add_table(

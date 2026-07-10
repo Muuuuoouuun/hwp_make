@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
-MATH_OPERATOR = r"(?:->|=>|\\(?:to|le|leq|ge|geq|ne|neq|cdot|times|div|pm|mp|approx|in|notin|cup|cap|subset|supset|subseteq|supseteq|circ|mid|vert)(?![A-Za-z])|[+\-*\/=<>≤≥≠≈×÷±∈∉∪∩⊂⊃⊆⊇∘^!])"
+MATH_OPERATOR = r"(?:->|=>|\\(?:to|le|leq|ge|geq|ne|neq|cdot|times|div|pm|mp|approx|sim|simeq|cong|equiv|propto|in|notin|cup|cap|subset|supset|subseteq|supseteq|circ|mid|vert)(?![A-Za-z])|[+\-*\/=<>≤≥≠≈×÷±∈∉∪∩⊂⊃⊆⊇∘^!])"
 MATH_SYMBOL = r"[√∑∏∫∞≤≥≠≈±×÷∠△∥⊥∈∉∪∩⊂⊃⊆⊇∘′″]"
 GREEK_RANGE = "α-ωΑ-Ω"
 GREEK_LETTER = rf"[{GREEK_RANGE}]"
@@ -28,7 +28,7 @@ MATH_OPERAND = (
 LATEX_GROUP_CONTENT = r"(?:[^{}\n]|\\[A-Za-z]+(?:\{[^{}\n]{0,120}\})?|\{[^{}\n]{0,120}\}){0,180}"
 LATEX_WRAPPED_OPERAND = rf"\\(?:mathrm|mathbb|mathbf|text|operatorname)\{{{LATEX_GROUP_CONTENT}\}}"
 LATEX_WRAPPED_FUNCTION_PATTERN = rf"{LATEX_WRAPPED_OPERAND}\([^()\n]{{0,120}}\)"
-LATEX_LEFT_RIGHT_PATTERN = r"\\left[\s\S]{1,1200}?\\right(?:\\[{}]|\S)?"
+LATEX_LEFT_RIGHT_PATTERN = r"\\left[\s\S]{1,1200}?\\right(?:\\[A-Za-z]+|\\[{}]|\S)?"
 LATEX_WRAPPED_LEFT_RIGHT_PATTERN = rf"{LATEX_WRAPPED_OPERAND}\s*{LATEX_LEFT_RIGHT_PATTERN}"
 LATEX_WRAPPED_EXPRESSION_PATTERN = rf"(?:{MATH_OPERAND}|{LATEX_WRAPPED_OPERAND})\s*{MATH_OPERATOR}\s*(?:{MATH_OPERAND}|{LATEX_WRAPPED_OPERAND})(?:\s*{MATH_OPERATOR}\s*(?:{MATH_OPERAND}|{LATEX_WRAPPED_OPERAND}))*"
 LATEX_FRACTION_PATTERN = rf"\\(?:frac|dfrac|tfrac)\{{{LATEX_GROUP_CONTENT}\}}\{{{LATEX_GROUP_CONTENT}\}}"
@@ -52,33 +52,39 @@ UNICODE_NARY_PATTERN = (
     rf"(?:\s*{LATEX_NARY_BODY_PATTERN})?"
 )
 LATEX_NARY_PATTERN = (
-    r"\\(?:sum|prod|int|iint)(?![A-Za-z])"
+    r"\\(?:sum|prod|int|iint|iiint|oint)(?![A-Za-z])"
     r"(?:\s*[_^](?:\{[^{}\n]{0,120}\}|[a-zA-Z0-9]+)){0,2}"
     rf"(?:\s+{LATEX_NARY_BODY_PATTERN})?"
     rf"(?:\s*(?:{LATEX_SPACE_COMMAND_PATTERN}\s*)?d{IDENTIFIER})?"
 )
 LATEX_FUNCTION_PATTERN = (
-    r"\\(?:lim|log|ln|sin|cos|tan|sec|csc|cot)(?![A-Za-z])"
+    r"\\(?:lim|log|ln|sin|cos|tan|sec|csc|cot|arcsin|arccos|arctan|sinh|cosh|tanh"
+    r"|min|max|argmin|argmax|arg|exp|det|gcd|lcm|Pr)(?![A-Za-z])"
     r"(?:\s*[_^](?:\{[^{}\n]{0,120}\}|[a-zA-Z0-9]+)){0,2}"
     rf"(?:\s*{LATEX_NARY_BODY_PATTERN})?"
     rf"(?:\s*\{{{LATEX_GROUP_CONTENT}\}})?"
 )
 LATEX_FUNCTION_EXPRESSION_PATTERN = (
-    r"\\(?:lim|log|ln)(?![A-Za-z])"
+    r"\\(?:lim|log|ln|min|max|argmin|argmax|arg|exp|det|gcd|lcm|Pr)(?![A-Za-z])"
     r"(?:\s*[_^](?:\{[^{}\n]{0,120}\}|[a-zA-Z0-9]+)){0,2}"
     rf"(?:\s*{LATEX_NARY_BODY_PATTERN})?"
     rf"(?:\s*\{{{LATEX_GROUP_CONTENT}\}})?"
     rf"(?:\s*{MATH_OPERATOR}\s*(?:{LATEX_NARY_BODY_PATTERN}|{MATH_OPERAND}))+"
 )
 LATEX_COMMAND_PATTERN = (
-    r"\\(?:frac|dfrac|tfrac|sqrt|sum|prod|int|iint|lim|log|ln|sin|cos|tan|sec|csc|cot"
+    r"\\(?:frac|dfrac|tfrac|sqrt|sum|prod|int|iint|iiint|oint|lim|log|ln|sin|cos|tan|sec|csc|cot"
+    r"|arcsin|arccos|arctan|sinh|cosh|tanh|min|max|argmin|argmax|arg|exp|det|gcd|lcm|Pr"
     r"|alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi"
     r"|pi|varpi|rho|varrho|sigma|varsigma|tau|upsilon|phi|varphi|chi|psi|omega"
-    r"|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega|nabla|le|leq|ge|geq|ne|neq"
-    r"|approx|cdot|times|div|pm|mp|infty|overline|underline|overrightarrow|widehat"
-    r"|hat|tilde|dot|ddot|check|bar|vec|angle|triangle|parallel|perp|because|therefore"
-    r"|binom|dbinom|tbinom|mathrm|mathbb|mathbf|text|operatorname|in|notin|cup|cap"
-    r"|subset|supset|subseteq|supseteq|circ|mid|vert|lvert|rvert|lVert|rVert|cdots|ldots)(?![A-Za-z])"
+    r"|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega|nabla|partial|le|leq|ge|geq|ne|neq"
+    r"|approx|sim|simeq|cong|equiv|propto|asymp|ll|gg|prec|succ|cdot|times|div|pm|mp|infty|infinity"
+    r"|emptyset|varnothing|forall|exists|overline|underline|overrightarrow|overleftrightarrow|widehat"
+    r"|widetilde|acute|grave|hat|tilde|dot|ddot|check|bar|vec|boxed|fbox|overbrace|underbrace"
+    r"|Rightarrow|Leftarrow|Leftrightarrow|rightarrow|leftarrow|leftrightarrow|mapsto|uparrow|downarrow"
+    r"|angle|triangle|parallel|perp|because|therefore"
+    r"|binom|dbinom|tbinom|mathrm|mathbb|mathbf|text|operatorname|mathcal|mathsf|mathtt|mathit|boldsymbol|in|notin|cup|cap"
+    r"|subset|supset|subseteq|supseteq|circ|mid|vert|lvert|rvert|lVert|rVert"
+    r"|lceil|rceil|lfloor|rfloor|langle|rangle|cdots|ldots|pmod|bmod|pod|limits|nolimits)(?![A-Za-z])"
     r"(?:\s*(?:[_^](?:\{[^{}\n]{0,120}\}|[a-zA-Z0-9]+)|\{[^{}\n]{0,120}\}|\[[^\]\n]{0,80}\])){0,4}"
 )
 SUPER_SUB_PATTERN = rf"(?<![a-zA-Z0-9{GREEK_RANGE}])[a-zA-Z{GREEK_RANGE}][a-zA-Z0-9{GREEK_RANGE}]*[{PRIME_CHARS}]*(?:[_^](?:\{{[^{{}}\n]{{1,80}}\}}|[a-zA-Z0-9]+))+"
@@ -89,7 +95,7 @@ FORMULA_TOKEN_RE = re.compile(
             r"\$[^$\n]{1,2000}\$",
             r"\\\([^)]{1,2000}\\\)",
             r"\\\[[\s\S]{1,2400}?\\\]",
-            r"\\begin\{(?:aligned|matrix|cases|array|pmatrix|bmatrix)\}[\s\S]{1,2400}?\\end\{[a-zA-Z*]+\}",
+            r"\\begin\{(?:aligned|align|gathered|split|matrix|cases|array|pmatrix|bmatrix|vmatrix|Vmatrix)\}[\s\S]{1,2400}?\\end\{[a-zA-Z*]+\}",
             LATEX_WRAPPED_LEFT_RIGHT_PATTERN,
             LATEX_LEFT_RIGHT_PATTERN,
             LATEX_WRAPPED_FUNCTION_PATTERN,
