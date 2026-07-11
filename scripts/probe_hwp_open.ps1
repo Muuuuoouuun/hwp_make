@@ -6,6 +6,8 @@ param(
 
     [switch]$AllowAccessPrompt,
 
+    [string]$ExportPdfDirectory = "",
+
     [int]$TimeoutSeconds = 45
 )
 
@@ -134,9 +136,8 @@ function Invoke-Element($Element) {
     return $false
 }
 
-function Invoke-HwpAccessPrompt([string]$TargetPath) {
+function Invoke-HwpAccessPrompt([string[]]$TargetPaths) {
     if (-not $script:HwpProbeUiAvailable) { return $false }
-    $fileName = [System.IO.Path]::GetFileName($TargetPath)
     try {
         $root = [System.Windows.Automation.AutomationElement]::RootElement
         $windows = $root.FindAll(
@@ -148,7 +149,16 @@ function Invoke-HwpAccessPrompt([string]$TargetPath) {
             if ($title -notlike "*$NameHwp*") { continue }
             $texts = Read-ElementTexts $window
             $joined = $texts -join "`n"
-            if ($joined -notlike "*$fileName*" -and $joined -notlike "*$TargetPath*") { continue }
+            $matchesPath = $false
+            foreach ($targetPath in $TargetPaths) {
+                if (-not $targetPath) { continue }
+                $fileName = [System.IO.Path]::GetFileName($targetPath)
+                if ($joined -like "*$fileName*" -or $joined -like "*$targetPath*") {
+                    $matchesPath = $true
+                    break
+                }
+            }
+            if (-not $matchesPath) { continue }
             $allow = Find-ButtonByName $window $NameAllowAccess
             if ($null -ne $allow -and (Invoke-Element $allow)) {
                 Start-Sleep -Milliseconds 300
@@ -167,6 +177,8 @@ param(
 
     [Parameter(Mandatory = $true)]
     [string]$VisibleWindow,
+
+    [string]$OutputPdfPath = "",
 
     [Parameter(Mandatory = $true)]
     [string]$ResultPath
@@ -204,6 +216,26 @@ try {
         exit 1
     }
 
+    $savedPdf = $null
+    $pdfBytes = $null
+    if ($OutputPdfPath) {
+        if (Test-Path -LiteralPath $OutputPdfPath) {
+            Remove-Item -LiteralPath $OutputPdfPath -Force
+        }
+        $savedPdf = $hwp.SaveAs($OutputPdfPath, "PDF", "")
+        if ($savedPdf -eq $false -or -not (Test-Path -LiteralPath $OutputPdfPath)) {
+            Write-ProbeResult @{
+                Status = "fail"
+                Message = "Hwp.SaveAs PDF returned false or produced no file"
+                PageCount = $hwp.PageCount
+                OutputPdfPath = $OutputPdfPath
+                SecurityModuleRegistered = $securityModuleRegistered
+            }
+            exit 1
+        }
+        $pdfBytes = (Get-Item -LiteralPath $OutputPdfPath).Length
+    }
+
     if (-not [System.Convert]::ToBoolean($VisibleWindow)) {
         try { $hwp.XHwpWindows.Item(0).Visible = $false } catch {}
     }
@@ -214,6 +246,9 @@ try {
         Status = "ok"
         Message = "opened"
         PageCount = $pageCount
+        SavedPdf = $savedPdf
+        OutputPdfPath = $OutputPdfPath
+        PdfBytes = $pdfBytes
         SecurityModuleRegistered = $securityModuleRegistered
     }
     exit 0
@@ -237,7 +272,13 @@ try {
     return $path
 }
 
-function Invoke-HwpOpenProcess([string]$ResolvedPath, [bool]$ShowWindow, [int]$TimeoutSec, [bool]$AllowPrompt) {
+function Invoke-HwpOpenProcess(
+    [string]$ResolvedPath,
+    [string]$OutputPdfPath,
+    [bool]$ShowWindow,
+    [int]$TimeoutSec,
+    [bool]$AllowPrompt
+) {
     $childScript = New-ChildProbeScript
     $resultPath = Join-Path ([System.IO.Path]::GetTempPath()) ("hwp_make_probe_{0}.json" -f ([guid]::NewGuid().ToString("N")))
     $powershell = (Get-Command powershell.exe).Source
@@ -247,6 +288,7 @@ function Invoke-HwpOpenProcess([string]$ResolvedPath, [bool]$ShowWindow, [int]$T
         "-ExecutionPolicy", "Bypass",
         "-File", $childScript,
         "-TargetPath", $ResolvedPath,
+        "-OutputPdfPath", $OutputPdfPath,
         "-VisibleWindow", ([string]$ShowWindow),
         "-ResultPath", $resultPath
     )
@@ -259,7 +301,7 @@ function Invoke-HwpOpenProcess([string]$ResolvedPath, [bool]$ShowWindow, [int]$T
         $lastPromptNudge = (Get-Date).AddSeconds(-10)
         while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
             if ($AllowPrompt) {
-                if (Invoke-HwpAccessPrompt $ResolvedPath) {
+                if (Invoke-HwpAccessPrompt @($ResolvedPath, $OutputPdfPath)) {
                     $promptActions += 1
                 }
                 if (((Get-Date) - $lastPromptNudge).TotalSeconds -ge 2) {
@@ -311,6 +353,16 @@ function Invoke-HwpOpenProcess([string]$ResolvedPath, [bool]$ShowWindow, [int]$T
 
 $failed = $false
 $skipped = $false
+$resolvedPdfDirectory = ""
+if ($ExportPdfDirectory) {
+    try {
+        $pdfDirectory = New-Item -ItemType Directory -Path $ExportPdfDirectory -Force
+        $resolvedPdfDirectory = $pdfDirectory.FullName
+    } catch {
+        Write-Host "FAIL $ExportPdfDirectory - cannot create PDF output directory: $($_.Exception.Message)"
+        exit 1
+    }
+}
 
 foreach ($inputPath in $Path) {
     $resolved = $null
@@ -325,8 +377,13 @@ foreach ($inputPath in $Path) {
     Stop-HwpAutomationProcesses
     Start-Sleep -Milliseconds 500
     $beforePids = Get-HwpAutomationPids
+    $pdfOutputPath = ""
+    if ($resolvedPdfDirectory) {
+        $pdfName = ([System.IO.Path]::GetFileNameWithoutExtension($resolved)) + ".pdf"
+        $pdfOutputPath = Join-Path $resolvedPdfDirectory $pdfName
+    }
     try {
-        $result = Invoke-HwpOpenProcess $resolved ([bool]$Visible) $TimeoutSeconds ([bool]$AllowAccessPrompt)
+        $result = Invoke-HwpOpenProcess $resolved $pdfOutputPath ([bool]$Visible) $TimeoutSeconds ([bool]$AllowAccessPrompt)
         $status = [string]$result.Status
 
         if ($status -eq "ok") {
@@ -338,7 +395,11 @@ foreach ($inputPath in $Path) {
             if ($null -ne $result.AccessPromptsAllowed -and [int]$result.AccessPromptsAllowed -gt 0) {
                 $promptSuffix = " access_prompts_allowed=$($result.AccessPromptsAllowed)"
             }
-            Write-Host "OK $resolved$pageSuffix$promptSuffix"
+            $pdfSuffix = ""
+            if ($result.OutputPdfPath) {
+                $pdfSuffix = " pdf=$($result.OutputPdfPath) bytes=$($result.PdfBytes)"
+            }
+            Write-Host "OK $resolved$pageSuffix$pdfSuffix$promptSuffix"
         } elseif ($status -eq "skip") {
             Write-Host "SKIP $resolved - $($result.Message)"
             $skipped = $true

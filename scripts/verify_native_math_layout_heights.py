@@ -86,6 +86,18 @@ def _direct_equations(paragraph: ET.Element) -> list[tuple[ET.Element, str]]:
     return equations
 
 
+def _equation_width_placeholders(paragraph: ET.Element) -> list[str]:
+    placeholders: list[str] = []
+    for run in _direct_children(paragraph, "run"):
+        if not _direct_children(run, "equation"):
+            continue
+        for text_node in _direct_children(run, "t"):
+            value = text_node.text or ""
+            if value.isspace() and len(value) > 1:
+                placeholders.append(value)
+    return placeholders
+
+
 def _paragraph_lineseg_height(paragraph: ET.Element) -> int:
     heights: list[int] = []
     for array in _direct_children(paragraph, "linesegarray"):
@@ -296,6 +308,19 @@ def inspect_hwpx(path: Path) -> dict[str, object]:
                 cell = _nearest_ancestor(paragraph, parents, "tc")
                 cell_index = cell_indexes.get(cell) if cell is not None else None
                 cell_kind = _cell_kind(cell, parents) if cell is not None else None
+                for placeholder in _equation_width_placeholders(paragraph):
+                    issues.append(
+                        HeightIssue(
+                            kind="equation_width_placeholder",
+                            section=section_name,
+                            paragraph_id=paragraph_id,
+                            cell_index=cell_index,
+                            cell_kind=cell_kind,
+                            required_height=0,
+                            available_height=len(placeholder),
+                            script=sample_script[:180],
+                        )
+                    )
                 if required_height and available_height < required_height:
                     issues.append(
                         HeightIssue(
@@ -469,6 +494,9 @@ def inspect_hwpx(path: Path) -> dict[str, object]:
     balance_issues = [issue for issue in issues if issue.kind == "problem_vertical_balance"]
     content_overflow_issues = [issue for issue in issues if issue.kind == "problem_content_overflow"]
     page_overflow_issues = [issue for issue in issues if issue.kind == "logical_page_table_overflow"]
+    equation_placeholder_issues = [
+        issue for issue in issues if issue.kind == "equation_width_placeholder"
+    ]
     shortage_count = len(issues)
     return {
         "path": str(path),
@@ -487,6 +515,7 @@ def inspect_hwpx(path: Path) -> dict[str, object]:
         "problem_balance_shortage_count": len(balance_issues),
         "problem_content_overflow_count": len(content_overflow_issues),
         "logical_page_table_overflow_count": len(page_overflow_issues),
+        "equation_width_placeholder_count": len(equation_placeholder_issues),
         "shortage_count": shortage_count,
         "required_shortage_count": 0,
         "ok": direct_script_count > 0 and missing_script_count == 0 and shortage_count == 0,

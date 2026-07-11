@@ -151,10 +151,18 @@ def _geometry_metrics(sections: list[etree._Element], expected_pages: int) -> di
 
 
 def _line_spacing_metrics(header: etree._Element, subject: str, inspect: dict[str, Any]) -> dict[str, Any]:
+    spacing_nodes = [item for item in header.iter() if _local(item) == "lineSpacing"]
     values = [
         int(item.get("value") or 0)
-        for item in header.iter()
-        if _local(item) == "lineSpacing" and str(item.get("value") or "").isdigit()
+        for item in spacing_nodes
+        if str(item.get("value") or "").isdigit()
+        and str(item.get("type") or "PERCENT").upper() != "FIXED"
+    ]
+    fixed_values = [
+        int(item.get("value") or 0)
+        for item in spacing_nodes
+        if str(item.get("value") or "").isdigit()
+        and str(item.get("type") or "").upper() == "FIXED"
     ]
     non_compact = [value for value in values if value != 100]
     if subject == "korean":
@@ -165,6 +173,7 @@ def _line_spacing_metrics(header: etree._Element, subject: str, inspect: dict[st
         paragraph_profile_ok = 105 in values and 115 in values
     return {
         "paragraph_line_spacing_percentages": values,
+        "fixed_spacer_heights_hwp": fixed_values,
         "paragraph_profile_ok": paragraph_profile_ok,
         "equation_paragraph_count": int(inspect.get("math_paragraphs") or 0),
         "equation_lineseg_issue_count": int(inspect.get("math_lineseg_issue_count") or 0),

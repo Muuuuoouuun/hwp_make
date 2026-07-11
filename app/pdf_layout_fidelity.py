@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from collections import Counter
 import io
 from pathlib import Path
+import re
 from typing import Any
+import unicodedata
 
 import fitz
 import numpy as np
-from PIL import Image, ImageChops, ImageFilter, ImageStat
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageStat
 
 try:
     import rhwp
@@ -21,6 +24,23 @@ ASPECT_RATIO_TOLERANCE = 0.02
 LAYOUT_VIEW_BLUR_RADIUS = 1.0
 DETAILED_FOREGROUND_REFERENCE = 0.88
 DETAILED_LINE_TOLERANCE_PX = 6
+
+PDF_PDF_DEFAULT_RENDER_DPI = 96
+PDF_PDF_DUPLICATE_SIMILARITY_THRESHOLD = 0.985
+PDF_PDF_MINIMUM_ASSESSMENT_COVERAGE = 0.75
+PDF_PDF_SEMANTIC_WEIGHTS = {
+    "page_count": 20.0,
+    "text_preservation": 35.0,
+    "problem_number_preservation": 25.0,
+    "duplicate_pages": 10.0,
+    "central_divider": 10.0,
+}
+_FALLBACK_PROBLEM_MARKER_RE = re.compile(
+    r"^\s*(?:문제\s*)?[\[(]?([1-9][0-9]{0,2})[\]).．.](?:\s|$)"
+)
+_FALLBACK_KOREAN_PROBLEM_MARKER_RE = re.compile(
+    r"^\s*문제\s*([1-9][0-9]{0,2})(?:\s|$)"
+)
 
 
 def _render_hwpx_page(document: Any, page_index: int) -> Image.Image:
@@ -577,3 +597,1038 @@ def analyze_pdf_hwpx_fidelity(
         ),
         "pages": pages,
     }
+
+
+def _pdf_page_target_size(page: fitz.Page, dpi: int) -> tuple[int, int]:
+    scale = float(dpi) / 72.0
+    return (
+        max(1, int(round(float(page.rect.width) * scale))),
+        max(1, int(round(float(page.rect.height) * scale))),
+    )
+
+
+def _extract_pdf_text(page: fitz.Page) -> str:
+    try:
+        return str(page.get_text("text", sort=True) or "")
+    except TypeError:  # pragma: no cover - compatibility with older PyMuPDF
+        return str(page.get_text("text") or "")
+
+
+def _normalize_semantic_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(text or "")).casefold()
+    return "".join(
+        char
+        for char in normalized
+        if not char.isspace() and not unicodedata.category(char).startswith("P")
+    )
+
+
+def _text_ngram_counter(texts: list[str], ngram_size: int = 3) -> Counter[str]:
+    grams: Counter[str] = Counter()
+    for text in texts:
+        normalized = _normalize_semantic_text(text)
+        if not normalized:
+            continue
+        size = min(max(1, int(ngram_size)), len(normalized))
+        grams.update(
+            normalized[index : index + size]
+            for index in range(len(normalized) - size + 1)
+        )
+    return grams
+
+
+def _counter_overlap_metrics(
+    source: Counter[Any],
+    output: Counter[Any],
+) -> tuple[float, float, float, int]:
+    source_total = int(sum(source.values()))
+    output_total = int(sum(output.values()))
+    matched = int(sum((source & output).values()))
+    recall = matched / source_total if source_total else 0.0
+    precision = matched / output_total if output_total else 0.0
+    f1 = (
+        2.0 * recall * precision / (recall + precision)
+        if recall + precision > 0.0
+        else 0.0
+    )
+    return recall, precision, f1, matched
+
+
+def _text_preservation_metrics(
+    source_pages: list[str],
+    output_pages: list[str],
+) -> dict[str, Any]:
+    source_normalized = [_normalize_semantic_text(text) for text in source_pages]
+    output_normalized = [_normalize_semantic_text(text) for text in output_pages]
+    source_characters = sum(len(text) for text in source_normalized)
+    output_characters = sum(len(text) for text in output_normalized)
+    base: dict[str, Any] = {
+        "method": (
+            "NFKC/casefold text, punctuation and whitespace removed, "
+            "multiset character trigrams"
+        ),
+        "source_extracted_characters": source_characters,
+        "output_extracted_characters": output_characters,
+        "source_pages_with_text": sum(bool(text) for text in source_normalized),
+        "output_pages_with_text": sum(bool(text) for text in output_normalized),
+        "recall_weight": 0.8,
+        "precision_weight": 0.2,
+    }
+    if source_characters == 0:
+        return {
+            **base,
+            "status": "not_assessable",
+            "score": None,
+            "reason": "the source PDF exposes no extractable text; OCR was not inferred",
+        }
+
+    source_grams = _text_ngram_counter(source_pages)
+    output_grams = _text_ngram_counter(output_pages)
+    recall, precision, f1, matched = _counter_overlap_metrics(source_grams, output_grams)
+    score_ratio = recall * 0.8 + precision * 0.2
+    return {
+        **base,
+        "status": "assessed",
+        "score": round(score_ratio * 100.0, 2),
+        "source_ngrams": int(sum(source_grams.values())),
+        "output_ngrams": int(sum(output_grams.values())),
+        "matched_ngrams": matched,
+        "recall_ratio": round(recall, 4),
+        "precision_ratio": round(precision, 4),
+        "f1_ratio": round(f1, 4),
+    }
+
+
+def _fallback_problem_numbers(text: str) -> list[int]:
+    numbers: list[int] = []
+    for line in str(text or "").splitlines():
+        match = (
+            _FALLBACK_PROBLEM_MARKER_RE.match(line)
+            or _FALLBACK_KOREAN_PROBLEM_MARKER_RE.match(line)
+        )
+        if match:
+            number = int(match.group(1))
+            if 1 <= number <= 999:
+                numbers.append(number)
+    return numbers
+
+
+def _extract_problem_numbers(page: fitz.Page, text: str) -> list[int]:
+    """Reuse the PDF segmenter's marker filtering, with a local compatibility fallback."""
+
+    try:
+        from app.recognition.pdf_segment import (  # noqa: PLC0415 - optional private reuse
+            _extract_markers,
+            _extract_text_lines,
+            _filter_choice_like_markers,
+        )
+
+        lines = _extract_text_lines(page, 1.0)
+        markers = _extract_markers(lines, height_px=float(page.rect.height))
+        markers, _suppressed = _filter_choice_like_markers(
+            markers,
+            width_px=float(page.rect.width),
+            height_px=float(page.rect.height),
+        )
+        numbers = [int(marker["number"]) for marker in markers]
+        return numbers or _fallback_problem_numbers(text)
+    except Exception:
+        return _fallback_problem_numbers(text)
+
+
+def _problem_number_preservation_metrics(
+    source_pages: list[list[int]],
+    output_pages: list[list[int]],
+) -> dict[str, Any]:
+    source_numbers = [number for page in source_pages for number in page]
+    output_numbers = [number for page in output_pages for number in page]
+    source_unique = sorted(set(source_numbers))
+    output_unique = sorted(set(output_numbers))
+    base: dict[str, Any] = {
+        "method": "unique detected problem labels; multiplicity is reported but not scored",
+        "source_detected_occurrences": len(source_numbers),
+        "output_detected_occurrences": len(output_numbers),
+        "source_unique_numbers": source_unique,
+        "output_unique_numbers": output_unique,
+        "source_pages_with_numbers": sum(bool(page) for page in source_pages),
+        "output_pages_with_numbers": sum(bool(page) for page in output_pages),
+    }
+    if not source_unique:
+        return {
+            **base,
+            "status": "not_assessable",
+            "score": None,
+            "reason": "no reliable problem-number labels were detected in the source PDF",
+        }
+
+    source_counter = Counter(source_unique)
+    output_counter = Counter(output_unique)
+    recall, precision, f1, matched = _counter_overlap_metrics(source_counter, output_counter)
+    score_ratio = recall * 0.8 + precision * 0.2
+    source_occurrences = Counter(source_numbers)
+    output_occurrences = Counter(output_numbers)
+    occurrence_recall, occurrence_precision, occurrence_f1, occurrence_matched = (
+        _counter_overlap_metrics(source_occurrences, output_occurrences)
+    )
+    return {
+        **base,
+        "status": "assessed",
+        "score": round(score_ratio * 100.0, 2),
+        "matched_unique_numbers": matched,
+        "missing_numbers": sorted(set(source_unique) - set(output_unique)),
+        "unexpected_numbers": sorted(set(output_unique) - set(source_unique)),
+        "unique_recall_ratio": round(recall, 4),
+        "unique_precision_ratio": round(precision, 4),
+        "unique_f1_ratio": round(f1, 4),
+        "occurrence_matched": occurrence_matched,
+        "occurrence_recall_ratio": round(occurrence_recall, 4),
+        "occurrence_precision_ratio": round(occurrence_precision, 4),
+        "occurrence_f1_ratio": round(occurrence_f1, 4),
+    }
+
+
+def _divider_result(
+    *,
+    present: bool,
+    method: str | None = None,
+    normalized_x: float | None = None,
+    normalized_top: float | None = None,
+    normalized_bottom: float | None = None,
+    candidate_count: int = 0,
+) -> dict[str, Any]:
+    length_ratio = (
+        max(0.0, normalized_bottom - normalized_top)
+        if normalized_top is not None and normalized_bottom is not None
+        else None
+    )
+    return {
+        "present": present,
+        "method": method,
+        "normalized_x": round(normalized_x, 4) if normalized_x is not None else None,
+        "normalized_top": round(normalized_top, 4) if normalized_top is not None else None,
+        "normalized_bottom": (
+            round(normalized_bottom, 4) if normalized_bottom is not None else None
+        ),
+        "length_ratio": round(length_ratio, 4) if length_ratio is not None else None,
+        "candidate_count": int(candidate_count),
+    }
+
+
+def _vector_central_divider(page: fitz.Page) -> dict[str, Any] | None:
+    width = float(page.rect.width)
+    height = float(page.rect.height)
+    if width <= 0.0 or height <= 0.0:
+        return None
+
+    candidates: list[tuple[float, float, float]] = []
+
+    def add_candidate(x: float, top: float, bottom: float) -> None:
+        if bottom < top:
+            top, bottom = bottom, top
+        normalized_x = x / width
+        length_ratio = (bottom - top) / height
+        if abs(normalized_x - 0.5) <= 0.06 and length_ratio >= 0.30:
+            candidates.append((normalized_x, max(0.0, top / height), min(1.0, bottom / height)))
+
+    try:
+        drawings = page.get_drawings()
+    except Exception:
+        drawings = []
+    for drawing in drawings:
+        rect = drawing.get("rect")
+        if rect is not None:
+            rect_width = abs(float(rect.x1) - float(rect.x0))
+            if rect_width <= max(3.0, width * 0.015):
+                add_candidate(
+                    (float(rect.x0) + float(rect.x1)) / 2.0,
+                    float(rect.y0),
+                    float(rect.y1),
+                )
+        for item in drawing.get("items") or []:
+            if not item or item[0] != "l" or len(item) < 3:
+                continue
+            start, end = item[1], item[2]
+            if abs(float(start.x) - float(end.x)) > max(2.0, width * 0.005):
+                continue
+            add_candidate(
+                (float(start.x) + float(end.x)) / 2.0,
+                float(start.y),
+                float(end.y),
+            )
+    if not candidates:
+        return None
+
+    unique = {
+        (round(x, 4), round(top, 4), round(bottom, 4))
+        for x, top, bottom in candidates
+    }
+    best_x, best_top, best_bottom = max(
+        candidates,
+        key=lambda item: ((item[2] - item[1]), -abs(item[0] - 0.5)),
+    )
+    return _divider_result(
+        present=True,
+        method="vector",
+        normalized_x=best_x,
+        normalized_top=best_top,
+        normalized_bottom=best_bottom,
+        candidate_count=len(unique),
+    )
+
+
+def _longest_true_run(values: np.ndarray) -> int:
+    if values.size == 0 or not bool(values.any()):
+        return 0
+    padded = np.pad(values.astype(np.int8), (1, 1), constant_values=0)
+    transitions = np.diff(padded)
+    starts = np.flatnonzero(transitions == 1)
+    ends = np.flatnonzero(transitions == -1)
+    return int(np.max(ends - starts)) if starts.size and ends.size else 0
+
+
+def _raster_central_divider(image: Image.Image) -> dict[str, Any] | None:
+    mask = np.asarray(_foreground_mask(image), dtype=np.uint8) > 0
+    height, width = mask.shape
+    if width <= 0 or height <= 0:
+        return None
+    y0, y1 = int(height * 0.07), int(height * 0.95)
+    x0, x1 = int(width * 0.44), max(int(width * 0.56), int(width * 0.44) + 1)
+    body = mask[y0:y1, x0:x1]
+    if body.size == 0:
+        return None
+
+    candidates: list[tuple[float, float, int, np.ndarray]] = []
+    for local_x in range(body.shape[1]):
+        column = body[:, local_x]
+        occupancy = float(column.mean())
+        run_ratio = _longest_true_run(column) / max(1, body.shape[0])
+        if occupancy >= 0.30 and run_ratio >= 0.25:
+            candidates.append((run_ratio, occupancy, local_x, column))
+    if not candidates:
+        return None
+
+    run_ratio, occupancy, local_x, column = max(
+        candidates,
+        key=lambda item: (item[0], item[1], -abs((x0 + item[2]) / width - 0.5)),
+    )
+    active = np.flatnonzero(column)
+    top = (y0 + int(active[0])) / height
+    bottom = (y0 + int(active[-1]) + 1) / height
+    return {
+        **_divider_result(
+            present=True,
+            method="raster",
+            normalized_x=(x0 + local_x + 0.5) / width,
+            normalized_top=top,
+            normalized_bottom=bottom,
+            candidate_count=len(candidates),
+        ),
+        "column_occupancy_ratio": round(occupancy, 4),
+        "longest_run_ratio": round(run_ratio, 4),
+    }
+
+
+def _central_divider_metrics(page: fitz.Page, image: Image.Image) -> dict[str, Any]:
+    vector = _vector_central_divider(page)
+    if vector is not None:
+        return vector
+    raster = _raster_central_divider(image)
+    if raster is not None:
+        return raster
+    return _divider_result(present=False)
+
+
+def _divider_pair_score(source: dict[str, Any], output: dict[str, Any]) -> float:
+    source_present = bool(source.get("present"))
+    output_present = bool(output.get("present"))
+    if not source_present and not output_present:
+        return 100.0
+    if source_present != output_present:
+        return 0.0
+
+    source_x = float(source.get("normalized_x") or 0.5)
+    output_x = float(output.get("normalized_x") or 0.5)
+    x_delta = abs(source_x - output_x)
+    x_score = 1.0 if x_delta <= 0.03 else max(0.0, 1.0 - (x_delta - 0.03) / 0.05)
+    source_length = float(source.get("length_ratio") or 0.0)
+    output_length = float(output.get("length_ratio") or 0.0)
+    if source_length <= 0.0 and output_length <= 0.0:
+        length_score = 1.0
+    elif source_length <= 0.0 or output_length <= 0.0:
+        length_score = 0.0
+    else:
+        length_ratio = min(source_length, output_length) / max(source_length, output_length)
+        length_score = min(1.0, length_ratio / 0.75)
+    return round((x_score * 0.70 + length_score * 0.30) * 100.0, 2)
+
+
+def _page_duplicate_fingerprint(image: Image.Image) -> np.ndarray:
+    gray = image.convert("L")
+    y0, y1 = int(gray.height * 0.07), max(int(gray.height * 0.95), int(gray.height * 0.07) + 1)
+    body = gray.crop((0, y0, gray.width, y1))
+    mask = _foreground_mask(body).filter(ImageFilter.MaxFilter(3))
+    reduced = mask.resize((192, 256), Image.Resampling.BOX)
+    return np.asarray(reduced, dtype=np.uint8) >= 64
+
+
+def _fingerprint_similarity(left: np.ndarray, right: np.ndarray) -> float:
+    left_count = int(left.sum())
+    right_count = int(right.sum())
+    if left_count == 0 and right_count == 0:
+        return 1.0
+    if left_count == 0 or right_count == 0:
+        return 0.0
+    intersection = int(np.logical_and(left, right).sum())
+    return (2.0 * intersection) / (left_count + right_count)
+
+
+def _duplicate_page_pairs(
+    fingerprints: list[np.ndarray],
+    normalized_texts: list[str],
+    *,
+    threshold: float,
+) -> list[dict[str, Any]]:
+    pairs: list[dict[str, Any]] = []
+    for left_index in range(len(fingerprints)):
+        for right_index in range(left_index + 1, len(fingerprints)):
+            similarity = _fingerprint_similarity(
+                fingerprints[left_index], fingerprints[right_index]
+            )
+            if similarity < threshold:
+                continue
+            left_text = normalized_texts[left_index] if left_index < len(normalized_texts) else ""
+            right_text = (
+                normalized_texts[right_index]
+                if right_index < len(normalized_texts)
+                else ""
+            )
+            text_similarity: float | None = None
+            if left_text or right_text:
+                if not left_text or not right_text:
+                    continue
+                left_grams = _text_ngram_counter([left_text])
+                right_grams = _text_ngram_counter([right_text])
+                _recall, _precision, text_similarity, _matched = _counter_overlap_metrics(
+                    left_grams, right_grams
+                )
+                if text_similarity < 0.995:
+                    continue
+            pairs.append(
+                {
+                    "pages": [left_index + 1, right_index + 1],
+                    "visual_dice_ratio": round(similarity, 4),
+                    "text_f1_ratio": round(text_similarity, 4)
+                    if text_similarity is not None
+                    else None,
+                    "normalized_text_equal": bool(left_text and left_text == right_text),
+                }
+            )
+    return pairs
+
+
+def _difference_heatmap(source: Image.Image, output: Image.Image) -> Image.Image:
+    delta = np.asarray(
+        ImageChops.difference(source.convert("RGB"), output.convert("RGB")).convert("L"),
+        dtype=np.uint8,
+    )
+    intensity = np.clip(delta.astype(np.uint16) * 4, 0, 255).astype(np.uint8)
+    heatmap = np.full((*intensity.shape, 3), 255, dtype=np.uint8)
+    heatmap[:, :, 1] = 255 - intensity
+    heatmap[:, :, 2] = 255 - intensity
+    return Image.fromarray(heatmap, mode="RGB")
+
+
+def _missing_page_image(size: tuple[int, int], label: str) -> Image.Image:
+    image = Image.new("RGB", size, "white")
+    draw = ImageDraw.Draw(image)
+    text_bbox = draw.textbbox((0, 0), label)
+    text_width = text_bbox[2] - text_bbox[0]
+    text_height = text_bbox[3] - text_bbox[1]
+    draw.rectangle((0, 0, size[0] - 1, size[1] - 1), outline=(190, 40, 40), width=3)
+    draw.text(
+        ((size[0] - text_width) // 2, (size[1] - text_height) // 2),
+        label,
+        fill=(160, 20, 20),
+    )
+    return image
+
+
+def _comparison_image(
+    source: Image.Image,
+    output: Image.Image,
+    *,
+    page_number: int,
+) -> tuple[Image.Image, Image.Image, Image.Image]:
+    raw_diff = ImageChops.difference(source.convert("RGB"), output.convert("RGB"))
+    heatmap = _difference_heatmap(source, output)
+    labels = ("SOURCE", "HANCOM OUTPUT", "DIFFERENCE x4")
+    gap = 12
+    header_height = 30
+    width, height = source.size
+    canvas = Image.new(
+        "RGB",
+        (width * 3 + gap * 2, height + header_height),
+        (236, 238, 241),
+    )
+    draw = ImageDraw.Draw(canvas)
+    panels = (source, output, heatmap)
+    for index, (label, panel) in enumerate(zip(labels, panels)):
+        x = index * (width + gap)
+        draw.text((x + 8, 8), label, fill=(20, 24, 31))
+        canvas.paste(panel, (x, header_height))
+    draw.text((canvas.width - 78, 8), f"PAGE {page_number}", fill=(20, 24, 31))
+    return canvas, raw_diff, heatmap
+
+
+def _aggregate_raw_visual_metrics(
+    page_metrics: list[dict[str, Any]],
+    *,
+    target_visual_ratio: float,
+) -> dict[str, Any]:
+    ratio_keys = {
+        "visual_similarity_ratio": "visual_similarity_ratio",
+        "whole_page_visual_sync_ratio": "whole_page_visual_sync_ratio",
+        "layout_view_sync_ratio": "layout_view_sync_ratio",
+        "foreground_overlap_ratio": "foreground_overlap_ratio",
+        "strict_alignment_ratio": "strict_alignment_ratio",
+    }
+    result: dict[str, Any] = {
+        "pages_compared": len(page_metrics),
+        "target_minimum_strict_alignment_ratio": target_visual_ratio,
+        "note": (
+            "Raw rendered-pixel measurements only. White-page similarity can look high even "
+            "when content is missing, so these values are excluded from the semantic score."
+        ),
+    }
+    for output_name, metric_name in ratio_keys.items():
+        values = [float(page[metric_name]) for page in page_metrics]
+        result[f"mean_{output_name}"] = round(sum(values) / len(values), 4) if values else 0.0
+        result[f"minimum_{output_name}"] = round(min(values), 4) if values else 0.0
+    detailed = [float(page["detailed_layout_score"]) for page in page_metrics]
+    luma_diffs = [float(page["mean_abs_luma_diff"]) for page in page_metrics]
+    result["mean_detailed_layout_score"] = (
+        round(sum(detailed) / len(detailed), 2) if detailed else 0.0
+    )
+    result["minimum_detailed_layout_score"] = round(min(detailed), 2) if detailed else 0.0
+    result["maximum_mean_abs_luma_diff"] = round(max(luma_diffs), 3) if luma_diffs else 0.0
+    result["meets_target"] = bool(page_metrics) and (
+        float(result["minimum_strict_alignment_ratio"]) >= target_visual_ratio
+    )
+    return result
+
+
+def _page_count_component(source_count: int, output_count: int) -> dict[str, Any]:
+    maximum = max(source_count, output_count)
+    ratio = min(source_count, output_count) / maximum if maximum else 1.0
+    return {
+        "status": "assessed",
+        "score": round(ratio * 100.0, 2),
+        "source_page_count": source_count,
+        "output_page_count": output_count,
+        "exact_match": source_count == output_count,
+        "preserved_page_count_ratio": round(ratio, 4),
+        "missing_output_pages": list(range(output_count + 1, source_count + 1))
+        if source_count > output_count
+        else [],
+        "unexpected_output_pages": list(range(source_count + 1, output_count + 1))
+        if output_count > source_count
+        else [],
+    }
+
+
+def _duplicate_page_component(
+    source_pairs: list[dict[str, Any]],
+    output_pairs: list[dict[str, Any]],
+    *,
+    output_page_count: int,
+    threshold: float,
+) -> dict[str, Any]:
+    source_pair_keys = {tuple(pair["pages"]) for pair in source_pairs}
+    unexpected_pairs = [
+        pair for pair in output_pairs if tuple(pair["pages"]) not in source_pair_keys
+    ]
+    unexpected_duplicate_pages = sorted(
+        {int(pair["pages"][1]) for pair in unexpected_pairs}
+    )
+    denominator = max(1, output_page_count)
+    score_ratio = max(0.0, 1.0 - len(unexpected_duplicate_pages) / denominator)
+    return {
+        "status": "assessed",
+        "score": round(score_ratio * 100.0, 2),
+        "method": "body-region foreground Dice similarity",
+        "similarity_threshold": threshold,
+        "source_duplicate_pairs": source_pairs,
+        "output_duplicate_pairs": output_pairs,
+        "unexpected_output_duplicate_pairs": unexpected_pairs,
+        "unexpected_output_duplicate_pages": unexpected_duplicate_pages,
+        "has_unexpected_output_duplicates": bool(unexpected_pairs),
+    }
+
+
+def _central_divider_component(
+    page_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not page_results:
+        return {
+            "status": "not_assessable",
+            "score": None,
+            "reason": "there are no paired pages on which to compare the divider",
+            "pages": [],
+        }
+    scores = [float(page["score"]) for page in page_results]
+    mismatches = [int(page["page"]) for page in page_results if float(page["score"]) < 99.5]
+    return {
+        "status": "assessed",
+        "score": round(sum(scores) / len(scores), 2),
+        "method": "vector rule detection with a raster long-column fallback",
+        "source_present_pages": [
+            int(page["page"]) for page in page_results if page["source"].get("present")
+        ],
+        "output_present_pages": [
+            int(page["page"]) for page in page_results if page["output"].get("present")
+        ],
+        "mismatch_pages": mismatches,
+        "pages": page_results,
+    }
+
+
+def _semantic_implementation_summary(
+    components: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    assessed_weight = 0.0
+    weighted_points = 0.0
+    component_payload: dict[str, dict[str, Any]] = {}
+    for name, component in components.items():
+        weight = float(PDF_PDF_SEMANTIC_WEIGHTS[name])
+        payload = {"weight": weight, **component}
+        component_payload[name] = payload
+        score = component.get("score")
+        if component.get("status") == "assessed" and score is not None:
+            assessed_weight += weight
+            weighted_points += float(score) * weight
+
+    score = weighted_points / assessed_weight if assessed_weight else 0.0
+    total_weight = float(sum(PDF_PDF_SEMANTIC_WEIGHTS.values()))
+    conservative_score = weighted_points / total_weight if total_weight else 0.0
+    coverage = assessed_weight / total_weight if total_weight else 0.0
+    return {
+        "score": round(score, 2),
+        "conservative_score_unassessed_as_zero": round(conservative_score, 2),
+        "assessment_coverage_ratio": round(coverage, 4),
+        "assessed_weight": round(assessed_weight, 2),
+        "total_weight": round(total_weight, 2),
+        "unassessed_components": [
+            name
+            for name, component in component_payload.items()
+            if component.get("status") != "assessed"
+        ],
+        "methodology": (
+            "Weighted only across assessable semantic checks. The conservative score treats "
+            "unassessed checks as zero; assessment coverage must be read with the score."
+        ),
+        "components": component_payload,
+    }
+
+
+def analyze_pdf_pdf_fidelity(
+    source_pdf_path: str | Path,
+    output_pdf_path: str | Path,
+    output_dir: str | Path,
+    *,
+    render_dpi: int = PDF_PDF_DEFAULT_RENDER_DPI,
+    artifact_mode: str = "all",
+    target_visual_ratio: float = STRICT_ALIGNMENT_REVIEW_THRESHOLD,
+    target_semantic_score: float = 90.0,
+    minimum_assessment_coverage: float = PDF_PDF_MINIMUM_ASSESSMENT_COVERAGE,
+    duplicate_similarity_threshold: float = PDF_PDF_DUPLICATE_SIMILARITY_THRESHOLD,
+    source_page_limit: int | None = None,
+) -> dict[str, Any]:
+    """Compare an original PDF with a PDF saved by Hancom over every page.
+
+    Rendered-pixel measurements are intentionally kept outside the semantic
+    implementation score. The semantic score covers page count, extractable
+    text, detected problem labels, unexpected duplicate output pages, and the
+    central column divider. Unobservable text/labels remain unassessed and
+    lower the reported assessment coverage instead of receiving free credit.
+    """
+
+    allowed_artifact_modes = {"all", "comparisons", "failures", "none"}
+    if artifact_mode not in allowed_artifact_modes:
+        raise ValueError(
+            f"artifact_mode must be one of {sorted(allowed_artifact_modes)}, got {artifact_mode!r}"
+        )
+    if render_dpi <= 0:
+        raise ValueError("render_dpi must be positive")
+    if not 0.0 <= target_visual_ratio <= 1.0:
+        raise ValueError("target_visual_ratio must be between 0 and 1")
+    if not 0.0 <= target_semantic_score <= 100.0:
+        raise ValueError("target_semantic_score must be between 0 and 100")
+    if not 0.0 <= minimum_assessment_coverage <= 1.0:
+        raise ValueError("minimum_assessment_coverage must be between 0 and 1")
+    if not 0.0 < duplicate_similarity_threshold <= 1.0:
+        raise ValueError("duplicate_similarity_threshold must be in (0, 1]")
+    if source_page_limit is not None and source_page_limit <= 0:
+        raise ValueError("source_page_limit must be positive")
+
+    source_pdf_path = Path(source_pdf_path)
+    output_pdf_path = Path(output_pdf_path)
+    output_dir = Path(output_dir)
+    result_base: dict[str, Any] = {
+        "schema_version": 1,
+        "available": True,
+        "skipped": False,
+        "source_pdf": str(source_pdf_path.resolve()),
+        "output_pdf": str(output_pdf_path.resolve()),
+        "artifact_dir": str(output_dir.resolve()),
+        "artifact_mode": artifact_mode,
+        "render_dpi": render_dpi,
+        "target_visual_ratio": target_visual_ratio,
+        "target_semantic_score": target_semantic_score,
+        "minimum_assessment_coverage": minimum_assessment_coverage,
+        "duplicate_similarity_threshold": duplicate_similarity_threshold,
+        "source_page_limit": source_page_limit,
+    }
+
+    try:
+        if not source_pdf_path.is_file():
+            raise FileNotFoundError(f"source PDF not found: {source_pdf_path}")
+        if not output_pdf_path.is_file():
+            raise FileNotFoundError(f"output PDF not found: {output_pdf_path}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        with fitz.open(source_pdf_path) as source_document, fitz.open(
+            output_pdf_path
+        ) as output_document:
+            source_document_page_count = len(source_document)
+            source_page_count = min(
+                source_document_page_count,
+                source_page_limit or source_document_page_count,
+            )
+            output_page_count = len(output_document)
+            source_pages = [source_document[index] for index in range(source_page_count)]
+            source_text_pages = [_extract_pdf_text(page) for page in source_pages]
+            output_text_pages = [_extract_pdf_text(page) for page in output_document]
+            source_problem_pages = [
+                _extract_problem_numbers(page, source_text_pages[index])
+                for index, page in enumerate(source_pages)
+            ]
+            output_problem_pages = [
+                _extract_problem_numbers(page, output_text_pages[index])
+                for index, page in enumerate(output_document)
+            ]
+            source_normalized_pages = [
+                _normalize_semantic_text(text) for text in source_text_pages
+            ]
+            output_normalized_pages = [
+                _normalize_semantic_text(text) for text in output_text_pages
+            ]
+
+            pages: list[dict[str, Any]] = []
+            raw_page_metrics: list[dict[str, Any]] = []
+            source_fingerprints: list[np.ndarray] = []
+            output_fingerprints: list[np.ndarray] = []
+            divider_page_results: list[dict[str, Any]] = []
+            aspect_mismatch_pages: list[int] = []
+            represented_page_count = max(source_page_count, output_page_count)
+
+            for page_index in range(represented_page_count):
+                page_number = page_index + 1
+                source_page = (
+                    source_document[page_index] if page_index < source_page_count else None
+                )
+                output_page = (
+                    output_document[page_index] if page_index < output_page_count else None
+                )
+                reference_page = source_page if source_page is not None else output_page
+                if reference_page is None:  # pragma: no cover - PDFs cannot have a negative count
+                    continue
+                target_size = _pdf_page_target_size(reference_page, render_dpi)
+                source_image = (
+                    _render_pdf_page(source_page, target_size)
+                    if source_page is not None
+                    else None
+                )
+                output_image = (
+                    _render_pdf_page(output_page, target_size)
+                    if output_page is not None
+                    else None
+                )
+
+                if source_image is not None:
+                    source_fingerprints.append(_page_duplicate_fingerprint(source_image))
+                if output_image is not None:
+                    output_fingerprints.append(_page_duplicate_fingerprint(output_image))
+
+                source_divider = (
+                    _central_divider_metrics(source_page, source_image)
+                    if source_page is not None and source_image is not None
+                    else _divider_result(present=False)
+                )
+                output_divider = (
+                    _central_divider_metrics(output_page, output_image)
+                    if output_page is not None and output_image is not None
+                    else _divider_result(present=False)
+                )
+                divider_score: float | None = None
+                if source_page is not None and output_page is not None:
+                    divider_score = _divider_pair_score(source_divider, output_divider)
+                    divider_page_results.append(
+                        {
+                            "page": page_number,
+                            "score": divider_score,
+                            "source": source_divider,
+                            "output": output_divider,
+                        }
+                    )
+
+                metrics: dict[str, Any] | None = None
+                source_aspect: float | None = None
+                output_aspect: float | None = None
+                aspect_delta: float | None = None
+                if source_page is not None:
+                    source_aspect = _safe_aspect_ratio(
+                        float(source_page.rect.width), float(source_page.rect.height)
+                    )
+                if output_page is not None:
+                    output_aspect = _safe_aspect_ratio(
+                        float(output_page.rect.width), float(output_page.rect.height)
+                    )
+                if source_image is not None and output_image is not None:
+                    metrics = _page_metrics(source_image, output_image)
+                    raw_page_metrics.append(metrics)
+                    aspect_delta = abs(float(source_aspect) - float(output_aspect))
+                    if aspect_delta > ASPECT_RATIO_TOLERANCE:
+                        aspect_mismatch_pages.append(page_number)
+
+                source_page_text = (
+                    source_text_pages[page_index] if page_index < source_page_count else ""
+                )
+                output_page_text = (
+                    output_text_pages[page_index] if page_index < output_page_count else ""
+                )
+                page_text_metrics = _text_preservation_metrics(
+                    [source_page_text] if source_page is not None else [],
+                    [output_page_text] if output_page is not None else [],
+                )
+                source_page_numbers = (
+                    source_problem_pages[page_index] if page_index < source_page_count else []
+                )
+                output_page_numbers = (
+                    output_problem_pages[page_index] if page_index < output_page_count else []
+                )
+
+                comparison_status = (
+                    "paired"
+                    if source_page is not None and output_page is not None
+                    else "missing_output"
+                    if source_page is not None
+                    else "unexpected_output"
+                )
+                page_failure = comparison_status != "paired"
+                if metrics is not None:
+                    page_failure = page_failure or (
+                        float(metrics["strict_alignment_ratio"]) < target_visual_ratio
+                    )
+                if divider_score is not None:
+                    page_failure = page_failure or divider_score < 99.5
+                if page_text_metrics.get("status") == "assessed":
+                    page_failure = page_failure or float(page_text_metrics["score"]) < 90.0
+                page_failure = page_failure or set(source_page_numbers) != set(output_page_numbers)
+
+                save_comparison = artifact_mode in {"all", "comparisons"} or (
+                    artifact_mode == "failures" and page_failure
+                )
+                save_individual = artifact_mode == "all"
+                source_name = f"source_page_{page_number:03d}.png"
+                output_name = f"output_page_{page_number:03d}.png"
+                diff_name = f"diff_page_{page_number:03d}.png"
+                heatmap_name = f"heatmap_page_{page_number:03d}.png"
+                comparison_name = f"comparison_page_{page_number:03d}.png"
+
+                if save_individual and source_image is not None:
+                    source_image.save(output_dir / source_name)
+                if save_individual and output_image is not None:
+                    output_image.save(output_dir / output_name)
+                if save_comparison:
+                    source_panel = source_image or _missing_page_image(
+                        target_size, "NO SOURCE PAGE"
+                    )
+                    output_panel = output_image or _missing_page_image(
+                        target_size, "MISSING OUTPUT PAGE"
+                    )
+                    comparison, raw_diff, heatmap = _comparison_image(
+                        source_panel,
+                        output_panel,
+                        page_number=page_number,
+                    )
+                    comparison.save(output_dir / comparison_name)
+                    if save_individual:
+                        raw_diff.save(output_dir / diff_name)
+                        heatmap.save(output_dir / heatmap_name)
+                    comparison.close()
+                    raw_diff.close()
+                    heatmap.close()
+                    if source_image is None:
+                        source_panel.close()
+                    if output_image is None:
+                        output_panel.close()
+
+                pages.append(
+                    {
+                        "page": page_number,
+                        "comparison_status": comparison_status,
+                        "source_page_size_pt": [
+                            round(float(source_page.rect.width), 3),
+                            round(float(source_page.rect.height), 3),
+                        ]
+                        if source_page is not None
+                        else None,
+                        "output_page_size_pt": [
+                            round(float(output_page.rect.width), 3),
+                            round(float(output_page.rect.height), 3),
+                        ]
+                        if output_page is not None
+                        else None,
+                        "render_size_px": list(target_size),
+                        "source_page_aspect_ratio": round(source_aspect, 4)
+                        if source_aspect is not None
+                        else None,
+                        "output_page_aspect_ratio": round(output_aspect, 4)
+                        if output_aspect is not None
+                        else None,
+                        "aspect_ratio_delta": round(aspect_delta, 4)
+                        if aspect_delta is not None
+                        else None,
+                        "aspect_ratio_mismatch": bool(
+                            aspect_delta is not None
+                            and aspect_delta > ASPECT_RATIO_TOLERANCE
+                        ),
+                        "source_extracted_text_characters": len(
+                            _normalize_semantic_text(source_page_text)
+                        ),
+                        "output_extracted_text_characters": len(
+                            _normalize_semantic_text(output_page_text)
+                        ),
+                        "text_preservation": page_text_metrics,
+                        "source_problem_numbers": source_page_numbers,
+                        "output_problem_numbers": output_page_numbers,
+                        "central_divider": {
+                            "score": divider_score,
+                            "source": source_divider,
+                            "output": output_divider,
+                        },
+                        "raw_visual_metrics": metrics,
+                        "source_png": source_name
+                        if save_individual and source_image is not None
+                        else None,
+                        "output_png": output_name
+                        if save_individual and output_image is not None
+                        else None,
+                        "diff_png": diff_name if save_individual and save_comparison else None,
+                        "heatmap_png": heatmap_name
+                        if save_individual and save_comparison
+                        else None,
+                        "comparison_png": comparison_name if save_comparison else None,
+                    }
+                )
+                if source_image is not None:
+                    source_image.close()
+                if output_image is not None:
+                    output_image.close()
+
+        source_duplicate_pairs = _duplicate_page_pairs(
+            source_fingerprints,
+            source_normalized_pages,
+            threshold=duplicate_similarity_threshold,
+        )
+        output_duplicate_pairs = _duplicate_page_pairs(
+            output_fingerprints,
+            output_normalized_pages,
+            threshold=duplicate_similarity_threshold,
+        )
+        components = {
+            "page_count": _page_count_component(source_page_count, output_page_count),
+            "text_preservation": _text_preservation_metrics(
+                source_text_pages, output_text_pages
+            ),
+            "problem_number_preservation": _problem_number_preservation_metrics(
+                source_problem_pages, output_problem_pages
+            ),
+            "duplicate_pages": _duplicate_page_component(
+                source_duplicate_pairs,
+                output_duplicate_pairs,
+                output_page_count=output_page_count,
+                threshold=duplicate_similarity_threshold,
+            ),
+            "central_divider": _central_divider_component(divider_page_results),
+        }
+        semantic = _semantic_implementation_summary(components)
+        raw_visual = _aggregate_raw_visual_metrics(
+            raw_page_metrics,
+            target_visual_ratio=target_visual_ratio,
+        )
+
+        problem_component = components["problem_number_preservation"]
+        duplicate_component = components["duplicate_pages"]
+        divider_component = components["central_divider"]
+        review_flags: list[str] = []
+        if source_page_count != output_page_count:
+            review_flags.append("page_count_mismatch")
+        if aspect_mismatch_pages:
+            review_flags.append("aspect_ratio_mismatch")
+        text_component = components["text_preservation"]
+        if text_component.get("status") == "assessed" and float(
+            text_component.get("score") or 0.0
+        ) < target_semantic_score:
+            review_flags.append("text_preservation_below_target")
+        if problem_component.get("missing_numbers"):
+            review_flags.append("missing_problem_numbers")
+        if problem_component.get("unexpected_numbers"):
+            review_flags.append("unexpected_problem_numbers")
+        if duplicate_component.get("has_unexpected_output_duplicates"):
+            review_flags.append("unexpected_duplicate_output_pages")
+        if divider_component.get("mismatch_pages"):
+            review_flags.append("central_divider_mismatch")
+        if not raw_visual.get("meets_target"):
+            review_flags.append("raw_visual_below_target")
+        if float(semantic["score"]) < target_semantic_score:
+            review_flags.append("semantic_score_below_target")
+        if float(semantic["assessment_coverage_ratio"]) < minimum_assessment_coverage:
+            review_flags.append("low_semantic_assessment_coverage")
+
+        return {
+            **result_base,
+            "source_page_count": source_page_count,
+            "source_document_page_count": source_document_page_count,
+            "output_page_count": output_page_count,
+            "pages_compared": min(source_page_count, output_page_count),
+            "pages_represented": max(source_page_count, output_page_count),
+            "all_pages_analyzed": True,
+            "missing_output_pages": components["page_count"]["missing_output_pages"],
+            "unexpected_output_pages": components["page_count"][
+                "unexpected_output_pages"
+            ],
+            "aspect_ratio_tolerance": ASPECT_RATIO_TOLERANCE,
+            "aspect_ratio_mismatch_pages": aspect_mismatch_pages,
+            "raw_visual_metrics": raw_visual,
+            "semantic_implementation": semantic,
+            "semantic_implementation_score": semantic["score"],
+            "semantic_assessment_coverage_ratio": semantic[
+                "assessment_coverage_ratio"
+            ],
+            "review_flags": review_flags,
+            "needs_human_review": bool(review_flags),
+            "meets_target": not review_flags,
+            "pages": pages,
+        }
+    except Exception as exc:
+        return {
+            **result_base,
+            "error": f"{type(exc).__name__}: {exc}",
+            "meets_target": False,
+        }
+
+
+# Descriptive aliases for callers that name the Hancom leg explicitly.
+analyze_hancom_pdf_visual_fidelity = analyze_pdf_pdf_fidelity
+analyze_pdf_to_pdf_fidelity = analyze_pdf_pdf_fidelity
