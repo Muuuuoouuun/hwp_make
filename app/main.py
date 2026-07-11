@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import (
+    ai_api,
     collector,
     docx_writer,
     exam_templates,
@@ -42,6 +43,8 @@ class NoCacheStaticFiles(StaticFiles):
 
 app = FastAPI(title="HWP Make", version="0.1.0")
 storage.init_db()
+ai_api.initialize_ai_runtime()
+app.include_router(ai_api.router)
 
 app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 # 데이터 루트(DATA_DIR) 전체를 마운트하면 problems.sqlite3·user_settings.json까지 HTTP로

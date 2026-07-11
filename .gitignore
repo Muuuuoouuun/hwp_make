@@ -6,3 +6,5 @@ venv/
 .claude/
 data/
 *.log
+tmp/
+assets/fonts/shinmyeong-jungmyeongjo/
