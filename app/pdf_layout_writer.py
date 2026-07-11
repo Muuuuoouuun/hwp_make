@@ -3973,7 +3973,7 @@ def _drawing_table_regions(page: fitz.Page) -> list[fitz.Rect]:
                 continue
             p0, p1 = item[1], item[2]
             x0, y0, x1, y1 = float(p0.x), float(p0.y), float(p1.x), float(p1.y)
-            if max(y0, y1) < page.rect.height * 0.35:
+            if max(y0, y1) < page.rect.height * 0.13:
                 continue
             if abs(y1 - y0) <= 0.7 and abs(x1 - x0) >= 28:
                 rect = fitz.Rect(min(x0, x1), y0, max(x0, x1), y1)
@@ -4050,7 +4050,7 @@ def _drawing_table_regions(page: fitz.Page) -> list[fitz.Rect]:
         vertical = orientations.count("v")
         if horizontal < 3 or vertical < 2:
             continue
-        if bounds.width < page.rect.width * 0.18 or bounds.height < 28:
+        if bounds.width < page.rect.width * 0.10 or bounds.height < 28:
             continue
         if bounds.height > page.rect.height * 0.24:
             continue
@@ -4104,7 +4104,7 @@ def _flow_native_table_items(page: fitz.Page) -> list[dict[str, Any]]:
         grid_right = max(segment[1] for segment in horizontal_segments)
         x_boundaries = _cluster_flow_axes([grid_left, grid_right, *vertical_axes])
         x_boundaries = [value for value in x_boundaries if grid_left - 2 <= value <= grid_right + 2]
-        if len(x_boundaries) < 4:
+        if len(x_boundaries) < 3:
             continue
 
         spans: list[dict[str, Any]] = []
@@ -4118,7 +4118,11 @@ def _flow_native_table_items(page: fitz.Page) -> list[dict[str, Any]]:
                 if region.contains(center):
                     spans.append({**span, "text": text, "bbox": tuple(bbox)})
         region_text = " ".join(str(span.get("text") or "") for span in spans)
-        if _latin_ratio(region_text) < 0.35:
+        private_use_ratio = (
+            sum(1 for char in region_text if 0xE000 <= ord(char) <= 0xF8FF)
+            / max(1, len(region_text))
+        )
+        if _latin_ratio(region_text) < 0.35 and private_use_ratio < 0.35:
             continue
         text_x_clusters = _cluster_flow_axes(
             [
@@ -4128,7 +4132,7 @@ def _flow_native_table_items(page: fitz.Page) -> list[dict[str, Any]]:
             ],
             tolerance=18.0,
         )
-        if len(text_x_clusters) < 3:
+        if len(text_x_clusters) < 2:
             continue
 
         has_label_column = any(
@@ -5700,6 +5704,7 @@ def write_pdf_flow_hwpx(
     rasterize_tables: bool = True,
     preserve_repeated_headers: bool = False,
     force_font: str | None = None,
+    subject_title_override: str | None = None,
 ) -> dict[str, int]:
     """Write a Hancom-viewer-safe editable HWPX using regular paragraphs/tables."""
     pdf_path = Path(pdf_path)
@@ -5766,7 +5771,7 @@ def write_pdf_flow_hwpx(
             margin_right_mm = 7.0
             margin_top_mm = 7.0
             margin_bottom_mm = 7.0
-        subject_title = _flow_subject_title(pdf_path)
+        subject_title = subject_title_override or _flow_subject_title(pdf_path)
         font_scale = coordinate_scale * (
             1.0 if subject_title == "영어 영역" else 1.08
         )
@@ -6105,6 +6110,13 @@ def _structured_editable_text_fragments(items: list[dict[str, Any]]) -> list[str
                 if isinstance(block, dict)
                 for line in (block.get("lines") or [])
             ),
+            *(
+                str(cell or "")
+                for table in (item.get("native_tables") or [])
+                if isinstance(table, dict)
+                for row in (table.get("text_rows") or [])
+                for cell in row
+            ),
         ]
         for value in values:
             for line in value.splitlines():
@@ -6124,18 +6136,18 @@ def _structured_page_continuation_text(
     *,
     first_problem_top_px: float,
     page_height_px: int,
+    column_index: int,
 ) -> str:
-    """Recover editable continuation text above the first numbered problem."""
+    """Recover editable preamble text above the first problem in one column."""
     if page_height_px <= 0:
         return ""
     first_top_ratio = float(first_problem_top_px) / float(page_height_px)
-    if first_top_ratio <= 0.30:
+    if first_top_ratio <= 0.15:
         return ""
     scale = float(page_height_px) / max(1.0, float(page.rect.height))
     start_y = float(page.rect.height) * 0.13
     end_y = max(start_y, float(first_problem_top_px) / max(0.01, scale) - 4.0)
-    left_lines: list[tuple[float, float, str]] = []
-    right_lines: list[tuple[float, float, str]] = []
+    selected_lines: list[tuple[float, float, str]] = []
     for block in page.get_text("dict").get("blocks") or []:
         if int(block.get("type") or 0) != 0:
             continue
@@ -6149,6 +6161,9 @@ def _structured_page_continuation_text(
                 continue
             if bottom < start_y or top >= end_y:
                 continue
+            is_left_column = (left + right) / 2.0 < float(page.rect.width) / 2.0
+            if is_left_column != (column_index == 1):
+                continue
             text = "".join(str(span.get("text") or "") for span in line.get("spans") or []).strip()
             if not text:
                 continue
@@ -6160,12 +6175,93 @@ def _structured_page_continuation_text(
             ):
                 continue
             item = (top, left, text)
-            if (left + right) / 2.0 < float(page.rect.width) / 2.0:
-                left_lines.append(item)
-            else:
-                right_lines.append(item)
-    ordered = [*sorted(left_lines), *sorted(right_lines)]
-    return "\n".join(text for _top, _left, text in ordered)
+            selected_lines.append(item)
+    return "\n".join(text for _top, _left, text in sorted(selected_lines))
+
+
+def _structured_page_continuation_figures(
+    page: fitz.Page,
+    *,
+    first_problem_top_px: float,
+    page_height_px: int,
+    column_index: int,
+) -> list[tuple[bytes, fitz.Rect]]:
+    """Extract source figure images that belong to a column preamble."""
+    if page_height_px <= 0:
+        return []
+    scale = float(page_height_px) / max(1.0, float(page.rect.height))
+    start_y = float(page.rect.height) * 0.13
+    end_y = max(start_y, float(first_problem_top_px) / max(0.01, scale) - 4.0)
+    figures: list[tuple[bytes, fitz.Rect]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for info in page.get_image_info(xrefs=True):
+        values = info.get("bbox") or []
+        if len(values) != 4:
+            continue
+        rect = fitz.Rect(*(float(value) for value in values))
+        if rect.width < 24.0 or rect.height < 20.0:
+            continue
+        if rect.y0 < start_y or rect.y1 > end_y + 2.0:
+            continue
+        is_left_column = (rect.x0 + rect.x1) / 2.0 < float(page.rect.width) / 2.0
+        if is_left_column != (column_index == 1):
+            continue
+        key = tuple(int(round(value * 10.0)) for value in (rect.x0, rect.y0, rect.x1, rect.y1))
+        if key in seen:
+            continue
+        seen.add(key)
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), clip=rect, alpha=False)
+        figures.append((pixmap.tobytes("png"), rect))
+    return figures
+
+
+def _structured_page_postamble_text(
+    page: fitz.Page,
+    *,
+    last_problem_bottom_px: float,
+    page_height_px: int,
+    column_index: int,
+) -> str:
+    """Recover a final-column instruction block below the last problem."""
+    if page_height_px <= 0:
+        return ""
+    scale = float(page_height_px) / max(1.0, float(page.rect.height))
+    start_y = float(last_problem_bottom_px) / max(0.01, scale) + 4.0
+    end_y = float(page.rect.height) * 0.92
+    if start_y >= end_y:
+        return ""
+    selected_lines: list[tuple[float, float, str]] = []
+    for block in page.get_text("dict").get("blocks") or []:
+        if int(block.get("type") or 0) != 0:
+            continue
+        for line in block.get("lines") or []:
+            bbox = line.get("bbox") or []
+            if len(bbox) != 4:
+                continue
+            left, top, right, bottom = (float(value) for value in bbox)
+            if bottom < start_y or top >= end_y:
+                continue
+            is_left_column = (left + right) / 2.0 < float(page.rect.width) / 2.0
+            if is_left_column != (column_index == 1):
+                continue
+            text = "".join(
+                str(span.get("text") or "") for span in line.get("spans") or []
+            ).strip()
+            if not text:
+                continue
+            compact = re.sub(r"\s+", "", text)
+            if (
+                re.fullmatch(r"\d{1,2}", compact)
+                or "저작권" in compact
+                or "한국교육과정평가원" in compact
+            ):
+                continue
+            selected_lines.append((top, left, text))
+    text = "\n".join(value for _top, _left, value in sorted(selected_lines))
+    compact = re.sub(r"\s+", "", text)
+    if "확인사항" not in compact and "답안지" not in compact:
+        return ""
+    return text
 
 
 def _structured_pdf_body_lines(page: fitz.Page) -> list[dict[str, Any]]:
@@ -6662,6 +6758,107 @@ def _attach_structured_math_condition_blocks(pdf_path: Path, items: list[dict[st
                 item["condition_blocks"] = blocks
 
 
+def _attach_structured_math_native_tables(
+    pdf_path: Path,
+    items: list[dict[str, Any]],
+) -> None:
+    """Attach source grid tables to the problem whose geometry contains them."""
+    items_by_page: dict[int, list[dict[str, Any]]] = {}
+    for item in items:
+        items_by_page.setdefault(int(item.get("source_page") or 0), []).append(item)
+
+    with fitz.open(pdf_path) as source_pdf:
+        for source_page, page_items in items_by_page.items():
+            if source_page <= 0 or source_page > len(source_pdf):
+                continue
+            page = source_pdf[source_page - 1]
+            candidates = _flow_native_table_items(page)
+            if not candidates:
+                continue
+            problem_rects: list[tuple[dict[str, Any], fitz.Rect, dict[str, Any]]] = []
+            for item in page_items:
+                layout = item.get("layout") if isinstance(item.get("layout"), dict) else {}
+                bbox_px = layout.get("bbox_px") or []
+                page_info = layout.get("page") if isinstance(layout.get("page"), dict) else {}
+                page_width_px = float(page_info.get("width_px") or 0.0)
+                page_height_px = float(page_info.get("height_px") or 0.0)
+                if len(bbox_px) != 4 or page_width_px <= 0 or page_height_px <= 0:
+                    continue
+                rect = fitz.Rect(
+                    float(bbox_px[0]) / page_width_px * page.rect.width,
+                    float(bbox_px[1]) / page_height_px * page.rect.height,
+                    (float(bbox_px[0]) + float(bbox_px[2]))
+                    / page_width_px
+                    * page.rect.width,
+                    (float(bbox_px[1]) + float(bbox_px[3]))
+                    / page_height_px
+                    * page.rect.height,
+                )
+                problem_rects.append((item, rect, page_info))
+
+            for candidate in candidates:
+                table_rect = fitz.Rect(candidate.get("grid_bbox") or candidate.get("bbox"))
+                center = fitz.Point(
+                    (table_rect.x0 + table_rect.x1) / 2.0,
+                    (table_rect.y0 + table_rect.y1) / 2.0,
+                )
+                owner = next(
+                    (
+                        (item, page_info)
+                        for item, problem_rect, page_info in problem_rects
+                        if problem_rect.contains(center)
+                    ),
+                    None,
+                )
+                if owner is None:
+                    continue
+                item, page_info = owner
+                page_height_px = float(page_info.get("height_px") or 0.0)
+                text_rows: list[list[str]] = []
+                for row in candidate.get("cells") or []:
+                    text_row: list[str] = []
+                    for cell_spans in row:
+                        cell_lines = _flow_lines_from_spans(list(cell_spans))
+                        text = " ".join(
+                            _line_text(line).strip()
+                            for line in cell_lines
+                            if _line_text(line).strip()
+                        )
+                        text_row.append(
+                            math_text.normalize_recognized_math_layout_text(text)
+                        )
+                    text_rows.append(text_row)
+                if not text_rows or not any(any(cell for cell in row) for row in text_rows):
+                    continue
+                item.setdefault("native_tables", []).append(
+                    {
+                        "bbox_pt": [
+                            float(table_rect.x0),
+                            float(table_rect.y0),
+                            float(table_rect.width),
+                            float(table_rect.height),
+                        ],
+                        "top_px": (
+                            float(table_rect.y0)
+                            / max(1.0, float(page.rect.height))
+                            * page_height_px
+                        ),
+                        "bottom_px": (
+                            float(table_rect.y1)
+                            / max(1.0, float(page.rect.height))
+                            * page_height_px
+                        ),
+                        "x_boundaries": [
+                            float(value) for value in candidate.get("x_boundaries") or []
+                        ],
+                        "y_boundaries": [
+                            float(value) for value in candidate.get("y_boundaries") or []
+                        ],
+                        "text_rows": text_rows,
+                    }
+                )
+
+
 def _write_structured_math_page_tables(
     pdf_path: Path,
     output_path: Path,
@@ -6759,7 +6956,7 @@ def _write_structured_math_page_tables(
         for run in list(paragraph.element.findall(_q("run"))):
             paragraph.element.remove(run)
         runs: list[tuple[str, str]] = []
-        match = re.match(r"^(\d+\.)\s*(.*)$", value, re.DOTALL)
+        match = re.match(r"^(\d+\.)\s+(.+)$", value, re.DOTALL)
         if match:
             runs.append((match.group(1) + "  ", bold_cp))
             if match.group(2):
@@ -6899,6 +7096,101 @@ def _write_structured_math_page_tables(
         # Hancom reserves the full height of this inline picture. A synthetic
         # spacer here counts the image twice and can create a physical page.
         return picture_height
+
+    def append_native_math_table(
+        cell: Any,
+        item: dict[str, Any],
+        table_index: int,
+        width: int,
+    ) -> int:
+        native_tables = list(item.get("native_tables") or [])
+        if table_index >= len(native_tables):
+            return 0
+        table_item = native_tables[table_index]
+        text_rows = [list(row) for row in table_item.get("text_rows") or []]
+        if not text_rows:
+            return 0
+        row_count = len(text_rows)
+        column_count = max((len(row) for row in text_rows), default=0)
+        if row_count <= 0 or column_count <= 0:
+            return 0
+        x_boundaries = [float(value) for value in table_item.get("x_boundaries") or []]
+        y_boundaries = [float(value) for value in table_item.get("y_boundaries") or []]
+        source_widths = (
+            [
+                max(1.0, x_boundaries[index + 1] - x_boundaries[index])
+                for index in range(column_count)
+            ]
+            if len(x_boundaries) == column_count + 1
+            else [1.0] * column_count
+        )
+        source_heights = (
+            [
+                max(1.0, y_boundaries[index + 1] - y_boundaries[index])
+                for index in range(row_count)
+            ]
+            if len(y_boundaries) == row_count + 1
+            else [18.0] * row_count
+        )
+        source_width = sum(source_widths)
+        table_width = min(
+            max(_pt_to_hwp(72.0), _pt_to_hwp(source_width * coordinate_scale)),
+            max(1, width - _pt_to_hwp(6.0)),
+        )
+        width_total = max(1.0, sum(source_widths))
+        column_widths = [
+            max(1, int(round(table_width * source_width / width_total)))
+            for source_width in source_widths
+        ]
+        column_widths[-1] = max(1, table_width - sum(column_widths[:-1]))
+        row_heights = [
+            max(_pt_to_hwp(15.0), _pt_to_hwp(value * coordinate_scale))
+            for value in source_heights
+        ]
+        table_height = sum(row_heights)
+        host_para = _ensure_flow_para_format(
+            doc,
+            para_styles,
+            alignment="LEFT",
+            line_spacing_percent=100,
+            left_margin_hwp=max(0, (width - table_width) // 2),
+        )
+        host = cell.add_paragraph(
+            "",
+            para_pr_id_ref=host_para,
+            char_pr_id_ref=small_cp,
+        )
+        table = host.add_table(
+            row_count,
+            column_count,
+            width=table_width,
+            height=table_height,
+            border_fill_id_ref=box_border_fill,
+        )
+        try:
+            table.set_column_widths(source_widths)
+        except Exception:
+            pass
+        for row_index in range(row_count):
+            row = text_rows[row_index]
+            for column_index in range(column_count):
+                target = table.cell(row_index, column_index)
+                target.set_size(column_widths[column_index], row_heights[row_index])
+                _set_cell_border_fill(target, box_border_fill)
+                _set_cell_margin(
+                    target,
+                    left_mm=0.25,
+                    right_mm=0.25,
+                    top_mm=0.1,
+                    bottom_mm=0.1,
+                )
+                _clear_cell_paragraphs(target)
+                value = str(row[column_index] if column_index < len(row) else "").strip()
+                if value:
+                    append_math_paragraph(target, value, center=True, small=True)
+                else:
+                    target.set_text("", split_paragraphs=True)
+        return table_height
 
     def append_running_header(
         *,
@@ -7123,6 +7415,16 @@ def _write_structured_math_page_tables(
                     "bottom": bottom,
                 }
             )
+        native_tables = list(item.get("native_tables") or [])
+        for table_index, table_item in enumerate(native_tables):
+            component_events.append(
+                {
+                    "type": "native_table",
+                    "index": table_index,
+                    "top": float(table_item.get("top_px") or float("inf")),
+                    "bottom": float(table_item.get("bottom_px") or float("inf")),
+                }
+            )
         choices = [str(choice or "") for choice in item.get("choices") or []]
         if choices:
             choice_top = float(component_geometry.get("choice_top") or float("inf"))
@@ -7161,6 +7463,13 @@ def _write_structured_math_page_tables(
                     int(event["index"]),
                     width,
                     page,
+                )
+            elif event["type"] == "native_table":
+                content_height += append_native_math_table(
+                    cell,
+                    item,
+                    int(event["index"]),
+                    width,
                 )
             else:
                 content_height += append_choices(cell, choices, width)
@@ -7383,7 +7692,11 @@ def _write_structured_math_page_tables(
                     _clear_cell_paragraphs(problem_cell)
                     content_height = append_problem(problem_cell, item, inner_width, page)
                     item_height = max(item_height, content_height)
-                    if item_index == len(column_items) - 1:
+                    is_last_problem_before_postamble = all(
+                        bool((following.get("layout") or {}).get("postamble"))
+                        for following in column_items[item_index + 1 :]
+                    )
+                    if item_index == len(column_items) - 1 or is_last_problem_before_postamble:
                         remaining_height = max(
                             0,
                             body_height - used_height - _pt_to_hwp(14.0),
@@ -7648,66 +7961,193 @@ def write_pdf_structured_hwpx(
 
     continuation_count = 0
     continuation_lines = 0
+    postamble_count = 0
+    postamble_lines = 0
     items_by_page: dict[int, list[dict[str, Any]]] = {}
     for item in items:
         items_by_page.setdefault(int(item.get("source_page") or 0), []).append(item)
-    continuation_items: dict[int, dict[str, Any]] = {}
+    continuation_items: dict[tuple[int, int], dict[str, Any]] = {}
     with fitz.open(pdf_path) as source_pdf:
         for source_page, page_items in items_by_page.items():
             if direct_text_flow:
                 break
             if source_page <= 0 or source_page > len(source_pdf):
                 continue
-            first_layout = min(
-                (item.get("layout") for item in page_items if isinstance(item.get("layout"), dict)),
-                key=lambda layout: float((layout.get("bbox_px") or [0.0, 0.0])[1]),
-                default=None,
-            )
-            if not first_layout:
-                continue
-            bbox_px = first_layout.get("bbox_px") or []
-            page_info = first_layout.get("page") if isinstance(first_layout.get("page"), dict) else {}
-            if len(bbox_px) != 4:
-                continue
-            continuation = _structured_page_continuation_text(
-                source_pdf[source_page - 1],
-                first_problem_top_px=float(bbox_px[1]),
-                page_height_px=int(page_info.get("height_px") or 0),
-            )
-            if not continuation.strip():
-                continue
-            continuation_count += 1
-            continuation_lines += len(continuation.splitlines())
-            continuation_items[source_page] = {
-                "number": "",
-                "title": "",
-                "stem": continuation,
-                "choices": [],
-                "image_paths": [],
-                "tables": [],
-                "source_page": source_page,
-                "layout": {
+            page = source_pdf[source_page - 1]
+            for column_index in (1, 2):
+                column_layouts = [
+                    item.get("layout")
+                    for item in page_items
+                    if isinstance(item.get("layout"), dict)
+                    and int((item.get("layout") or {}).get("column_index") or 1)
+                    == column_index
+                ]
+                first_layout = min(
+                    column_layouts,
+                    key=lambda layout: float((layout.get("bbox_px") or [0.0, 0.0])[1]),
+                    default=None,
+                )
+                if not first_layout:
+                    continue
+                bbox_px = first_layout.get("bbox_px") or []
+                page_info = (
+                    first_layout.get("page")
+                    if isinstance(first_layout.get("page"), dict)
+                    else {}
+                )
+                if len(bbox_px) != 4:
+                    continue
+                page_width_px = int(page_info.get("width_px") or 0)
+                page_height_px = int(page_info.get("height_px") or 0)
+                continuation = _structured_page_continuation_text(
+                    page,
+                    first_problem_top_px=float(bbox_px[1]),
+                    page_height_px=page_height_px,
+                    column_index=column_index,
+                )
+                figure_data = _structured_page_continuation_figures(
+                    page,
+                    first_problem_top_px=float(bbox_px[1]),
+                    page_height_px=page_height_px,
+                    column_index=column_index,
+                )
+                if not continuation.strip() and not figure_data:
+                    continue
+                continuation = math_text.normalize_recognized_math_layout_text(
+                    continuation
+                )
+                image_paths: list[str] = []
+                figure_boxes_px: list[list[float]] = []
+                scale_x = float(page_width_px) / max(1.0, float(page.rect.width))
+                scale_y = float(page_height_px) / max(1.0, float(page.rect.height))
+                for figure_index, (figure_png, figure_rect) in enumerate(
+                    figure_data,
+                    start=1,
+                ):
+                    relative_path = importers._save_image_bytes(
+                        f"{output_path.stem}_p{source_page}_c{column_index}_preamble_fig{figure_index}.png",
+                        figure_png,
+                    )
+                    if not relative_path:
+                        continue
+                    image_paths.append(relative_path)
+                    figure_boxes_px.append(
+                        [
+                            float(figure_rect.x0) * scale_x,
+                            float(figure_rect.y0) * scale_y,
+                            float(figure_rect.width) * scale_x,
+                            float(figure_rect.height) * scale_y,
+                        ]
+                    )
+                    figure_count += 1
+                continuation_count += 1
+                continuation_lines += len(continuation.splitlines())
+                start_y_px = float(page_height_px) * 0.13
+                column_width_px = float(page_width_px) / 2.0
+                continuation_items[(source_page, column_index)] = {
+                    "number": "",
+                    "title": "",
+                    "stem": continuation,
+                    "choices": [],
+                    "image_paths": image_paths,
+                    "tables": [],
                     "source_page": source_page,
-                    "column_index": 1,
-                    "column_count": 2,
-                    "continuation": True,
-                    "page": page_info,
-                    "bbox_px": [0.0, float(source_pdf[source_page - 1].rect.height) * 0.13, float(source_pdf[source_page - 1].rect.width), float(bbox_px[1])],
-                },
-            }
+                    "layout": {
+                        "source_page": source_page,
+                        "column_index": column_index,
+                        "column_count": 2,
+                        "continuation": True,
+                        "page": page_info,
+                        "figure_boxes_px": figure_boxes_px,
+                        "bbox_px": [
+                            0.0 if column_index == 1 else column_width_px,
+                            start_y_px,
+                            column_width_px,
+                            max(1.0, float(bbox_px[1]) - start_y_px),
+                        ],
+                    },
+                }
+    with fitz.open(pdf_path) as source_pdf:
+        for source_page, page_items in items_by_page.items():
+            if direct_text_flow:
+                break
+            if source_page <= 0 or source_page > len(source_pdf):
+                continue
+            page = source_pdf[source_page - 1]
+            for column_index in (1, 2):
+                column_items = [
+                    item
+                    for item in page_items
+                    if isinstance(item.get("layout"), dict)
+                    and int((item.get("layout") or {}).get("column_index") or 1)
+                    == column_index
+                    and len((item.get("layout") or {}).get("bbox_px") or []) == 4
+                ]
+                last_item = max(
+                    column_items,
+                    key=lambda item: float(
+                        ((item.get("layout") or {}).get("bbox_px") or [0, 0, 0, 0])[1]
+                    )
+                    + float(
+                        ((item.get("layout") or {}).get("bbox_px") or [0, 0, 0, 0])[3]
+                    ),
+                    default=None,
+                )
+                if not last_item:
+                    continue
+                last_layout = last_item.get("layout") or {}
+                bbox_px = last_layout.get("bbox_px") or []
+                page_info = (
+                    last_layout.get("page")
+                    if isinstance(last_layout.get("page"), dict)
+                    else {}
+                )
+                page_width_px = int(page_info.get("width_px") or 0)
+                page_height_px = int(page_info.get("height_px") or 0)
+                anchor_bottoms = [
+                    float(anchor.get("bottom") or 0.0)
+                    for anchor in (last_layout.get("line_anchors_px") or [])
+                    if float(anchor.get("bottom") or 0.0)
+                    <= float(page_height_px) * 0.90
+                ]
+                last_bottom_px = (
+                    max(anchor_bottoms)
+                    if anchor_bottoms
+                    else float(bbox_px[1]) + float(bbox_px[3])
+                )
+                postamble = _structured_page_postamble_text(
+                    page,
+                    last_problem_bottom_px=last_bottom_px,
+                    page_height_px=page_height_px,
+                    column_index=column_index,
+                )
+                if not postamble.strip():
+                    continue
+                postamble_count += 1
+                postamble_lines += len(postamble.splitlines())
+                last_item["stem"] = (
+                    str(last_item.get("stem") or "").rstrip()
+                    + "\n\n"
+                    + postamble.strip()
+                )
+                last_layout["postamble_attached"] = True
     if continuation_items:
         merged_items: list[dict[str, Any]] = []
-        emitted_pages: set[int] = set()
+        emitted_columns: set[tuple[int, int]] = set()
         for item in items:
             source_page = int(item.get("source_page") or 0)
-            if source_page not in emitted_pages and source_page in continuation_items:
-                merged_items.append(continuation_items[source_page])
-                emitted_pages.add(source_page)
+            layout = item.get("layout") if isinstance(item.get("layout"), dict) else {}
+            column_index = int(layout.get("column_index") or 1)
+            key = (source_page, column_index)
+            if key not in emitted_columns and key in continuation_items:
+                merged_items.append(continuation_items[key])
+                emitted_columns.add(key)
             merged_items.append(item)
         items = merged_items
 
     if resolved_template == "kice_math" and native_math:
         _attach_structured_math_condition_blocks(pdf_path, items)
+        _attach_structured_math_native_tables(pdf_path, items)
 
     output_source_page_numbers: list[int] = []
     source_page_seen: set[int] = set()
@@ -7750,6 +8190,10 @@ def write_pdf_structured_hwpx(
             rasterize_tables=False,
             preserve_repeated_headers=True,
             force_font="HY신명조",
+            subject_title_override={
+                "kice_korean": "국어 영역",
+                "kice_english": "영어 영역",
+            }.get(resolved_template),
         )
     elif resolved_template == "kice_math" and native_math:
         _write_structured_math_page_tables(
@@ -7793,6 +8237,13 @@ def write_pdf_structured_hwpx(
                 if isinstance(block, dict)
                 for line in (block.get("lines") or [])
             ),
+            *(
+                str(cell or "")
+                for table in (item.get("native_tables") or [])
+                if isinstance(table, dict)
+                for row in (table.get("text_rows") or [])
+                for cell in row
+            ),
         ]
         for value in values:
             source_math_segments += sum(1 for _segment, is_math in math_text.split_math_text(value) if is_math)
@@ -7824,6 +8275,8 @@ def write_pdf_structured_hwpx(
         "output_problem_count": problem_item_count,
         "continuation_block_count": continuation_count,
         "continuation_line_count": continuation_lines,
+        "postamble_block_count": postamble_count,
+        "postamble_line_count": postamble_lines,
         "output_page_count_target": len(output_source_page_numbers),
         "output_source_page_numbers": output_source_page_numbers,
         "source_layout_items": source_layout_items,
