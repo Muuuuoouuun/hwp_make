@@ -3654,6 +3654,98 @@ def _merge_flow_images(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return merged
 
 
+def _expand_flow_image_frames(
+    page: fitz.Page, images: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Include a nearby regional figure frame without rasterizing the page."""
+    verticals: list[tuple[float, float, float]] = []
+    horizontals: list[tuple[float, float, float]] = []
+    for drawing in page.get_drawings():
+        for item in drawing.get("items", []):
+            if not item or item[0] != "l":
+                continue
+            p0, p1 = item[1], item[2]
+            x0, y0, x1, y1 = float(p0.x), float(p0.y), float(p1.x), float(p1.y)
+            if abs(x1 - x0) <= 0.7 and abs(y1 - y0) >= 20.0:
+                verticals.append(((x0 + x1) / 2.0, min(y0, y1), max(y0, y1)))
+            elif abs(y1 - y0) <= 0.7 and abs(x1 - x0) >= 30.0:
+                horizontals.append(((y0 + y1) / 2.0, min(x0, x1), max(x0, x1)))
+
+    if not verticals or not horizontals:
+        return images
+
+    expanded: list[dict[str, Any]] = []
+    matrix = fitz.Matrix(2.0, 2.0)
+    for image in images:
+        bbox = _item_bbox(image)
+        left_candidates = [
+            line
+            for line in verticals
+            if bbox.x0 - 22.0 <= line[0] <= bbox.x0 + 2.0
+            and line[1] <= bbox.y0 + 5.0
+            and line[2] >= bbox.y1 - 2.0
+        ]
+        right_candidates = [
+            line
+            for line in verticals
+            if bbox.x1 - 2.0 <= line[0] <= bbox.x1 + 22.0
+            and line[1] <= bbox.y0 + 5.0
+            and line[2] >= bbox.y1 - 2.0
+        ]
+        if not left_candidates or not right_candidates:
+            expanded.append(image)
+            continue
+
+        left = max(left_candidates, key=lambda line: line[0])
+        right = min(right_candidates, key=lambda line: line[0])
+        frame_width = right[0] - left[0]
+        if frame_width <= bbox.width or frame_width > bbox.width + 45.0:
+            expanded.append(image)
+            continue
+
+        bottom_candidates = [
+            line
+            for line in horizontals
+            if bbox.y1 - 2.0 <= line[0] <= bbox.y1 + 16.0
+            and line[1] <= left[0] + 3.0
+            and line[2] >= right[0] - 3.0
+            and line[2] - line[1] <= frame_width + 12.0
+        ]
+        if not bottom_candidates:
+            expanded.append(image)
+            continue
+        bottom = min(bottom_candidates, key=lambda line: line[0])
+        top_candidates = [
+            line
+            for line in horizontals
+            if bbox.y0 - 16.0 <= line[0] <= bbox.y0 + 2.0
+            and line[1] <= left[0] + 3.0
+            and line[2] >= right[0] - 3.0
+            and line[2] - line[1] <= frame_width + 12.0
+        ]
+        top_y = (
+            max(top_candidates, key=lambda line: line[0])[0]
+            if top_candidates
+            else min(bbox.y0, left[1], right[1])
+        )
+        frame = fitz.Rect(left[0], top_y, right[0], bottom[0]) & page.rect
+        if frame.height <= bbox.height or frame.height > bbox.height + 35.0:
+            expanded.append(image)
+            continue
+
+        pix = page.get_pixmap(matrix=matrix, clip=frame, alpha=False)
+        expanded.append(
+            {
+                **image,
+                "bbox": frame,
+                "image": pix.tobytes("png"),
+                "ext": "png",
+                "frame_expanded": True,
+            }
+        )
+    return expanded
+
+
 def _text_line_count_in_region(page: fitz.Page, region: fitz.Rect) -> int:
     count = 0
     for line in _iter_text_lines(page):
@@ -3935,6 +4027,8 @@ def _append_cell_image(
     para_pr_id_ref: str,
     border_fill_id_ref: str,
     coordinate_scale: float = 1.0,
+    para_styles: dict[tuple[str, int, int], str] | None = None,
+    left_margin_hwp: int = 0,
 ) -> bool:
     bbox = _item_bbox(image)
     try:
@@ -3942,12 +4036,40 @@ def _append_cell_image(
     except Exception:
         return False
     width = min(
-        max(1, cell_width - _pt_to_hwp(4 * coordinate_scale)),
+        max(
+            1,
+            cell_width
+            - max(0, int(left_margin_hwp))
+            - _pt_to_hwp(4 * coordinate_scale),
+        ),
         max(1, _pt_to_hwp(bbox.width * coordinate_scale)),
     )
     height = max(1, int(round(width * max(1.0, bbox.height) / max(1.0, bbox.width))))
     item_id = doc.add_image(image_data, "png")
-    table = cell.add_table(1, 1, width=width, height=height, border_fill_id_ref=border_fill_id_ref)
+    if para_styles is not None:
+        host_para = _ensure_flow_para_format(
+            doc,
+            para_styles,
+            alignment="LEFT",
+            line_spacing_percent=100,
+            left_margin_hwp=max(0, int(left_margin_hwp)),
+        )
+        host = cell.add_paragraph("", para_pr_id_ref=host_para, char_pr_id_ref="0")
+        table = host.add_table(
+            1,
+            1,
+            width=width,
+            height=height,
+            border_fill_id_ref=border_fill_id_ref,
+        )
+    else:
+        table = cell.add_table(
+            1,
+            1,
+            width=width,
+            height=height,
+            border_fill_id_ref=border_fill_id_ref,
+        )
     nested = table.cell(0, 0)
     _clear_cell_paragraphs(nested)
     paragraph = nested.add_paragraph("", para_pr_id_ref=para_pr_id_ref, char_pr_id_ref="0")
@@ -4222,7 +4344,13 @@ def _flow_column_blocks(
                     active_lines = []
                     active_box = None
                 if item.get("type") == "image":
-                    blocks.append({"type": "image", "image": item})
+                    blocks.append(
+                        {
+                            "type": "image",
+                            "image": item,
+                            "column_left_pt": column_left_pt,
+                        }
+                    )
                 else:
                     blocks.append(item)
                 continue
@@ -4237,7 +4365,13 @@ def _flow_column_blocks(
                     })
                     active_lines = []
                     active_box = None
-                blocks.append({"type": "line", "line": item})
+                blocks.append(
+                    {
+                        "type": "line",
+                        "line": item,
+                        "column_left_pt": column_left_pt,
+                    }
+                )
                 continue
             if active_box is not None and box_index != active_box and active_lines:
                 blocks.append({
@@ -4848,6 +4982,7 @@ def _append_flow_block(
     force_font: str | None = None,
     spacer_para_pr_id_ref: str | None = None,
     spacer_char_pr_id_ref: str | None = None,
+    line_spacing_percent: int = _FLOW_BODY_LINE_SPACING,
 ) -> int:
     if block["type"] == "gap":
         height_pt = float(block.get("height_pt") or 0.0)
@@ -4871,24 +5006,53 @@ def _append_flow_block(
         )
         return 0
     if block["type"] == "line":
+        line = block["line"]
+        bbox = _item_bbox(line)
+        column_left = float(block.get("column_left_pt") or bbox.x0)
+        indent_hwp = _pt_to_hwp(
+            min(36.0, max(0.0, bbox.x0 - column_left)) * coordinate_scale
+        )
+        indent_hwp = min(
+            indent_hwp,
+            max(0, cell_width - _pt_to_hwp(48.0)),
+        )
+        line_para = _ensure_flow_para_format(
+            doc,
+            para_styles,
+            alignment="LEFT",
+            line_spacing_percent=line_spacing_percent,
+            left_margin_hwp=indent_hwp,
+        )
         return 1 if _append_cell_line(
             doc,
             cell,
-            block["line"],
+            line,
             styles=styles,
-            para_pr_id_ref=para_pr_id_ref,
+            para_pr_id_ref=line_para,
             font_scale=font_scale,
             force_font=force_font,
         ) else 0
     if block["type"] == "image":
+        image = block["image"]
+        bbox = _item_bbox(image)
+        column_left = float(block.get("column_left_pt") or bbox.x0)
+        indent_hwp = _pt_to_hwp(
+            min(36.0, max(0.0, bbox.x0 - column_left)) * coordinate_scale
+        )
+        indent_hwp = min(
+            indent_hwp,
+            max(0, cell_width - _pt_to_hwp(48.0)),
+        )
         return 1 if _append_cell_image(
             doc,
             cell,
-            block["image"],
+            image,
             cell_width=cell_width,
             para_pr_id_ref=para_pr_id_ref,
             border_fill_id_ref=image_border_fill_id_ref,
             coordinate_scale=coordinate_scale,
+            para_styles=para_styles,
+            left_margin_hwp=indent_hwp,
         ) else 0
 
     lines = [line for line in block.get("lines", []) if _line_text(line)]
@@ -5070,6 +5234,7 @@ def write_pdf_flow_hwpx(
                 if not _inside_any_region(_item_bbox(item), table_regions)
             ]
             native_image_items = _merge_flow_images(native_image_items)
+            native_image_items = _expand_flow_image_frames(page, native_image_items)
             native_image_items, textual_image_regions = _convert_textual_image_regions(page, native_image_items)
             excluded_text_regions = table_regions + textual_image_regions
             page_text_lines = [line for line in _iter_text_lines(page) if _line_text(line)]
@@ -5203,6 +5368,9 @@ def write_pdf_flow_hwpx(
             for body_cell in body_cells:
                 body_cell.set_size(cell_width, body_height)
                 _clear_cell_paragraphs(body_cell)
+                sub_list = body_cell.element.find(_q("subList"))
+                if sub_list is not None:
+                    sub_list.set("vertAlign", "TOP")
             left_cell, right_cell = body_cells
             _set_cell_border_fill(left_cell, column_divider_border_fill)
             _set_cell_margin(left_cell, left_mm=0.4, right_mm=2.3, top_mm=0.0, bottom_mm=0.0)
@@ -5242,6 +5410,7 @@ def write_pdf_flow_hwpx(
                         force_font=force_font,
                         spacer_para_pr_id_ref=spacer_para,
                         spacer_char_pr_id_ref=spacer_cp,
+                        line_spacing_percent=body_line_spacing,
                     )
             page_count += 1
 
