@@ -32,6 +32,13 @@ REQUIRED_FONT_FACES = {
 }
 
 PAGE_ORIENTATIONS = {"PORTRAIT", "WIDELY"}
+KICE_STANDARD_PAGES_MM = (
+    ("A4", 210.0, 297.0),
+    ("B4", 257.0, 364.0),
+    ("B4_114", 257.0 * 1.14, 364.0 * 1.14),
+    ("A3", 297.0, 420.0),
+)
+PAGE_STANDARD_TOLERANCE_MM = 0.75
 
 
 def _local_names(element: etree._Element) -> list[str]:
@@ -66,6 +73,27 @@ def _section_page_setup(section: etree._Element, ns: dict[str, str]) -> tuple[in
     return None
 
 
+def _hwp_to_mm(value: int) -> float:
+    return float(value) * 25.4 / 7200.0
+
+
+def _standard_page_name(width: int, height: int) -> str | None:
+    width_mm = _hwp_to_mm(width)
+    height_mm = _hwp_to_mm(height)
+    for name, standard_width_mm, standard_height_mm in KICE_STANDARD_PAGES_MM:
+        if (
+            abs(width_mm - standard_width_mm) <= PAGE_STANDARD_TOLERANCE_MM
+            and abs(height_mm - standard_height_mm) <= PAGE_STANDARD_TOLERANCE_MM
+        ):
+            return name
+        if (
+            abs(width_mm - standard_height_mm) <= PAGE_STANDARD_TOLERANCE_MM
+            and abs(height_mm - standard_width_mm) <= PAGE_STANDARD_TOLERANCE_MM
+        ):
+            return name
+    return None
+
+
 def _verify_page_setup(path: Path) -> list[str]:
     issues: list[str] = []
     ns = {"hp": HP, "hs": HS}
@@ -81,10 +109,17 @@ def _verify_page_setup(path: Path) -> list[str]:
                 issues.append(f"{section_name}: invalid page size width={width} height={height}")
             if orientation not in PAGE_ORIENTATIONS:
                 issues.append(f"{section_name}: unsupported page orientation {orientation!r}")
-            if orientation == "PORTRAIT" and width > height:
-                issues.append(f"{section_name}: portrait orientation has wide page width={width} height={height}")
-            if orientation == "WIDELY" and width < height:
-                issues.append(f"{section_name}: wide orientation has tall page width={width} height={height}")
+            expected_orientation = "WIDELY" if width <= height else "PORTRAIT"
+            if orientation != expected_orientation:
+                issues.append(
+                    f"{section_name}: Hancom orientation mismatch "
+                    f"orientation={orientation} expected={expected_orientation} width={width} height={height}"
+                )
+            if _standard_page_name(width, height) is None:
+                issues.append(
+                    f"{section_name}: page size is not an exam standard A4/B4/B4_114/A3 "
+                    f"(width_mm={_hwp_to_mm(width):.3f} height_mm={_hwp_to_mm(height):.3f})"
+                )
     return issues
 
 
@@ -157,7 +192,7 @@ def _verify_shape_text(path: Path) -> list[str]:
     return issues
 
 
-def _verify_hancom_compatibility(path: Path) -> list[str]:
+def _verify_hancom_compatibility(path: Path, *, require_pdf_font_faces: bool = True) -> list[str]:
     issues: list[str] = []
     ns = {"hh": HH, "opf": OPF, "hv": HV}
     with zipfile.ZipFile(path) as archive:
@@ -193,7 +228,7 @@ def _verify_hancom_compatibility(path: Path) -> list[str]:
 
         faces = {font.get("face") for font in header.findall(".//hh:font", ns) if font.get("face")}
         missing_faces = sorted(REQUIRED_FONT_FACES - faces)
-        if missing_faces:
+        if require_pdf_font_faces and missing_faces:
             issues.append("Contents/header.xml: missing PDF font faces: " + ", ".join(missing_faces))
 
         if "Contents/content.hpf" not in names:
@@ -345,6 +380,62 @@ def _verify_image_manifest_refs(path: Path) -> list[str]:
     return issues
 
 
+def _verify_bindata_inventory(path: Path) -> list[str]:
+    issues: list[str] = []
+    ns = {"hh": HH, "hc": HC, "opf": OPF}
+    with zipfile.ZipFile(path) as archive:
+        names = set(archive.namelist())
+        if "Contents/header.xml" not in names or "Contents/content.hpf" not in names:
+            return issues
+
+        header = etree.fromstring(archive.read("Contents/header.xml"))
+        package = etree.fromstring(archive.read("Contents/content.hpf"))
+        package_bindata = {name for name in names if name.startswith("BinData/")}
+        manifest_bindata = {
+            str(item.get("href") or "")
+            for item in package.findall(".//opf:item", ns)
+            if str(item.get("href") or "").startswith("BinData/")
+        }
+
+        header_bindata: set[str] = set()
+        header_ref_ids: set[str] = set()
+        for item in header.findall(".//hh:binItem", ns):
+            bindata = str(item.get("BinData") or "").strip()
+            if not bindata:
+                issues.append("Contents/header.xml: hh:binItem missing BinData")
+                continue
+            href = f"BinData/{Path(bindata).name}"
+            if href in header_bindata:
+                issues.append(f"Contents/header.xml: duplicate hh:binItem BinData {href}")
+            header_bindata.add(href)
+            header_ref_ids.add(Path(bindata).stem)
+            if item.get("Type") != "Embedding":
+                issues.append(f"Contents/header.xml: {bindata} Type is {item.get('Type')!r}, expected Embedding")
+            expected_format = Path(bindata).suffix.lstrip(".").lower()
+            actual_format = str(item.get("Format") or "").lower()
+            if expected_format and actual_format and expected_format != actual_format:
+                issues.append(
+                    f"Contents/header.xml: {bindata} Format is {actual_format!r}, expected {expected_format!r}"
+                )
+            if href not in names:
+                issues.append(f"Contents/header.xml: hh:binItem references missing package file {href}")
+
+        for href in sorted(package_bindata - header_bindata):
+            issues.append(f"Contents/header.xml: missing hh:binItem for package file {href}")
+        for href in sorted(header_bindata - package_bindata):
+            issues.append(f"Contents/header.xml: hh:binItem {href} is missing from package")
+        for href in sorted(manifest_bindata - header_bindata):
+            issues.append(f"Contents/header.xml: missing hh:binItem for manifest href {href}")
+
+        for section_name in _section_names(archive):
+            section = etree.fromstring(archive.read(section_name))
+            for image in section.findall(".//hc:img", ns):
+                ref = str(image.get("binaryItemIDRef") or "").strip()
+                if ref and ref not in header_ref_ids:
+                    issues.append(f"{section_name}: hc:img references {ref!r}, missing from header binItem inventory")
+    return issues
+
+
 def _verify_no_page_images(path: Path) -> list[str]:
     issues: list[str] = []
     ns = {"hp": HP, "hs": HS}
@@ -358,17 +449,46 @@ def _verify_no_page_images(path: Path) -> list[str]:
             page_area = page_width * page_height
             if page_area <= 0:
                 continue
+            total_pic_area = 0
             for pic_index, pic in enumerate(section.findall(".//hp:pic", ns), start=1):
                 size = pic.find(".//hp:sz", ns)
                 if size is None:
                     continue
                 area = int(size.get("width") or 0) * int(size.get("height") or 0)
+                total_pic_area += area
                 if area > page_area * 0.5:
                     ratio = area / page_area
                     issues.append(
                         f"{section_name}: pic #{pic_index} looks like a full-page raster fallback "
                         f"(area_ratio={ratio:.3f})"
                     )
+            if total_pic_area > page_area * 0.85:
+                ratio = total_pic_area / page_area
+                issues.append(
+                    f"{section_name}: combined picture area looks like tiled full-page raster fallback "
+                    f"(area_ratio={ratio:.3f})"
+                )
+    return issues
+
+
+def _verify_no_broken_math_placeholder_text(path: Path) -> list[str]:
+    issues: list[str] = []
+    ns = {"hp": HP}
+    broken_chars = {"□", "▢", "\ufffd", "\ufffc"}
+    with zipfile.ZipFile(path) as archive:
+        for section_name in _section_names(archive):
+            section = etree.fromstring(archive.read(section_name))
+            for text_index, text_node in enumerate(section.findall(".//hp:t", ns), start=1):
+                value = text_node.text or ""
+                if any(char in value for char in broken_chars):
+                    issues.append(
+                        f"{section_name}: text #{text_index} contains broken math placeholder text {value!r}"
+                    )
+                for char in value:
+                    if 0xE000 <= ord(char) <= 0xF8FF:
+                        issues.append(
+                            f"{section_name}: text #{text_index} contains unrecovered PUA U+{ord(char):04X}"
+                        )
     return issues
 
 
@@ -393,15 +513,24 @@ def _render_first_page(path: Path) -> str:
     return f"render ok: pages={doc.page_count} first_page_png={len(rendered)} bytes"
 
 
-def verify(path: Path, *, render: bool) -> list[str]:
+def verify(
+    path: Path,
+    *,
+    render: bool,
+    allow_draw_text_equations: bool = False,
+    require_pdf_font_faces: bool = True,
+) -> list[str]:
     issues = []
     issues.extend(_package_issues(path))
-    issues.extend(_verify_hancom_compatibility(path))
+    issues.extend(_verify_hancom_compatibility(path, require_pdf_font_faces=require_pdf_font_faces))
     issues.extend(_verify_page_setup(path))
     issues.extend(_verify_shape_text(path))
-    issues.extend(_verify_no_draw_text_equations(path))
+    if not allow_draw_text_equations:
+        issues.extend(_verify_no_draw_text_equations(path))
     issues.extend(_verify_image_manifest_refs(path))
+    issues.extend(_verify_bindata_inventory(path))
     issues.extend(_verify_no_page_images(path))
+    issues.extend(_verify_no_broken_math_placeholder_text(path))
     if render:
         try:
             print(f"{path}: {_render_first_page(path)}")
@@ -414,11 +543,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Verify PDF-coordinate editable HWPX structure.")
     parser.add_argument("paths", nargs="+", type=Path)
     parser.add_argument("--render", action="store_true", help="also render page 1 with rhwp when available")
+    parser.add_argument(
+        "--allow-draw-text-equations",
+        action="store_true",
+        help="allow native equation controls inside drawText for AI-recognized PDF math crops",
+    )
     args = parser.parse_args()
 
     failed = False
     for path in args.paths:
-        issues = verify(path, render=args.render)
+        issues = verify(path, render=args.render, allow_draw_text_equations=args.allow_draw_text_equations)
         if issues:
             failed = True
             print(f"FAIL {path}")

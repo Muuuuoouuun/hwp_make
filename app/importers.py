@@ -19,7 +19,8 @@ from PIL import Image
 from pypdf import PdfReader
 
 from . import storage
-from .math_text import normalize_recognized_math_text
+from .math_text import normalize_recognized_math_layout_text, normalize_recognized_math_text
+from .pdf_math_geometry import repair_problem_math_layout
 
 try:  # OCR은 선택 사항: pytesseract + tesseract 실행 파일이 있을 때만 사용
     import pytesseract
@@ -265,6 +266,7 @@ def _import_pdf_recognized(
 
     for prob in result.problems:
         image_paths: list[str] = []
+        math_geometry_repairs: dict[str, int] = {}
         image_only_fallback = bool(prob.problem_image_png) and (
             not prob.text_reliable or not str(prob.text or "").strip()
         )
@@ -283,6 +285,8 @@ def _import_pdf_recognized(
             stem_text, choices = "", []
         else:
             stem_text, choices = _split_stem_and_choices(prob.text)
+            source_choice_labels = re.findall(r"[①②③④⑤]", str(prob.text or ""))
+            source_choice_order_noncanonical = source_choice_labels[:5] != sorted(source_choice_labels[:5])
             pdf_line_geometries = list(getattr(prob, "line_geometries", []) or [])
             geometry_split = _split_stem_and_choices_from_pdf_geometry(
                 prob.text,
@@ -304,11 +308,26 @@ def _import_pdf_recognized(
                         and geometry_placeholder_count <= text_placeholder_count
                         and geometry_nonempty >= max(text_nonempty, min(4, len(geometry_choices)))
                     )
+                    or (
+                        len(geometry_choices) == len(choices)
+                        and len(geometry_choices) >= 4
+                        and geometry_placeholder_count <= text_placeholder_count
+                        and geometry_nonempty >= 4
+                        and geometry_choices != choices
+                        and source_choice_order_noncanonical
+                    )
                 ):
                     stem_text, choices = geometry_stem, geometry_choices
+            stem_text = normalize_recognized_math_layout_text(stem_text)
+            choices = [normalize_recognized_math_layout_text(choice) for choice in choices]
             geometry_stem = _repair_pdf_stem_fractions_from_geometry(stem_text, pdf_line_geometries)
             if _placeholder_count_in_fields(geometry_stem, choices) < _placeholder_count_in_fields(stem_text, choices):
                 stem_text = geometry_stem
+            stem_text, choices, math_geometry_repairs = repair_problem_math_layout(
+                stem_text,
+                choices,
+                pdf_line_geometries,
+            )
 
         number = str(prob.number) if prob.number else ""
         loose_key = _recognized_pdf_loose_duplicate_key(number, stem_text) if loose_dedup_enabled else ""
@@ -331,7 +350,10 @@ def _import_pdf_recognized(
                 "choices": choices,
                 "image_paths": image_paths,
                 "tables": [],
-                "layout": layout_payload(prob),
+                "layout": {
+                    **layout_payload(prob),
+                    "math_geometry_repairs": math_geometry_repairs,
+                },
             }
         )
 
@@ -1084,7 +1106,7 @@ def _nearest_pdf_choice_part(
         if x_distance > 90:
             continue
         vertical = label_top - top if above else top - label_top
-        if vertical <= 0 or vertical > 90:
+        if vertical <= 0 or vertical > 60:
             continue
         candidates.append((vertical, x_distance, index, text))
     if not candidates:
@@ -1377,6 +1399,10 @@ def _sqlite_tables(conn: sqlite3.Connection) -> list[str]:
     return [row[0] for row in rows]
 
 
+def _sqlite_identifier(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
 def import_sqlite(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
     rel_path = save_upload(filename, payload)
     src = storage.DATA_DIR / rel_path
@@ -1388,13 +1414,14 @@ def import_sqlite(filename: str, payload: bytes, metadata: dict[str, Any]) -> di
         conn = sqlite3.connect(temp)
         conn.row_factory = sqlite3.Row
         for table in _sqlite_tables(conn):
-            columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+            table_identifier = _sqlite_identifier(table)
+            columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table_identifier})")]
             lower_columns = {column.lower() for column in columns}
             has_text = any(alias.lower() in lower_columns for alias in FIELD_ALIASES["stem"])
             has_title = any(alias.lower() in lower_columns for alias in FIELD_ALIASES["title"])
             if not has_text and not has_title:
                 continue
-            rows = conn.execute(f"SELECT * FROM {table} LIMIT 1000").fetchall()
+            rows = conn.execute(f"SELECT * FROM {table_identifier} LIMIT 1000").fetchall()
             for row in rows:
                 problem_data = _problem_from_row(dict(row), "sqlite", f"{filename}:{table}")
                 if problem_data:

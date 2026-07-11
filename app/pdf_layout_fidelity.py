@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import fitz
+import numpy as np
 from PIL import Image, ImageChops, ImageFilter, ImageStat
 
 try:
@@ -18,6 +19,8 @@ STRICT_ALIGNMENT_REVIEW_THRESHOLD = 0.75
 FOREGROUND_OVERLAP_REVIEW_THRESHOLD = 0.10
 ASPECT_RATIO_TOLERANCE = 0.02
 LAYOUT_VIEW_BLUR_RADIUS = 1.0
+DETAILED_FOREGROUND_REFERENCE = 0.88
+DETAILED_LINE_TOLERANCE_PX = 6
 
 
 def _render_hwpx_page(document: Any, page_index: int) -> Image.Image:
@@ -71,6 +74,214 @@ def _safe_aspect_ratio(width: float, height: float) -> float:
     return float(width) / float(height)
 
 
+def _mask_array(mask: Image.Image) -> np.ndarray:
+    return np.asarray(mask, dtype=np.float32) / 255.0
+
+
+def _without_long_vertical_rules(mask: np.ndarray) -> np.ndarray:
+    clean = mask.copy()
+    if clean.size == 0:
+        return clean
+    long_rule_columns = clean.sum(axis=0) >= clean.shape[0] * 0.62
+    clean[:, long_rule_columns] = 0.0
+    return clean
+
+
+def _smooth_profile(values: np.ndarray, radius: int = 3) -> np.ndarray:
+    if values.size == 0 or radius <= 0:
+        return values.astype(np.float32, copy=False)
+    kernel = np.ones(radius * 2 + 1, dtype=np.float32)
+    kernel /= kernel.sum()
+    return np.convolve(values.astype(np.float32), kernel, mode="same")
+
+
+def _profile_similarity(left: np.ndarray, right: np.ndarray) -> float:
+    if left.size == 0 or right.size == 0:
+        return 1.0 if left.size == right.size else 0.0
+    size = min(left.size, right.size)
+    left = _smooth_profile(left[:size])
+    right = _smooth_profile(right[:size])
+    left_sum = float(left.sum())
+    right_sum = float(right.sum())
+    if left_sum <= 1e-6 and right_sum <= 1e-6:
+        return 1.0
+    if left_sum <= 1e-6 or right_sum <= 1e-6:
+        return 0.0
+
+    left_dist = left / left_sum
+    right_dist = right / right_sum
+    distribution = max(0.0, 1.0 - float(np.abs(left_dist - right_dist).sum()) * 0.5)
+    left_peak = float(left.max()) or 1.0
+    right_peak = float(right.max()) or 1.0
+    left_shape = left / left_peak
+    right_shape = right / right_peak
+    union = float(np.maximum(left_shape, right_shape).sum())
+    soft_iou = (
+        float(np.minimum(left_shape, right_shape).sum()) / union
+        if union > 1e-6
+        else 1.0
+    )
+    return max(0.0, min(1.0, distribution * 0.65 + soft_iou * 0.35))
+
+
+def _row_profile_score(source: np.ndarray, output: np.ndarray) -> float:
+    height, width = source.shape
+    regions = (
+        (0.07, 0.93, 0.055, 0.22),
+        (0.07, 0.49, 0.17, 0.93),
+        (0.51, 0.93, 0.17, 0.93),
+    )
+    scores: list[float] = []
+    for left, right, top, bottom in regions:
+        x0, x1 = int(width * left), int(width * right)
+        y0, y1 = int(height * top), int(height * bottom)
+        src = _without_long_vertical_rules(source[y0:y1, x0:x1])
+        out = _without_long_vertical_rules(output[y0:y1, x0:x1])
+        scores.append(_profile_similarity(src.sum(axis=1), out.sum(axis=1)))
+    return sum(scores) / len(scores)
+
+
+def _column_profile_score(source: np.ndarray, output: np.ndarray) -> float:
+    height, width = source.shape
+    y0, y1 = int(height * 0.055), int(height * 0.93)
+    x0, x1 = int(width * 0.055), int(width * 0.945)
+    src = _without_long_vertical_rules(source[y0:y1, x0:x1])
+    out = _without_long_vertical_rules(output[y0:y1, x0:x1])
+    return _profile_similarity(src.sum(axis=0), out.sum(axis=0))
+
+
+def _line_band_centers(mask: np.ndarray) -> list[float]:
+    if mask.size == 0:
+        return []
+    clean = _without_long_vertical_rules(mask)
+    profile = clean.sum(axis=1)
+    active = profile >= max(2.0, clean.shape[1] * 0.006)
+    centers: list[float] = []
+    start: int | None = None
+    for index, value in enumerate(active):
+        if value and start is None:
+            start = index
+        if start is not None and (not value or index == len(active) - 1):
+            end = index if not value else index + 1
+            height = end - start
+            if 2 <= height <= 24:
+                weights = profile[start:end]
+                total = float(weights.sum())
+                if total > 0:
+                    positions = np.arange(start, end, dtype=np.float32)
+                    centers.append(float((positions * weights).sum() / total))
+            start = None
+    return centers
+
+
+def _line_band_match_score(source: np.ndarray, output: np.ndarray) -> float:
+    height, width = source.shape
+    scores: list[float] = []
+    for left, right in ((0.07, 0.49), (0.51, 0.93)):
+        x0, x1 = int(width * left), int(width * right)
+        y0, y1 = int(height * 0.17), int(height * 0.93)
+        src_centers = _line_band_centers(source[y0:y1, x0:x1])
+        out_centers = _line_band_centers(output[y0:y1, x0:x1])
+        if not src_centers and not out_centers:
+            scores.append(1.0)
+            continue
+        matched = 0
+        out_index = 0
+        for center in src_centers:
+            while (
+                out_index < len(out_centers)
+                and out_centers[out_index] < center - DETAILED_LINE_TOLERANCE_PX
+            ):
+                out_index += 1
+            candidates = []
+            for candidate_index in (out_index, out_index + 1):
+                if candidate_index < len(out_centers):
+                    distance = abs(out_centers[candidate_index] - center)
+                    if distance <= DETAILED_LINE_TOLERANCE_PX:
+                        candidates.append((distance, candidate_index))
+            if candidates:
+                _distance, chosen = min(candidates)
+                matched += 1
+                out_index = chosen + 1
+        denominator = len(src_centers) + len(out_centers)
+        scores.append((2.0 * matched / denominator) if denominator else 1.0)
+    return sum(scores) / len(scores)
+
+
+def _occupancy_grid_score(source_mask: Image.Image, output_mask: Image.Image) -> float:
+    target_size = (80, 113)
+    source_soft = source_mask.filter(ImageFilter.MaxFilter(5)).resize(
+        target_size, Image.Resampling.BOX
+    )
+    output_soft = output_mask.filter(ImageFilter.MaxFilter(5)).resize(
+        target_size, Image.Resampling.BOX
+    )
+    source = np.asarray(source_soft, dtype=np.float32) / 255.0
+    output = np.asarray(output_soft, dtype=np.float32) / 255.0
+    union = float(np.maximum(source, output).sum())
+    return float(np.minimum(source, output).sum()) / union if union > 1e-6 else 1.0
+
+
+def _bbox_similarity(
+    source_bbox: tuple[int, int, int, int] | None,
+    output_bbox: tuple[int, int, int, int] | None,
+    size: tuple[int, int],
+) -> float:
+    if source_bbox is None and output_bbox is None:
+        return 1.0
+    if source_bbox is None or output_bbox is None:
+        return 0.0
+    width, height = size
+    scales = (width, height, width, height)
+    normalized_delta = sum(
+        abs(float(left) - float(right)) / max(1.0, float(scale))
+        for left, right, scale in zip(source_bbox, output_bbox, scales)
+    ) / 4.0
+    return max(0.0, 1.0 - normalized_delta * 5.0)
+
+
+def _detailed_geometry_metrics(
+    source_mask: Image.Image,
+    output_mask: Image.Image,
+    *,
+    foreground_overlap: float,
+) -> dict[str, float]:
+    source = _mask_array(source_mask)
+    output = _mask_array(output_mask)
+    row_score = _row_profile_score(source, output)
+    column_score = _column_profile_score(source, output)
+    line_score = _line_band_match_score(source, output)
+    occupancy_score = _occupancy_grid_score(source_mask, output_mask)
+    source_count = float(source.sum())
+    output_count = float(output.sum())
+    density_score = (
+        min(source_count, output_count) / max(source_count, output_count)
+        if source_count > 0 or output_count > 0
+        else 1.0
+    )
+    bbox_score = _bbox_similarity(source_mask.getbbox(), output_mask.getbbox(), source_mask.size)
+    foreground_score = min(1.0, foreground_overlap / DETAILED_FOREGROUND_REFERENCE)
+    total = (
+        row_score * 0.25
+        + line_score * 0.20
+        + occupancy_score * 0.20
+        + foreground_score * 0.15
+        + column_score * 0.10
+        + bbox_score * 0.05
+        + density_score * 0.05
+    )
+    return {
+        "detailed_layout_score": round(total * 100.0, 2),
+        "row_alignment_score": round(row_score * 100.0, 2),
+        "line_band_match_score": round(line_score * 100.0, 2),
+        "occupancy_grid_score": round(occupancy_score * 100.0, 2),
+        "foreground_geometry_score": round(foreground_score * 100.0, 2),
+        "column_alignment_score": round(column_score * 100.0, 2),
+        "content_bbox_score": round(bbox_score * 100.0, 2),
+        "ink_density_score": round(density_score * 100.0, 2),
+    }
+
+
 def _page_metrics(source: Image.Image, output: Image.Image) -> dict[str, Any]:
     source_gray = source.convert("L")
     output_gray = output.convert("L")
@@ -112,6 +323,11 @@ def _page_metrics(source: Image.Image, output: Image.Image) -> dict[str, Any]:
         foreground_overlap = (source_covered + output_covered) / 2.0
 
     strict_alignment = (visual_similarity * 0.75) + (foreground_overlap * 0.25)
+    detailed = _detailed_geometry_metrics(
+        source_mask,
+        output_mask,
+        foreground_overlap=foreground_overlap,
+    )
     return {
         "visual_sync_ratio": round(visual_similarity, 4),
         "visual_similarity_ratio": round(visual_similarity, 4),
@@ -126,6 +342,7 @@ def _page_metrics(source: Image.Image, output: Image.Image) -> dict[str, Any]:
         "content_bbox_px": list(bbox),
         "source_foreground_pixels": source_fg,
         "output_foreground_pixels": output_fg,
+        **detailed,
     }
 
 
@@ -244,6 +461,9 @@ def analyze_pdf_hwpx_fidelity(
         min_visual = min(visual_values)
         min_overlap = min(overlap_values)
         max_aspect_delta = max(float(page["aspect_ratio_delta"]) for page in pages)
+        detailed_values = [float(page["detailed_layout_score"]) for page in pages]
+        overall_detailed_layout_score = sum(detailed_values) / len(detailed_values)
+        minimum_detailed_layout_score = min(detailed_values)
     else:
         overall_sync = 0.0
         mean_sync = 0.0
@@ -255,6 +475,8 @@ def analyze_pdf_hwpx_fidelity(
         min_visual = 0.0
         min_overlap = 0.0
         max_aspect_delta = 0.0
+        overall_detailed_layout_score = 0.0
+        minimum_detailed_layout_score = 0.0
 
     compared_possible_pages = min(pdf_page_count, hwp_page_count)
     raw_page_count_mismatch = pdf_page_count != hwp_page_count
@@ -332,6 +554,8 @@ def analyze_pdf_hwpx_fidelity(
         "min_visual_similarity_ratio": round(min_visual, 4),
         "min_foreground_overlap_ratio": round(min_overlap, 4),
         "max_aspect_ratio_delta": round(max_aspect_delta, 4),
+        "overall_detailed_layout_score": round(overall_detailed_layout_score, 2),
+        "minimum_detailed_layout_score": round(minimum_detailed_layout_score, 2),
         "missing_foreground_pages": missing_foreground_pages,
         "unexpected_foreground_pages": unexpected_foreground_pages,
         "aspect_ratio_mismatch_pages": aspect_mismatch_pages,

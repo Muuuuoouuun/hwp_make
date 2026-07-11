@@ -3,6 +3,7 @@ from __future__ import annotations
 import unicodedata
 import re
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from typing import Any
 
 
@@ -127,6 +128,28 @@ NUMERIC_RANGE_RE = re.compile(r"^\d+(?:\.\d+)?\s*[-~]\s*\d+(?:\.\d+)?$")
 ALNUM_ID_RE = re.compile(r"^[A-Za-z]+\d+\s*[-/]\s*\d{2,}$")
 CURRENCY_SPAN_RE = re.compile(r"^\$\d+(?:\.\d+)?(?:\s+\w+)?\s+\$\d+(?:\.\d+)?$")
 CURRENCY_FRAGMENT_RE = re.compile(r"^\$\d+(?:\.\d+)?(?:\s+\w+)?\s*\$$")
+LATIN_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+PLAIN_HYPHENATED_LATIN_RE = re.compile(r"^[A-Za-z0-9]+(?:[-\u2010-\u2015][A-Za-z0-9]+)+$")
+MATH_LATIN_WORD_ALLOWLIST = {
+    "arg",
+    "argmax",
+    "argmin",
+    "cos",
+    "cot",
+    "csc",
+    "det",
+    "exp",
+    "frac",
+    "gcd",
+    "lim",
+    "ln",
+    "log",
+    "max",
+    "min",
+    "sin",
+    "sqrt",
+    "tan",
+}
 MATH_SYMBOL_TOKEN_RE = re.compile(rf"^[√∑∏∫∞≤≥≠≈±×÷∠△∥⊥∈∉∪∩⊂⊃⊆⊇∘′″{VULGAR_FRACTION_CHARS}]$")
 HANCOM_MATH_PLACEHOLDER_CHARS = "\u25a1\u25a2"
 HANCOM_VECTOR_ACCENT_RE = re.compile(
@@ -378,6 +401,8 @@ def _symbol_pua_map() -> dict[str, str]:
             "\uf0d6": "√",
             "\uf0e5": "∑",
             "\uf0f2": "∫",
+            # Old-Hangul glyph from the embedded 옛한글 subset in KICE Korean PDFs.
+            "\uf3b0": "코ᇰ",
         }
     )
     return mapping
@@ -722,6 +747,11 @@ def normalize_recognized_math_layout_text(text: str) -> str:
     value = _repair_stacked_fraction_exponents(value)
     value = _repair_stacked_simple_fractions_and_cases(value)
     value = _repair_p_over_q_placeholders(value)
+    value = re.sub(
+        r"(15세기 국어 ‘코ᇰ)\u200b?(’의 ‘)\s*\n?\s*(’은)",
+        r"\1\2ㆁ\3",
+        value,
+    )
     return _cleanup_unresolved_layout_placeholders(value)
 
 
@@ -795,7 +825,7 @@ def normalize_math_token(token: str) -> str:
     return re.sub(UNICODE_SUP_SUB_PATTERN, replace_scripts, value)
 
 
-def extract_math_spans(text: str) -> list[MathSpan]:
+def _scan_math_spans(text: str) -> list[MathSpan]:
     value = str(text or "")
     spans: list[MathSpan] = []
     last_end = 0
@@ -805,6 +835,8 @@ def extract_math_spans(text: str) -> list[MathSpan]:
             len(token) <= 1
             and not MATH_SYMBOL_TOKEN_RE.match(token)
         ) or DATE_LIKE_RE.match(token) or NUMERIC_RANGE_RE.match(token) or ALNUM_ID_RE.match(token) or CURRENCY_SPAN_RE.match(token) or CURRENCY_FRAGMENT_RE.match(token):
+            continue
+        if _looks_like_plain_latin_text_fragment(token):
             continue
         if match.start() < last_end:
             continue
@@ -819,6 +851,37 @@ def extract_math_spans(text: str) -> list[MathSpan]:
         )
         last_end = match.end()
     return spans
+
+
+def _looks_like_plain_latin_text_fragment(token: str) -> bool:
+    stripped = str(token or "").strip()
+    if not stripped or "\\" in stripped or "$" in stripped:
+        return False
+    if any(char in HANCOM_MATH_PLACEHOLDER_CHARS for char in stripped):
+        return False
+    if any(0xE000 <= ord(char) <= 0xF8FF for char in stripped):
+        return False
+    if any(char in stripped for char in "_^=<>[]{}"):
+        return False
+
+    words = [word.lower() for word in LATIN_WORD_RE.findall(stripped)]
+    non_math_words = [word for word in words if word not in MATH_LATIN_WORD_ALLOWLIST]
+    if not non_math_words:
+        return False
+    if PLAIN_HYPHENATED_LATIN_RE.fullmatch(stripped):
+        return True
+    if any(char in stripped for char in "+-*/!"):
+        return True
+    return False
+
+
+@lru_cache(maxsize=4096)
+def _cached_math_span_payloads(value: str) -> tuple[tuple[tuple[str, Any], ...], ...]:
+    return tuple(tuple(span.to_dict().items()) for span in _scan_math_spans(value))
+
+
+def extract_math_spans(text: str) -> list[MathSpan]:
+    return [MathSpan(**dict(payload)) for payload in _cached_math_span_payloads(str(text or ""))]
 
 
 def _is_explicit_math_token(token: str) -> bool:
@@ -909,7 +972,10 @@ def analyze_problem_math(problem: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def math_summary(problem: dict[str, Any]) -> dict[str, Any]:
-    spans = analyze_problem_math(problem)
+    return summarize_math_spans(analyze_problem_math(problem))
+
+
+def summarize_math_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
     fields = sorted({str(span.get("field") or "") for span in spans if span.get("field")})
     return {
         "count": len(spans),

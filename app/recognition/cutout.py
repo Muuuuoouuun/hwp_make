@@ -46,6 +46,42 @@ def render_page_images(pdf_bytes: bytes, *, dpi: int = DEFAULT_DPI) -> list[Imag
     return images
 
 
+def render_selected_page_images(
+    pdf_bytes: bytes,
+    page_indexes: Iterable[int],
+    *,
+    dpi: int = DEFAULT_DPI,
+) -> dict[int, Image.Image]:
+    """Render only the requested zero-based PDF pages.
+
+    Recognition normally needs raster data only for pages containing a figure,
+    an unreliable text problem, or an image-only fallback.  Keeping the result
+    keyed by page index lets callers skip the much more expensive full-document
+    raster pass without changing crop coordinates.
+    """
+    if fitz is None:
+        raise RuntimeError("PyMuPDF(fitz)가 없어 PDF를 렌더할 수 없습니다.")
+    requested = sorted({int(index) for index in page_indexes if int(index) >= 0})
+    if not requested:
+        return {}
+
+    scale = dpi / 72.0
+    matrix = fitz.Matrix(scale, scale)
+    images: dict[int, Image.Image] = {}
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        for page_index in requested:
+            if page_index >= doc.page_count:
+                continue
+            page = doc.load_page(page_index)
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            images[page_index] = Image.frombytes(
+                "RGB",
+                (pix.width, pix.height),
+                pix.samples,
+            )
+    return images
+
+
 def _clamp_box_px(box: Box, width: int, height: int, *, pad: int = 0) -> tuple[int, int, int, int]:
     left = max(0, int(round(box.left)) - pad)
     top = max(0, int(round(box.top)) - pad)

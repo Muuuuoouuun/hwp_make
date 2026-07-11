@@ -746,12 +746,13 @@ def write_docx(
             _add_table(document, table_rows)
 
         for image_path in problem.get("image_paths") or []:
-            full_path = storage.DATA_DIR / image_path
-            if full_path.exists():
-                try:
-                    document.add_picture(str(full_path), width=_docx_image_width(template))
-                except Exception:
-                    _add_text_paragraph(document, f"[이미지 삽입 실패: {Path(image_path).name}]")
+            full_path = storage.resolve_data_image_path(image_path)
+            if full_path is None:
+                continue
+            try:
+                document.add_picture(str(full_path), width=_docx_image_width(template))
+            except Exception:
+                _add_text_paragraph(document, f"[이미지 삽입 실패: {Path(str(image_path)).name}]")
 
         choices = [
             _format_choice(choice_index, choice, template)

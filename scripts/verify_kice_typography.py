@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """Verify KICE template typography in generated HWPX.
 
-This guard checks the writer-level contract derived from real HWP samples:
-KICE templates must emit exam-like font faces, 11pt body text, 165% line
-spacing, 95% character ratio, -5 spacing, and native Hancom equation fonts.
+This guard checks the active writer-level contract: KICE templates must use
+the user-selected HY신명조 face for text, 11pt body text, 165% line spacing,
+95% character ratio, -5 spacing, and native Hancom equation fonts.
 """
 from __future__ import annotations
 
@@ -203,19 +203,19 @@ def main() -> int:
     for face in ("신명 중명조", "Times New Roman", "돋움", "HancomEQN"):
         if not _has_face(math_report["faces"], face):
             failures.append(f"kice_math header missing font face: {face}")
-    if not _has_style(math_report["chars"], face="신명 중명조", size_pt=11.0):
-        failures.append("kice_math missing 11pt 신명 중명조 body charPr with ratio=95 and spacing=-5")
-    if not _has_style(math_report["chars"], face="돋움", size_pt=11.0, bold=True):
-        failures.append("kice_math missing 11pt bold 돋움 heading charPr")
+    if not _has_style(math_report["chars"], face="HY신명조", size_pt=11.0):
+        failures.append("kice_math missing 11pt HY신명조 body charPr with ratio=95 and spacing=-5")
+    if not _has_style(math_report["chars"], face="HY신명조", size_pt=11.0, bold=True):
+        failures.append("kice_math missing 11pt bold HY신명조 heading charPr")
     if not _all_nonempty_runs_use_165_line_spacing(math_report):
         failures.append("kice_math nonempty paragraphs are not all using 165% line spacing")
     if not all(equation.get("font") == "HancomEQN" for equation in math_report["equations"]):
         failures.append("kice_math native equation objects are not using HancomEQN")
 
-    if not _has_style(english_report["chars"], face="Times New Roman", size_pt=11.0):
-        failures.append("kice_english missing 11pt Times New Roman body charPr")
-    if not _run_uses_face(english_report, "English passage", "Times New Roman"):
-        failures.append("kice_english body run does not use Times New Roman")
+    if not _has_style(english_report["chars"], face="HY신명조", size_pt=11.0):
+        failures.append("kice_english missing 11pt HY신명조 body charPr")
+    if not _run_uses_face(english_report, "English passage", "HY신명조"):
+        failures.append("kice_english body run does not use HY신명조")
     if not _all_nonempty_runs_use_165_line_spacing(english_report):
         failures.append("kice_english nonempty paragraphs are not all using 165% line spacing")
 
@@ -224,7 +224,7 @@ def main() -> int:
         for failure in failures:
             print(f"- {failure}")
         return 1
-    print("PASS KICE typography: fonts, ratio/spacing, 165% line spacing, native equation font")
+    print("PASS KICE typography: HY신명조, ratio/spacing, 165% line spacing, native equation font")
     print(f"math={math_path}")
     print(f"english={english_path}")
     return 0

@@ -258,6 +258,8 @@ def main() -> int:
                 "filename": "mock_english.pdf",
                 "data_base64": base64.b64encode(make_pdf()).decode("ascii"),
                 "boxed_passages": True,
+                "layout_mode": "coordinate",
+                "native_math": False,
             },
         )
         check("API status", response.status_code == 200, response.text[:240] if response.status_code != 200 else "")
@@ -289,7 +291,7 @@ def main() -> int:
         check("quality coverage pass", quality.get("meets_editable_text_target") is True, repr(quality))
         check("visual sync target pass", bool(quality.get("meets_visual_sync_target")), repr(quality))
         check("layout-view visual sync target pass", bool(quality.get("meets_layout_view_sync_target")), repr(quality))
-        check("objective score target", float(quality.get("objective_score_target") or 0.0) == 95.0, repr(quality))
+        check("objective score target", float(quality.get("objective_score_target") or 0.0) == 96.0, repr(quality))
         check("objective score available", bool(quality.get("objective_score_available")), repr(quality))
         check("objective score recorded", quality.get("objective_score") is not None, repr(quality))
         components = quality.get("score_components") or {}
@@ -310,6 +312,7 @@ def main() -> int:
         check("native math target n/a", quality.get("meets_native_math_target") is None, repr(quality))
         check("math visual sync target", quality.get("meets_math_visual_sync_target") is True, repr(quality))
         check("paging target pass", quality.get("meets_paging_target") is True, repr(quality))
+        check("page standard target pass", quality.get("meets_page_standard_target") is True, repr(quality))
         check("open safety target", quality.get("meets_open_safety_target") is True, repr(quality))
         check("quality no max-page limit", quality.get("limited_by_max_pages") is False, repr(quality))
         check("quality no full-page raster fallback", quality.get("full_page_raster_fallback") is False, repr(quality))
@@ -327,9 +330,15 @@ def main() -> int:
         style_profile = payload.get("style_profile") or {}
         check("style profile available", style_profile.get("available") is True, repr(style_profile))
         check("style profile font target", style_profile.get("has_required_font_faces") is True, repr(style_profile))
+        check("style profile font type", style_profile.get("font_face_type_ok") is True, repr(style_profile))
         check("style profile char metrics", style_profile.get("char_metric_ok") is True, repr(style_profile))
         check("style profile font bucket", style_profile.get("font_size_bucket_ok") is True, repr(style_profile))
         check("style profile line spacing", style_profile.get("uses_165_line_spacing") is True, repr(style_profile))
+        check("style profile page ratio", style_profile.get("page_ratio_ok") is True, repr(style_profile))
+        check("style profile page standard", style_profile.get("page_standard_ok") is True, repr(style_profile))
+        check("style profile physical page", style_profile.get("page_physical_size_ok") is True, repr(style_profile))
+        check("style profile Hancom orientation", style_profile.get("page_orientation_ok") is True, repr(style_profile))
+        check("style profile page standard names", style_profile.get("page_standard_names") == ["A4"], repr(style_profile))
         open_safety = payload.get("open_safety") or {}
         check("open safety ok", open_safety.get("ok") is True, repr(open_safety))
         fidelity = payload.get("fidelity") or {}
@@ -435,6 +444,8 @@ def main() -> int:
                 "filename": "mock_math_score.pdf",
                 "data_base64": base64.b64encode(make_math_score_pdf()).decode("ascii"),
                 "boxed_passages": True,
+                "layout_mode": "coordinate",
+                "native_math": False,
             },
         )
         check("math score status", math_response.status_code == 200, math_response.text[:240])
@@ -448,7 +459,20 @@ def main() -> int:
             math_output_path = Path(tmp.name) / "exports" / str(math_export.get("name") or "")
             check("math source segments", int(math_stats.get("source_math_segments") or 0) >= 5, repr(math_stats))
             check("math visual-first mode", math_stats.get("native_math_enabled") is False, repr(math_stats))
-            check("math native equations disabled", int(math_stats.get("native_equations") or 0) == 0, repr(math_stats))
+            math_ai_accepted = int(math_stats.get("math_ai_accepted") or 0)
+            math_native_equations = int(math_stats.get("native_equations") or 0)
+            check(
+                "math native equations match ai use",
+                (math_native_equations == 0 and math_ai_accepted == 0)
+                or (math_native_equations >= math_ai_accepted > 0),
+                repr(math_stats),
+            )
+            check("math visual overlays disabled", int(math_stats.get("math_visual_overlays") or 0) == 0, repr(math_stats))
+            check(
+                "math visual overlay area zero",
+                float(math_stats.get("math_visual_overlay_area_ratio") or 0.0) == 0.0,
+                repr(math_stats),
+            )
             check("math no full-page raster fallback", math_stats.get("full_page_raster_fallback") is False, repr(math_stats))
             check("math objective recorded", math_quality.get("objective_score") is not None, repr(math_quality))
             check("math native target n/a", math_quality.get("meets_native_math_target") is None, repr(math_quality))
@@ -457,12 +481,20 @@ def main() -> int:
             math_component = math_components.get("math") or {}
             check("math component visual-first", math_component.get("visual_first") is True, repr(math_component))
             check("math visual score >= 95", float(math_component.get("math_visual_score") or 0.0) >= 95.0, repr(math_component))
-            check("math style native equations disabled", int(math_style.get("native_equations") or 0) == 0, repr(math_style))
+            check(
+                "math style native equations match ai use",
+                int(math_style.get("native_equations") or 0) >= math_ai_accepted,
+                repr(math_style),
+            )
             check("math font target", math_quality.get("meets_font_template_target") is True, repr(math_quality))
             check("math paging target", math_quality.get("meets_paging_target") is True, repr(math_quality))
             check("math open safety", math_open_safety.get("ok") is True, repr(math_open_safety))
             if math_output_path.is_file():
-                math_issues = verify(math_output_path, render=False)
+                math_issues = verify(
+                    math_output_path,
+                    render=False,
+                    allow_draw_text_equations=math_ai_accepted > 0,
+                )
                 check("math HWPX structure", not math_issues, "; ".join(math_issues[:5]))
         limited_response = client.post(
             "/api/pdf-layout-export",
@@ -471,6 +503,8 @@ def main() -> int:
                 "data_base64": base64.b64encode(make_two_page_pdf()).decode("ascii"),
                 "max_pages": 1,
                 "boxed_passages": True,
+                "layout_mode": "coordinate",
+                "native_math": False,
             },
         )
         check("max_pages status", limited_response.status_code == 200, limited_response.text[:240])
@@ -493,6 +527,8 @@ def main() -> int:
                 "filename": "mock_image_only.pdf",
                 "data_base64": base64.b64encode(make_image_only_pdf()).decode("ascii"),
                 "boxed_passages": True,
+                "layout_mode": "coordinate",
+                "native_math": False,
             },
         )
         check("image-only status", image_response.status_code == 200, image_response.text[:240])
@@ -528,6 +564,8 @@ def main() -> int:
                     "filename": "mock_no_rhwp.pdf",
                     "data_base64": base64.b64encode(make_pdf()).decode("ascii"),
                     "boxed_passages": True,
+                    "layout_mode": "coordinate",
+                    "native_math": False,
                 },
             )
         finally:

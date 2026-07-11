@@ -427,12 +427,12 @@ _EQN_COMMANDS = {
     **_GREEK_EQN_COMMANDS,
     "nabla": "nabla",
     "partial": "Partial",
-    "le": "<=",
-    "leq": "<=",
-    "ge": ">=",
-    "geq": ">=",
-    "ne": "!=",
-    "neq": "!=",
+    "le": "LEQ",
+    "leq": "LEQ",
+    "ge": "GEQ",
+    "geq": "GEQ",
+    "ne": "NEQ",
+    "neq": "NEQ",
     "approx": "approx",
     "sim": "SIM",
     "simeq": "SIMEQ",
@@ -663,6 +663,9 @@ _MATHBB_MAP = str.maketrans(
     }
 )
 _EQN_SPACED_TOKENS = {
+    "LEQ",
+    "GEQ",
+    "NEQ",
     "SIM",
     "SIMEQ",
     "CONG",
@@ -730,6 +733,18 @@ def _normalize_hancom_eqn_script(script: str) -> str:
     value = str(script or "").strip()
     if not value:
         return value
+
+    def space_radical(match: re.Match[str]) -> str:
+        prefix = match.group(1)
+        before = value[: match.start(1) + 1]
+        # Hancom's nth-root syntax intentionally joins the index to sqrt
+        # (for example ``^3sqrt {x}``).  Other adjacent identifiers need a
+        # separator so ``bsqrt {x}`` is not rendered as literal text.
+        if prefix.isdigit() and re.search(r"\^\d+$", before):
+            return prefix + "sqrt"
+        return prefix + " sqrt"
+
+    value = re.sub(r"([A-Za-z0-9)}\]])sqrt", space_radical, value)
     output: list[str] = []
     cursor = 0
     while cursor < len(value):
@@ -746,7 +761,12 @@ def _normalize_hancom_eqn_script(script: str) -> str:
             continue
         output.append(value[cursor])
         cursor += 1
-    return "".join(output)
+    normalized = "".join(output)
+    normalized = normalized.replace("<=", " LEQ ")
+    normalized = normalized.replace(">=", " GEQ ")
+    normalized = normalized.replace("!=", " NEQ ")
+    normalized = re.sub(r"\s*(LEQ|GEQ|NEQ)\s*", r" \1 ", normalized)
+    return normalized.strip()
 
 
 def _is_hancom_eqn_script(expr: str) -> bool:
@@ -986,9 +1006,9 @@ def _hancom_eqn_script(source: str) -> str | None:
             cursor = base[1]
             continue
         mapped = {
-            "≤": "<=",
-            "≥": ">=",
-            "≠": "!=",
+            "≤": "LEQ",
+            "≥": "GEQ",
+            "≠": "NEQ",
             "×": "times",
             "÷": "div",
             "±": "+-",
@@ -1693,8 +1713,8 @@ def _collect_image_items(
         for image_path in problem.get("image_paths") or []:
             if image_path in items:
                 continue
-            full_path = storage.DATA_DIR / image_path
-            if not full_path.exists():
+            full_path = storage.resolve_data_image_path(image_path)
+            if full_path is None:
                 continue
             try:
                 with Image.open(full_path) as image:
@@ -1714,6 +1734,7 @@ def _collect_image_items(
                 "media": mimetypes.guess_type(full_path.name)[0] or "application/octet-stream",
                 "width": width,
                 "height": height,
+                "path": full_path,
             }
     return items
 
@@ -1749,4 +1770,4 @@ def write_hwpx(
         )
         archive.writestr("Preview/PrvText.txt", _preview_text(title, problems))
         for image_path, item in image_items.items():
-            archive.write(storage.DATA_DIR / image_path, f"BinData/{item['name']}")
+            archive.write(item["path"], f"BinData/{item['name']}")

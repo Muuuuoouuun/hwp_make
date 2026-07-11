@@ -416,7 +416,7 @@ if hwpx_writer._hancom_eqn_script(recognized_segment) != "bar {AB}=bar {BC}":
 recognized_xbar = math_text.normalize_recognized_math_text("\ue06dx-c≤m≤\ue06dx+c")
 if recognized_xbar != r"\overline{x}-c≤m≤\overline{x}+c":
     failures.append(f"Recognized math normalization: x-bar PUA failed {recognized_xbar!r}")
-if hwpx_writer._hancom_eqn_script(recognized_xbar) != "bar {x}-c<=m<=bar {x}+c":
+if hwpx_writer._hancom_eqn_script(recognized_xbar) != "bar {x}-c LEQ m LEQ bar {x}+c":
     failures.append(f"HWPX native math: x-bar PUA conversion failed {recognized_xbar!r}")
 stacked_limit = math_text.normalize_recognized_math_layout_text(
     "lim\nh→0\ue06d\nf(1+h)-f(1)\uc758\nh\nvalue"

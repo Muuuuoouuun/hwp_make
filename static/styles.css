@@ -632,6 +632,11 @@ textarea:hover {
   grid-column: 1 / -1;
 }
 
+.layout-ai-option {
+  justify-content: flex-start;
+  width: 100%;
+}
+
 .common-metadata {
   border: 1px solid var(--line);
   border-radius: var(--r);

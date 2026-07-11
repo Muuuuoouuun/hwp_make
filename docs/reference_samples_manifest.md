@@ -19,6 +19,7 @@ This repository does not commit real KICE, school-exam, or private HWP/PDF refer
 | Edited math HWP references | `C:/Users/aaaha/Downloads` | Template, typography, equation, question sync, and HWP import comparison | No |
 | Uploaded PDF references | `data/uploads` | Real PDF math/subject QA, PDF text/geometry extraction, HWPX render regression | No |
 | Uploaded HWP/HWPX references | `data/uploads` | HWP import parser, image extraction, layout metadata, duplicate/order regression | No |
+| Class materials reference bundle | `data/reference_samples/class_materials_20260709` | Local comparison set for PDF layout fidelity, HWP template/typography matching, import smoke tests, and image OCR fallback checks | No |
 | Generated exports/reports | `data/exports`, `data/real_pdf_math_qa` | Local render QA, placeholder reports, review pages | No by default |
 | Synthetic fixtures | `scripts/verify_*.py` inline data or tiny generated temp files | CI-safe regression coverage | Yes |
 
@@ -39,6 +40,12 @@ Additional local form/template references currently visible in Downloads:
 - `평가원 과탐 양식.hwp`
 - `평가원 사탐 양식.hwp`
 
+Additional local form/template references extracted from the class materials bundle:
+
+- `학교 기출 시험지 양식.hwp`
+- `2024-06-고3-모평(평가원)언어와 매체.hwp`
+- `2024-06-고3-모평(평가원)화법과 작문.hwp`
+
 ## Named PDF References
 
 Representative real PDFs currently visible under `data/uploads`:
@@ -52,6 +59,16 @@ Representative real PDFs currently visible under `data/uploads`:
 - `25수능 물리.pdf`
 - `25수능 화학.pdf`
 - `25수능 지구과학.pdf`
+
+Additional local PDF references extracted from the class materials bundle include:
+
+- 2025 and 2026 KICE-style Korean, math, English, science, and Korean-history PDFs.
+- 2025/2026 science subject PDFs for physics, chemistry, life science, and earth science.
+- Middle-school math summary/problem-image samples.
+- Gachon University natural-science essay exam problem/solution PDFs.
+
+The bundle inventory is stored locally at `data/reference_samples/class_materials_20260709/inventory.json`.
+The metadata-only smoke report is stored locally at `data/reference_samples/class_materials_20260709/smoke_report.json`.
 
 ## Current Verification Use
 

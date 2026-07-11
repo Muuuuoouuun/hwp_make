@@ -8,6 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from . import math_text
 
@@ -17,6 +18,7 @@ DATA_DIR = Path(os.environ.get("HWP_MAKE_DATA_DIR", PROJECT_ROOT / "data")).reso
 UPLOAD_DIR = DATA_DIR / "uploads"
 EXPORT_DIR = DATA_DIR / "exports"
 DB_PATH = DATA_DIR / "problems.sqlite3"
+IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 
 
 def ensure_dirs() -> None:
@@ -104,6 +106,44 @@ def _as_choice_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+def _safe_image_path_text(value: Any) -> str | None:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return None
+    path = Path(text)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    if path.suffix.lower() not in IMAGE_EXTENSIONS:
+        return None
+    return path.as_posix()
+
+
+def sanitize_image_paths(value: Any) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for image_path in _as_choice_list(value):
+        safe_path = _safe_image_path_text(image_path)
+        if safe_path is None or safe_path in seen:
+            continue
+        paths.append(safe_path)
+        seen.add(safe_path)
+    return paths
+
+
+def resolve_data_image_path(image_path: Any, *, must_exist: bool = True) -> Path | None:
+    safe_path = _safe_image_path_text(image_path)
+    if safe_path is None:
+        return None
+    full_path = (DATA_DIR / safe_path).resolve()
+    try:
+        full_path.relative_to(DATA_DIR)
+    except ValueError:
+        return None
+    if must_exist and not full_path.is_file():
+        return None
+    return full_path
+
+
 def _jsonable(value: Any) -> Any:
     if value is None:
         return []
@@ -145,6 +185,8 @@ def _normalize_problem_data(data: dict[str, Any]) -> dict[str, Any]:
             normalized[key] = _normalize_text_value(normalized[key])
     if "choices" in normalized:
         normalized["choices"] = [_normalize_text_value(choice) for choice in _as_choice_list(normalized.get("choices"))]
+    if "image_paths" in normalized:
+        normalized["image_paths"] = sanitize_image_paths(normalized.get("image_paths"))
     if "tables" in normalized:
         normalized["tables"] = _normalize_tables(normalized.get("tables"))
     return normalized
@@ -152,16 +194,11 @@ def _normalize_problem_data(data: dict[str, Any]) -> dict[str, Any]:
 
 def _image_fingerprints(value: Any) -> list[str]:
     fingerprints: list[str] = []
-    for image_path in _as_choice_list(value):
+    for image_path in sanitize_image_paths(value):
         if not image_path:
             continue
-        full_path = (DATA_DIR / image_path).resolve()
-        try:
-            full_path.relative_to(DATA_DIR)
-        except ValueError:
-            fingerprints.append(image_path)
-            continue
-        if not full_path.is_file():
+        full_path = resolve_data_image_path(image_path, must_exist=True)
+        if full_path is None or not full_path.is_file():
             fingerprints.append(image_path)
             continue
         fingerprints.append(hashlib.sha1(full_path.read_bytes()).hexdigest())
@@ -226,7 +263,7 @@ def row_to_problem(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
     item.pop("content_hash", None)
     item["choices"] = json.loads(item.pop("choices_json") or "[]")
-    item["image_paths"] = json.loads(item.pop("image_paths_json") or "[]")
+    item["image_paths"] = sanitize_image_paths(json.loads(item.pop("image_paths_json") or "[]"))
     item["tables"] = json.loads(item.pop("tables_json") or "[]")
     raw_layout = item.pop("layout_json", "{}") or "{}"
     try:
@@ -234,9 +271,10 @@ def row_to_problem(row: sqlite3.Row) -> dict[str, Any]:
     except json.JSONDecodeError:
         layout = {}
     item["layout"] = layout if isinstance(layout, dict) and layout else None
-    item["image_urls"] = [f"/files/{path}" for path in item["image_paths"]]
-    item["math_spans"] = math_text.analyze_problem_math(item)
-    item["math_summary"] = math_text.math_summary(item)
+    item["image_urls"] = [f"/files/{quote(path, safe='/')}" for path in item["image_paths"]]
+    math_spans = math_text.analyze_problem_math(item)
+    item["math_spans"] = math_spans
+    item["math_summary"] = math_text.summarize_math_spans(math_spans)
     return item
 
 
@@ -425,20 +463,27 @@ def list_exports() -> list[dict[str, Any]]:
     """data/exports/에 저장된 내보내기 결과를 최신순으로 나열한다."""
     ensure_dirs()
     items: list[dict[str, Any]] = []
-    for path in EXPORT_DIR.iterdir():
+    export_root = EXPORT_DIR.resolve()
+    visible_nested_formats = {"hwpx", "docx", "hwp", "pdf"}
+    for path in EXPORT_DIR.rglob("*"):
         if not path.is_file():
+            continue
+        rel_path = path.resolve().relative_to(export_root).as_posix()
+        file_format = path.suffix.lstrip(".").lower()
+        if path.parent.resolve() != export_root and file_format not in visible_nested_formats:
             continue
         stat = path.stat()
         items.append(
             {
-                "name": path.name,
+                "name": rel_path,
+                "display_name": path.name,
                 "size": stat.st_size,
                 "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(
                     timespec="seconds"
                 ),
                 "modified_ts": stat.st_mtime,
-                "format": path.suffix.lstrip(".").lower(),
-                "url": f"/files/exports/{path.name}",
+                "format": file_format,
+                "url": f"/files/exports/{quote(rel_path, safe='/')}",
             }
         )
     items.sort(key=lambda item: item["modified_ts"], reverse=True)
@@ -448,11 +493,16 @@ def list_exports() -> list[dict[str, Any]]:
 
 
 def delete_export(name: str) -> bool:
-    """내보내기 파일을 삭제한다. 경로 탈출을 막고 EXPORT_DIR 직속 파일만 허용한다."""
-    if not name or "/" in name or "\\" in name:
+    """내보내기 파일을 삭제한다. 경로 탈출을 막고 EXPORT_DIR 내부 파일만 허용한다."""
+    if not name:
         return False
+    export_root = EXPORT_DIR.resolve()
     target = (EXPORT_DIR / name).resolve()
-    if target.parent != EXPORT_DIR.resolve() or not target.is_file():
+    try:
+        target.relative_to(export_root)
+    except ValueError:
+        return False
+    if not target.is_file():
         return False
     target.unlink()
     return True

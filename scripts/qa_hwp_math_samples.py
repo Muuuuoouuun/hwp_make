@@ -634,6 +634,17 @@ def _content_bounds(png_bytes, page_number):
     pix = image.load()
     x0, x1 = int(width * 0.03), int(width * 0.97)
     y0, y1 = int(height * 0.04), int(height * 0.98)
+    row_dark_counts = [0] * height
+    col_dark_counts = [0] * width
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            if pix[x, y] < 220:
+                row_dark_counts[y] += 1
+                col_dark_counts[x] += 1
+    # Page border lines and wide decorative rules can dominate the bounding box
+    # even when the actual problem content sits safely inside the page.
+    border_rows = {y for y in range(y0, y1) if row_dark_counts[y] > (x1 - x0) * 0.75}
+    border_cols = {x for x in range(x0, x1) if col_dark_counts[x] > (y1 - y0) * 0.75}
     min_x = width
     min_y = height
     max_x = -1
@@ -641,6 +652,8 @@ def _content_bounds(png_bytes, page_number):
     dark_pixels = 0
     for y in range(y0, y1):
         for x in range(x0, x1):
+            if x in border_cols or y in border_rows:
+                continue
             if pix[x, y] < 220:
                 dark_pixels += 1
                 min_x = min(min_x, x)

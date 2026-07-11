@@ -79,6 +79,12 @@ assertToken(String.raw`g\circ f`, String.raw`g\circ f`);
 assertToken(String.raw`\overrightarrow{AB}`, String.raw`\overrightarrow{AB}`);
 assertToken(String.raw`\widehat{ABC}`, String.raw`\widehat{ABC}`);
 assertToken(String.raw`\mathrm{P}(A)`, String.raw`\mathrm{P}(A)`);
+assertToken(String.raw`\min_{x\in A} f(x)`, String.raw`\min_{x\in A} f(x)`);
+assertToken(String.raw`\max_{0\le x\le 1} x^2`, String.raw`\max_{0\le x\le 1} x^2`);
+assertToken(String.raw`\arctan x`, String.raw`\arctan x`);
+assertToken(String.raw`\Pr(A)=\frac{1}{2}`, String.raw`\Pr(A)=\frac{1}{2}`);
+assertToken(String.raw`\left\lceil x\right\rceil`, String.raw`\left\lceil x\right\rceil`);
+assertToken(String.raw`\left\lfloor x\right\rfloor`, String.raw`\left\lfloor x\right\rfloor`);
 const longHancomEqn = "$lim _{x ``->`` 2} {} {g LEFT (x-1 RIGHT )} over {f LEFT (x RIGHT )-g LEFT (x RIGHT )} TIMES lim _{x ``->`` INF } {} {LEFT { f LEFT (x RIGHT ) it RIGHT } ^{2}} over {g LEFT (x RIGHT )} =k$";
 assertToken(longHancomEqn, longHancomEqn);
 assertToken("f'(1)=3", "f'(1)=3");
@@ -159,6 +165,76 @@ if (!appJs.includes("currentExportTemplate")) {
 }
 if (!appJs.includes("native_math: Boolean(els.exportNativeMath?.checked)")) {
   throw new Error("Missing native_math preview payload in static/app.js");
+}
+
+const insertStart = appJs.indexOf("const EDITOR_MATH_FIELD_IDS");
+const insertEnd = appJs.indexOf("function setInputMode");
+if (insertStart < 0 || insertEnd < 0 || insertEnd <= insertStart) {
+  throw new Error("Unable to locate math insertion block in static/app.js");
+}
+
+const insertSandbox = {
+  Event: class {
+    constructor(type, init = {}) {
+      this.type = type;
+      Object.assign(this, init);
+    }
+  },
+};
+vm.createContext(insertSandbox);
+vm.runInContext(
+  `${appJs.slice(insertStart, insertEnd)}\nthis.mathInsertion = mathInsertion;\nthis.insertAtCursor = insertAtCursor;`,
+  insertSandbox,
+  { filename: "static/app.js:math-insertion-snippet" }
+);
+
+function fakeField(value, selectionStart = value.length, selectionEnd = selectionStart) {
+  return {
+    value,
+    selectionStart,
+    selectionEnd,
+    focused: false,
+    events: [],
+    focus() {
+      this.focused = true;
+    },
+    setRangeText(replacement, start, end) {
+      this.value = `${this.value.slice(0, start)}${replacement}${this.value.slice(end)}`;
+      this.selectionStart = start + replacement.length;
+      this.selectionEnd = this.selectionStart;
+    },
+    setSelectionRange(start, end) {
+      this.selectionStart = start;
+      this.selectionEnd = end;
+    },
+    dispatchEvent(event) {
+      this.events.push(event.type);
+    },
+  };
+}
+
+let field = fakeField("");
+insertSandbox.insertAtCursor(field, String.raw`\frac{a}{b}`);
+if (field.value !== String.raw`\frac{a}{b}` || field.value.slice(field.selectionStart, field.selectionEnd) !== "a") {
+  throw new Error(`Fraction insertion should select numerator placeholder, got ${JSON.stringify(field)}`);
+}
+
+field = fakeField("x+1", 0, 3);
+insertSandbox.insertAtCursor(field, String.raw`\sqrt{x}`);
+if (field.value !== String.raw`\sqrt{x+1}` || !field.focused || !field.events.includes("input")) {
+  throw new Error(`Sqrt insertion should wrap selected text and emit input, got ${JSON.stringify(field)}`);
+}
+
+field = fakeField("정답: y", 4, 5);
+insertSandbox.insertAtCursor(field, "x^2");
+if (field.value !== "정답: y^{2}") {
+  throw new Error(`Superscript insertion should use selected base, got ${JSON.stringify(field.value)}`);
+}
+
+field = fakeField("해설:", 3, 3);
+insertSandbox.insertAtCursor(field, String.raw`\vec{v}`);
+if (field.value !== String.raw`해설: \vec{v}` || field.value.slice(field.selectionStart, field.selectionEnd) !== "v") {
+  throw new Error(`Vector insertion should keep smart prefix and select placeholder, got ${JSON.stringify(field)}`);
 }
 
 console.log("Frontend formula detection OK");
