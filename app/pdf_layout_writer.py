@@ -2124,6 +2124,39 @@ def _flow_box_line_indent_hwp(
     return _pt_to_hwp(min(36.0, indent_pt) * coordinate_scale)
 
 
+def _flow_line_layout_hwp(
+    block: dict[str, Any],
+    line: dict[str, Any],
+    *,
+    cell_width: int,
+    coordinate_scale: float,
+) -> tuple[str, int]:
+    bbox = _item_bbox(line)
+    column_left = float(block.get("column_left_pt") or bbox.x0)
+    column_right = float(block.get("column_right_pt") or bbox.x1)
+    column_width = max(1.0, column_right - column_left)
+    line_width = max(1.0, bbox.width)
+    line_center = (bbox.x0 + bbox.x1) / 2.0
+    column_center = (column_left + column_right) / 2.0
+    if (
+        line_width <= column_width * 0.76
+        and abs(line_center - column_center) <= max(4.0, column_width * 0.075)
+    ):
+        return "CENTER", 0
+    if (
+        bbox.x0 - column_left >= max(10.0, column_width * 0.18)
+        and column_right - bbox.x1 <= max(5.0, column_width * 0.05)
+    ):
+        return "RIGHT", 0
+    desired_indent = _pt_to_hwp(max(0.0, bbox.x0 - column_left) * coordinate_scale)
+    rendered_line_width = _pt_to_hwp(line_width * coordinate_scale)
+    maximum_indent = max(
+        0,
+        cell_width - rendered_line_width - _pt_to_hwp(4.0 * coordinate_scale),
+    )
+    return "LEFT", min(desired_indent, maximum_indent)
+
+
 def _ensure_flow_para_format(
     doc: HwpxDocument,
     para_styles: dict[tuple[str, int, int], str],
@@ -2189,6 +2222,56 @@ def _flow_box_table_height_hwp(
         _pt_to_hwp(12.0 * coordinate_scale),
         _pt_to_hwp(line_height * coordinate_scale),
     )
+
+
+def _flow_box_trailing_balance_hwp(
+    lines: list[dict[str, Any]],
+    *,
+    table_height_hwp: int,
+    padding: tuple[float, float, float, float],
+    line_spacing_percent: int,
+    coordinate_scale: float,
+    font_scale: float,
+) -> int:
+    if len(lines) < 2:
+        return 0
+    box_text = " ".join(_line_text(line) for line in lines)
+    if _latin_ratio(box_text) >= 0.45:
+        return 0
+    line_boxes = [fitz.Rect(line["bbox"]) for line in lines]
+    source_text_height = (
+        max(box.y1 for box in line_boxes) - min(box.y0 for box in line_boxes)
+    ) * coordinate_scale
+    estimated_flow_height = sum(
+        max(
+            1.0,
+            max(
+                (_flow_size_for_span(span) * font_scale for span in line.get("spans", [])),
+                default=8.0 * font_scale,
+            ),
+        )
+        * line_spacing_percent
+        / 100.0
+        for line in lines
+    )
+    _pad_left, _pad_right, pad_top, pad_bottom = padding
+    balance_pt = (
+        source_text_height
+        - estimated_flow_height
+        + (pad_bottom - pad_top) * coordinate_scale
+    )
+    table_height_pt = max(0.0, table_height_hwp / HWP_PER_PT)
+    inner_height_pt = max(
+        0.0,
+        table_height_pt - (pad_top + pad_bottom) * coordinate_scale,
+    )
+    maximum_balance_pt = max(0.0, inner_height_pt - estimated_flow_height - 1.0)
+    balance_pt = min(
+        max(0.0, balance_pt),
+        maximum_balance_pt,
+        table_height_pt * 0.35,
+    )
+    return _pt_to_hwp(balance_pt) if balance_pt >= 1.0 else 0
 
 
 def _flow_effective_item_bbox(item: dict[str, Any], boxes: list[fitz.Rect]) -> fitz.Rect:
@@ -3111,6 +3194,16 @@ def _ensure_table_cell_paragraph_shells(section: Any) -> bool:
     return changed
 
 
+def _direct_native_equation_height(paragraph: Any) -> int:
+    heights: list[int] = []
+    for equation in paragraph.findall(f"{_q('run')}/{_q('equation')}"):
+        script = equation.find(_q("script"))
+        value = str(script.text or "").strip() if script is not None else ""
+        if value:
+            heights.append(_equation_size(value)[1])
+    return max(heights, default=0)
+
+
 def _patch_section_paragraph_linesegs(section: Any) -> bool:
     changed = False
     width = _section_text_width(section)
@@ -3118,18 +3211,13 @@ def _patch_section_paragraph_linesegs(section: Any) -> bool:
         if not paragraph.get("id"):
             paragraph.set("id", _paragraph_id())
             changed = True
-        scripts = [
-            str(script.text or "").strip()
-            for script in paragraph.findall(f"{_q('run')}/{_q('equation')}/{_q('script')}")
-            if str(script.text or "").strip()
-        ]
-        heights = [*(_equation_size(script)[1] for script in scripts)]
-        height = max(1000, *heights) if heights else 1000
+        equation_height = _direct_native_equation_height(paragraph)
+        height = max(1000, equation_height)
         lineseg = paragraph.find(f"{_q('linesegarray')}/{_q('lineseg')}")
         if lineseg is None:
             _append_text_box_lineseg_hwp(paragraph, width, height)
             changed = True
-        elif heights and (_positive_int(lineseg.get("vertsize")) or 0) < height:
+        elif equation_height and (_positive_int(lineseg.get("vertsize")) or 0) < height:
             lineseg.set("vertsize", str(height))
             lineseg.set("textheight", str(height))
             lineseg.set("baseline", str(int(height * 0.85)))
@@ -3337,7 +3425,7 @@ def _ensure_box_border_fill(header: Any) -> str:
             border_fill.find(_hh(name))
             for name in ("leftBorder", "rightBorder", "topBorder", "bottomBorder")
         ]
-        if all(border is not None and border.get("type") == "SOLID" and border.get("width") == "0.12 mm" for border in borders):
+        if all(border is not None and border.get("type") == "SOLID" and border.get("width") == "0.20 mm" for border in borders):
             return str(border_fill.get("id") or "0")
     next_id = 1
     for border_fill in border_fills.findall(_hh("borderFill")):
@@ -3358,10 +3446,10 @@ def _ensure_box_border_fill(header: Any) -> str:
     for child_name, attrs in (
         ("slash", {"type": "NONE", "Crooked": "0", "isCounter": "0"}),
         ("backSlash", {"type": "NONE", "Crooked": "0", "isCounter": "0"}),
-        ("leftBorder", {"type": "SOLID", "width": "0.12 mm", "color": "#000000"}),
-        ("rightBorder", {"type": "SOLID", "width": "0.12 mm", "color": "#000000"}),
-        ("topBorder", {"type": "SOLID", "width": "0.12 mm", "color": "#000000"}),
-        ("bottomBorder", {"type": "SOLID", "width": "0.12 mm", "color": "#000000"}),
+        ("leftBorder", {"type": "SOLID", "width": "0.20 mm", "color": "#000000"}),
+        ("rightBorder", {"type": "SOLID", "width": "0.20 mm", "color": "#000000"}),
+        ("topBorder", {"type": "SOLID", "width": "0.20 mm", "color": "#000000"}),
+        ("bottomBorder", {"type": "SOLID", "width": "0.20 mm", "color": "#000000"}),
         ("diagonal", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
     ):
         element.append(element.makeelement(_hh(child_name), attrs))
@@ -3387,7 +3475,7 @@ def _ensure_column_divider_border_fill(header: Any) -> str:
         if (
             right is not None
             and right.get("type") == "SOLID"
-            and right.get("width") == "0.12 mm"
+            and right.get("width") == "0.20 mm"
             and all(
                 border is not None and (border.get("type") or "").upper() == "NONE"
                 for border in (left, top, bottom)
@@ -3414,7 +3502,7 @@ def _ensure_column_divider_border_fill(header: Any) -> str:
         ("slash", {"type": "NONE", "Crooked": "0", "isCounter": "0"}),
         ("backSlash", {"type": "NONE", "Crooked": "0", "isCounter": "0"}),
         ("leftBorder", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
-        ("rightBorder", {"type": "SOLID", "width": "0.12 mm", "color": "#404040"}),
+        ("rightBorder", {"type": "SOLID", "width": "0.20 mm", "color": "#000000"}),
         ("topBorder", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
         ("bottomBorder", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
         ("diagonal", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
@@ -3443,7 +3531,7 @@ def _ensure_header_divider_border_fill(header: Any) -> str:
         if (
             bottom is not None
             and bottom.get("type") == "SOLID"
-            and bottom.get("width") == "0.12 mm"
+            and bottom.get("width") == "0.20 mm"
             and all(
                 borders[name] is not None
                 and (borders[name].get("type") or "").upper() == "NONE"
@@ -3473,7 +3561,7 @@ def _ensure_header_divider_border_fill(header: Any) -> str:
         ("leftBorder", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
         ("rightBorder", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
         ("topBorder", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
-        ("bottomBorder", {"type": "SOLID", "width": "0.12 mm", "color": "#202020"}),
+        ("bottomBorder", {"type": "SOLID", "width": "0.20 mm", "color": "#000000"}),
         ("diagonal", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
     ):
         element.append(element.makeelement(_hh(child_name), attrs))
@@ -3542,6 +3630,38 @@ def _set_cell_border_fill(cell: Any, border_fill_id_ref: str) -> None:
     cell.table.mark_dirty()
 
 
+def _append_empty_flow_table(
+    cell: Any,
+    *,
+    width: int,
+    height: int,
+    border_fill_id_ref: str,
+) -> int:
+    safe_height = max(0, int(height))
+    if safe_height < _pt_to_hwp(1.0):
+        return 0
+    safe_width = max(1, int(width))
+    table = cell.add_table(
+        1,
+        1,
+        width=safe_width,
+        height=safe_height,
+        border_fill_id_ref=border_fill_id_ref,
+    )
+    nested = table.cell(0, 0)
+    nested.set_size(safe_width, safe_height)
+    _set_cell_border_fill(nested, border_fill_id_ref)
+    _set_cell_margin(
+        nested,
+        left_mm=0.0,
+        right_mm=0.0,
+        top_mm=0.0,
+        bottom_mm=0.0,
+    )
+    _clear_cell_paragraphs(nested)
+    return safe_height
+
+
 def _append_cell_line(
     doc: HwpxDocument,
     cell: Any,
@@ -3608,7 +3728,13 @@ def _image_rects_related(a: fitz.Rect, b: fitz.Rect) -> bool:
     x_overlap = max(0.0, min(a.x1, b.x1) - max(a.x0, b.x0))
     x_ratio = x_overlap / max(1.0, min(a.width, b.width))
     vertical_touch = max(a.y0, b.y0) <= min(a.y1, b.y1) + 2.0
-    return x_ratio >= 0.82 and vertical_touch
+    if x_ratio >= 0.82 and vertical_touch:
+        return True
+
+    y_overlap = max(0.0, min(a.y1, b.y1) - max(a.y0, b.y0))
+    y_ratio = y_overlap / max(1.0, min(a.height, b.height))
+    horizontal_gap = max(a.x0, b.x0) - min(a.x1, b.x1)
+    return y_ratio >= 0.72 and horizontal_gap <= 12.0
 
 
 def _merge_flow_images(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3867,6 +3993,21 @@ def _drawing_table_regions(page: fitz.Page) -> list[fitz.Rect]:
                 break
         if not placed:
             components.append([(rect, orientation)])
+
+    changed = True
+    while changed:
+        changed = False
+        for left_index in range(len(components)):
+            left_bounds = _union_rect([item[0] for item in components[left_index]])
+            for right_index in range(left_index + 1, len(components)):
+                right_bounds = _union_rect([item[0] for item in components[right_index]])
+                if not _rects_touch(left_bounds, right_bounds, gap=8):
+                    continue
+                components[left_index].extend(components.pop(right_index))
+                changed = True
+                break
+            if changed:
+                break
 
     changed = True
     while changed:
@@ -4139,7 +4280,11 @@ def _rail_box_rects(page: fitz.Page) -> list[fitz.Rect]:
         matched: fitz.Rect | None = None
         for rail in rails:
             rail_x = (rail.x0 + rail.x1) / 2.0
-            if abs(center_x - rail_x) <= 2.0:
+            vertically_connected = (
+                segment.y0 <= rail.y1 + 3.0
+                and segment.y1 >= rail.y0 - 3.0
+            )
+            if abs(center_x - rail_x) <= 2.0 and vertically_connected:
                 matched = rail
                 break
         if matched is None:
@@ -4152,12 +4297,23 @@ def _rail_box_rects(page: fitz.Page) -> list[fitz.Rect]:
     def has_edge(left: fitz.Rect, right: fitz.Rect, y: float) -> bool:
         lx = (left.x0 + left.x1) / 2.0
         rx = (right.x0 + right.x1) / 2.0
-        for line in horizontals:
-            if abs(((line.y0 + line.y1) / 2.0) - y) > 8:
-                continue
-            if line.x0 <= lx + 4 and line.x1 >= rx - 4:
-                return True
-        return False
+        intervals = sorted(
+            (max(lx, line.x0), min(rx, line.x1))
+            for line in horizontals
+            if abs(((line.y0 + line.y1) / 2.0) - y) <= 8
+            and line.x1 >= lx - 4
+            and line.x0 <= rx + 4
+        )
+        intervals = [interval for interval in intervals if interval[1] > interval[0]]
+        if not intervals or intervals[0][0] > lx + 4:
+            return False
+        maximum_title_gap = max(12.0, (rx - lx) * 0.18)
+        covered_right = intervals[0][1]
+        for start, end in intervals[1:]:
+            if start - covered_right > maximum_title_gap:
+                return False
+            covered_right = max(covered_right, end)
+        return covered_right >= rx - 4
 
     boxes: list[fitz.Rect] = []
     used: set[int] = set()
@@ -4175,9 +4331,12 @@ def _rail_box_rects(page: fitz.Page) -> list[fitz.Rect]:
                 continue
             top = max(left.y0, right.y0)
             bottom = min(left.y1, right.y1)
-            if bottom - top < page.rect.height * 0.18:
+            if bottom - top < max(96.0, page.rect.height * 0.10):
                 continue
-            if not (has_edge(left, right, top) or has_edge(left, right, bottom)):
+            if not (
+                has_edge(left, right, top)
+                and has_edge(left, right, bottom)
+            ):
                 continue
             best_index = right_index
             best_rect = fitz.Rect(left.x0, top, right.x1, bottom)
@@ -4194,7 +4353,7 @@ def _rail_box_rects(page: fitz.Page) -> list[fitz.Rect]:
             continue
         if text_line_count > 52:
             continue
-        if text_line_count >= 20 and padded.height / max(1, text_line_count) < 17.2:
+        if text_line_count >= 20 and padded.height / max(1, text_line_count) < 12.0:
             continue
         boxes.append(padded)
         used.add(left_index)
@@ -4313,6 +4472,12 @@ def _flow_column_blocks(
             if item.get("type") != "gap"
         ]
         column_left_pt = min(column_left_candidates) if column_left_candidates else 0.0
+        column_right_candidates = [
+            _flow_effective_item_bbox(item, boxes).x1
+            for item in column_items
+            if item.get("type") != "gap"
+        ]
+        column_right_pt = max(column_right_candidates) if column_right_candidates else column_left_pt
         spaced_items: list[dict[str, Any]] = []
         previous_bottom: float | None = None
         previous_box: int | None = None
@@ -4340,6 +4505,7 @@ def _flow_column_blocks(
                         "lines": active_lines,
                         "rect": boxes[active_box] if active_box is not None else None,
                         "column_left_pt": column_left_pt,
+                        "column_right_pt": column_right_pt,
                     })
                     active_lines = []
                     active_box = None
@@ -4349,6 +4515,7 @@ def _flow_column_blocks(
                             "type": "image",
                             "image": item,
                             "column_left_pt": column_left_pt,
+                            "column_right_pt": column_right_pt,
                         }
                     )
                 else:
@@ -4362,6 +4529,7 @@ def _flow_column_blocks(
                         "lines": active_lines,
                         "rect": boxes[active_box] if active_box is not None else None,
                         "column_left_pt": column_left_pt,
+                        "column_right_pt": column_right_pt,
                     })
                     active_lines = []
                     active_box = None
@@ -4370,6 +4538,7 @@ def _flow_column_blocks(
                         "type": "line",
                         "line": item,
                         "column_left_pt": column_left_pt,
+                        "column_right_pt": column_right_pt,
                     }
                 )
                 continue
@@ -4379,6 +4548,7 @@ def _flow_column_blocks(
                     "lines": active_lines,
                     "rect": boxes[active_box],
                     "column_left_pt": column_left_pt,
+                    "column_right_pt": column_right_pt,
                 })
                 active_lines = []
             active_box = box_index
@@ -4389,6 +4559,7 @@ def _flow_column_blocks(
                 "lines": active_lines,
                 "rect": boxes[active_box] if active_box is not None else None,
                 "column_left_pt": column_left_pt,
+                "column_right_pt": column_right_pt,
             })
         result.append(blocks)
     return result
@@ -5007,19 +5178,16 @@ def _append_flow_block(
         return 0
     if block["type"] == "line":
         line = block["line"]
-        bbox = _item_bbox(line)
-        column_left = float(block.get("column_left_pt") or bbox.x0)
-        indent_hwp = _pt_to_hwp(
-            min(36.0, max(0.0, bbox.x0 - column_left)) * coordinate_scale
-        )
-        indent_hwp = min(
-            indent_hwp,
-            max(0, cell_width - _pt_to_hwp(48.0)),
+        alignment, indent_hwp = _flow_line_layout_hwp(
+            block,
+            line,
+            cell_width=cell_width,
+            coordinate_scale=coordinate_scale,
         )
         line_para = _ensure_flow_para_format(
             doc,
             para_styles,
-            alignment="LEFT",
+            alignment=alignment,
             line_spacing_percent=line_spacing_percent,
             left_margin_hwp=indent_hwp,
         )
@@ -5076,6 +5244,7 @@ def _append_flow_block(
     host = cell.add_paragraph("", para_pr_id_ref=host_para, char_pr_id_ref="0")
     table = host.add_table(1, 1, width=table_width, height=table_height, border_fill_id_ref=border_fill_id_ref)
     nested = table.cell(0, 0)
+    nested.set_size(table_width, table_height)
     padding = _flow_box_padding_pt(rect, lines)
     pad_left, pad_right, pad_top, pad_bottom = padding
     _set_cell_margin(
@@ -5109,7 +5278,50 @@ def _append_flow_block(
             force_font=force_font,
         ):
             count += 1
+    trailing_balance = _flow_box_trailing_balance_hwp(
+        lines,
+        table_height_hwp=table_height,
+        padding=padding,
+        line_spacing_percent=line_spacing,
+        coordinate_scale=coordinate_scale,
+        font_scale=font_scale,
+    )
+    if trailing_balance > 0:
+        _append_empty_flow_table(
+            nested,
+            width=max(1, table_width - _pt_to_hwp(2.0 * coordinate_scale)),
+            height=trailing_balance,
+            border_fill_id_ref=image_border_fill_id_ref,
+        )
     return count
+
+
+def _flow_column_balance_gap_pt(
+    blocks: list[dict[str, Any]],
+    *,
+    body_height_hwp: int,
+    coordinate_scale: float,
+    english_body: bool,
+) -> float:
+    """Balance centered flow cells with an invisible trailing gap."""
+    scale = max(0.01, float(coordinate_scale))
+    body_height_pt = max(0.0, body_height_hwp / HWP_PER_PT)
+    line_count = sum(1 for block in blocks if block.get("type") == "line")
+    gap_height_pt = sum(
+        max(0.0, float(block.get("height_pt") or 0.0)) * scale
+        for block in blocks
+        if block.get("type") == "gap"
+    )
+    if line_count == 0 or any(block.get("type") == "image" for block in blocks):
+        return 0.0
+    target_gap_pt = gap_height_pt + (9.0 if english_body else 12.0)
+    if any(block.get("type") == "box" for block in blocks):
+        target_gap_pt *= 0.60
+
+    target_gap_pt = min(target_gap_pt, body_height_pt * 0.35)
+    if target_gap_pt < 1.0:
+        return 0.0
+    return target_gap_pt / scale
 
 
 def write_pdf_flow_hwpx(
@@ -5274,7 +5486,7 @@ def write_pdf_flow_hwpx(
                 # Leave enough room for Hancom's native table-anchor metrics.
                 # A near-full-height body can otherwise move wholesale to the
                 # next page even though its source geometry fits on A4.
-                body_height = max(_pt_to_hwp(24), body_height - _pt_to_hwp(14.5))
+                body_height = max(_pt_to_hwp(24), body_height - _pt_to_hwp(32.0))
             header_row_height = 0
             if header_items:
                 header_row_height = max(
@@ -5287,37 +5499,7 @@ def write_pdf_flow_hwpx(
                 )
             has_header_row = header_row_height > 0
             starts_page = False
-            compact_section_header = bool(
-                page_index > 0
-                and header_items
-                and header_row_height >= _pt_to_hwp(75.0)
-            )
-            if compact_section_header:
-                compact_items = _compact_running_header_items(
-                    page,
-                    header_items,
-                    page_number=page_index + 1,
-                    subject_title=subject_title,
-                    form_label=form_label,
-                    force_font=force_font,
-                )
-                line_count += _append_header_table(
-                    doc,
-                    page,
-                    compact_items,
-                    table_width=table_width,
-                    table_height=min(header_row_height, _pt_to_hwp(50.0)),
-                    no_border_fill=no_border_fill,
-                    compact_para=compact_para,
-                    styles=styles,
-                    page_break=True,
-                    coordinate_scale=coordinate_scale,
-                    font_scale=font_scale,
-                    force_font=force_font,
-                    bottom_border_fill=header_divider_border_fill,
-                )
-                starts_page = True
-            elif header_items:
+            if header_items:
                 line_count += _append_header_content_to_cell(
                     doc,
                     None,
@@ -5368,9 +5550,6 @@ def write_pdf_flow_hwpx(
             for body_cell in body_cells:
                 body_cell.set_size(cell_width, body_height)
                 _clear_cell_paragraphs(body_cell)
-                sub_list = body_cell.element.find(_q("subList"))
-                if sub_list is not None:
-                    sub_list.set("vertAlign", "TOP")
             left_cell, right_cell = body_cells
             _set_cell_border_fill(left_cell, column_divider_border_fill)
             _set_cell_margin(left_cell, left_mm=0.4, right_mm=2.3, top_mm=0.0, bottom_mm=0.0)
@@ -5412,6 +5591,21 @@ def write_pdf_flow_hwpx(
                         spacer_char_pr_id_ref=spacer_cp,
                         line_spacing_percent=body_line_spacing,
                     )
+                if target_a4:
+                    balance_gap_pt = _flow_column_balance_gap_pt(
+                        blocks,
+                        body_height_hwp=body_height,
+                        coordinate_scale=coordinate_scale,
+                        english_body=body_line_spacing
+                        == _FLOW_ENGLISH_BODY_LINE_SPACING,
+                    )
+                    if balance_gap_pt > 0.0:
+                        _append_empty_flow_table(
+                            cell,
+                            width=max(1, cell_width - _pt_to_hwp(5.0)),
+                            height=_pt_to_hwp(balance_gap_pt * coordinate_scale),
+                            border_fill_id_ref=no_border_fill,
+                        )
             page_count += 1
 
     _prepare_hancom_compatibility(doc)
@@ -6092,10 +6286,10 @@ def _write_structured_math_page_tables(
     for item in items:
         items_by_page.setdefault(int(item.get("source_page") or 0), []).append(item)
 
-    def append_math_paragraph(cell: Any, text: str, *, center: bool = False, small: bool = False) -> None:
+    def append_math_paragraph(cell: Any, text: str, *, center: bool = False, small: bool = False) -> int:
         value = str(text or "").strip()
         if not value:
-            return
+            return 0
         para_pr = center_para if center else body_para
         char_pr = small_cp if small else body_cp
         paragraph = cell.add_paragraph(
@@ -6119,12 +6313,17 @@ def _write_structured_math_page_tables(
             equation_counter=equation_counter,
             native_math=True,
         )
+        equation_height = _direct_native_equation_height(paragraph.element)
+        line_height = max(1000, equation_height)
         if paragraph.element.find(f"{_q('linesegarray')}/{_q('lineseg')}") is None:
-            _append_text_box_lineseg_hwp(paragraph.element, table_width, _pt_to_hwp(9.0))
+            cell_size = cell.element.find(_q("cellSz"))
+            line_width = _positive_int(cell_size.get("width")) if cell_size is not None else None
+            _append_text_box_lineseg_hwp(paragraph.element, line_width or table_width, line_height)
+        return line_height
 
-    def append_choices(cell: Any, choices: list[str], width: int) -> None:
+    def append_choices(cell: Any, choices: list[str], width: int) -> int:
         if not choices:
-            return
+            return 0
         markers = ("①", "②", "③", "④", "⑤")
         if len(choices) <= 5:
             equation_height = 0
@@ -6182,22 +6381,24 @@ def _write_structured_math_page_tables(
             for index in range(len(choices), rows * columns):
                 target = choice_table.cell(index // columns, index % columns)
                 target.set_text("", split_paragraphs=True)
-            return
+            return choice_height * rows
+        total_height = 0
         for index, choice in enumerate(choices):
             marker = markers[index] if index < len(markers) else f"{index + 1}."
-            append_math_paragraph(cell, f"{marker} {choice}", small=True)
+            total_height += append_math_paragraph(cell, f"{marker} {choice}", small=True)
+        return total_height
 
-    def append_figure(cell: Any, item: dict[str, Any], figure_index: int, width: int, page: fitz.Page) -> None:
+    def append_figure(cell: Any, item: dict[str, Any], figure_index: int, width: int, page: fitz.Page) -> int:
         image_paths = list(item.get("image_paths") or [])
         if figure_index >= len(image_paths):
-            return
+            return 0
         full_path = storage.resolve_data_image_path(image_paths[figure_index])
         if full_path is None:
-            return
+            return 0
         try:
             image_data = _png_from_extracted_image(full_path.read_bytes(), full_path.suffix.lstrip("."))
         except Exception:
-            return
+            return 0
         layout = item.get("layout") if isinstance(item.get("layout"), dict) else {}
         figure_boxes = list(layout.get("figure_boxes_px") or [])
         page_info = layout.get("page") if isinstance(layout.get("page"), dict) else {}
@@ -6223,10 +6424,9 @@ def _write_structured_math_page_tables(
             char_pr_id_ref=body_cp,
         )
         paragraph.add_picture(item_id, width=picture_width, height=picture_height)
-        # The picture is inserted as an inline character, so Hancom already
-        # reserves its full height. Adding synthetic blank lines here counted
-        # that height twice and could push an otherwise fitting page body onto
-        # a new physical page.
+        # Hancom reserves the full height of this inline picture. A synthetic
+        # spacer here counts the image twice and can create a physical page.
+        return picture_height
 
     def append_running_header(
         *,
@@ -6286,11 +6486,12 @@ def _write_structured_math_page_tables(
                 _pt_to_hwp(18.0),
             )
 
-    def append_problem(cell: Any, item: dict[str, Any], width: int, page: fitz.Page) -> None:
+    def append_problem(cell: Any, item: dict[str, Any], width: int, page: fitz.Page) -> int:
         stem_lines = _merge_compact_math_stem_lines(str(item.get("stem") or "").splitlines())
         condition_blocks = [
             block for block in (item.get("condition_blocks") or []) if isinstance(block, dict)
         ]
+        content_height = 0
         insertion_index = len(stem_lines)
         if condition_blocks:
             for index, line in enumerate(stem_lines):
@@ -6301,7 +6502,8 @@ def _write_structured_math_page_tables(
                     if "영역을" in line and "라 하자" in line:
                         break
 
-        def append_condition_blocks() -> None:
+        def append_condition_blocks() -> int:
+            total_height = 0
             for block in condition_blocks:
                 bbox_pt = block.get("bbox_pt") or []
                 source_height = float(bbox_pt[3]) if len(bbox_pt) == 4 else 36.0
@@ -6327,8 +6529,18 @@ def _write_structured_math_page_tables(
                     bottom_mm=0.8,
                 )
                 _clear_cell_paragraphs(box_cell)
+                text_height = 0
                 for line in block.get("lines") or []:
-                    append_math_paragraph(box_cell, str(line or ""))
+                    text_height += append_math_paragraph(box_cell, str(line or ""))
+                reserved_height = max(block_height, text_height + _mm_to_hwp(1.6))
+                if reserved_height != block_height:
+                    table_size = box_table.element.find(_q("sz"))
+                    if table_size is not None:
+                        table_size.set("height", str(reserved_height))
+                    box_cell.set_size(width, reserved_height)
+                    box_table.mark_dirty()
+                total_height += reserved_height
+            return total_height
 
         expanded_lines: list[str] = []
         for line in stem_lines:
@@ -6346,25 +6558,41 @@ def _write_structured_math_page_tables(
 
         for index, line in enumerate(stem_lines):
             if index == insertion_index:
-                append_condition_blocks()
-            append_math_paragraph(cell, line)
+                content_height += append_condition_blocks()
+            content_height += append_math_paragraph(cell, line)
         if insertion_index >= len(stem_lines):
-            append_condition_blocks()
+            content_height += append_condition_blocks()
         for figure_index, _image_path in enumerate(item.get("image_paths") or []):
-            append_figure(cell, item, figure_index, width, page)
-        append_choices(cell, [str(choice or "") for choice in item.get("choices") or []], width)
+            content_height += append_figure(cell, item, figure_index, width, page)
+        content_height += append_choices(
+            cell,
+            [str(choice or "") for choice in item.get("choices") or []],
+            width,
+        )
+        return content_height
 
     def add_spacer(cell: Any, height: int, width: int) -> int:
         safe_height = max(0, int(height))
         if safe_height < _pt_to_hwp(1.0):
             return 0
-        cell.add_table(
+        spacer_table = cell.add_table(
             1,
             1,
             width=max(1, width),
             height=safe_height,
             border_fill_id_ref=no_border_fill,
         )
+        spacer_cell = spacer_table.cell(0, 0)
+        spacer_cell.set_size(max(1, width), safe_height)
+        _set_cell_border_fill(spacer_cell, no_border_fill)
+        _set_cell_margin(
+            spacer_cell,
+            left_mm=0.0,
+            right_mm=0.0,
+            top_mm=0.0,
+            bottom_mm=0.0,
+        )
+        _clear_cell_paragraphs(spacer_cell)
         return safe_height
 
     with fitz.open(pdf_path) as source_pdf:
@@ -6541,27 +6769,13 @@ def _write_structured_math_page_tables(
                         used_height += gap_hwp
                     else:
                         used_height += add_spacer(target, gap_hwp, inner_width)
+                    item_start_pt = cursor_pt + (
+                        gap_hwp / HWP_PER_PT / max(0.01, coordinate_scale)
+                    )
                     item_height = max(
                         _pt_to_hwp(18),
                         _pt_to_hwp(item_height_pt * coordinate_scale),
                     )
-                    if item_index == len(column_items) - 1:
-                        choice_widths: list[int] = []
-                        for choice in item.get("choices") or []:
-                            estimated = 0
-                            for segment, is_math in math_text.split_math_text(str(choice or "")):
-                                if not is_math:
-                                    continue
-                                script = _hancom_eqn_script(segment)
-                                if script:
-                                    estimated += _equation_size(script)[0]
-                            choice_widths.append(estimated)
-                        if (
-                            len(choice_widths) >= 4
-                            and max(choice_widths or [0]) + _pt_to_hwp(10.0)
-                            > inner_width / len(choice_widths) * 0.90
-                        ):
-                            item_height += _pt_to_hwp(28.0)
                     problem_table = target.add_table(
                         1,
                         1,
@@ -6574,9 +6788,29 @@ def _write_structured_math_page_tables(
                     _set_cell_border_fill(problem_cell, no_border_fill)
                     _set_cell_margin(problem_cell, left_mm=0.0, right_mm=0.0, top_mm=0.0, bottom_mm=0.0)
                     _clear_cell_paragraphs(problem_cell)
-                    append_problem(problem_cell, item, inner_width, page)
+                    content_height = append_problem(problem_cell, item, inner_width, page)
+                    item_height = max(item_height, content_height)
+                    if item_index == len(column_items) - 1:
+                        remaining_height = max(
+                            0,
+                            body_height - used_height - _pt_to_hwp(1.0),
+                        )
+                        if content_height <= remaining_height:
+                            item_height = min(item_height, remaining_height)
+                    balance_height = max(
+                        0,
+                        item_height - content_height - _pt_to_hwp(10.0),
+                    )
+                    if balance_height >= _pt_to_hwp(1.0):
+                        add_spacer(problem_cell, balance_height, inner_width)
+                    table_size = problem_table.element.find(_q("sz"))
+                    if table_size is not None:
+                        table_size.set("height", str(item_height))
+                    problem_cell.set_size(inner_width, item_height)
+                    problem_table.mark_dirty()
                     used_height += item_height
-                    cursor_pt = max(cursor_pt, top_pt + item_height_pt)
+                    reserved_height_pt = item_height / HWP_PER_PT / max(0.01, coordinate_scale)
+                    cursor_pt = item_start_pt + reserved_height_pt
 
     _prepare_hancom_compatibility(doc)
     _save_hancom_compatible_document(doc, output_path)
