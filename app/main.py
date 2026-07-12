@@ -737,7 +737,8 @@ def export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"PDF 레이아웃 HWPX 생성 중 오류가 발생했습니다: {exc}") from exc
 
     render_dir = run_dir / "fidelity_renders"
-    if payload.layout_mode == "structured":
+    structured_visual_math = stats.get("layout_mode") == "structured_math_visual_overlay"
+    if payload.layout_mode == "structured" and not structured_visual_math:
         fidelity = {
             "available": False,
             "skipped": True,
@@ -786,7 +787,9 @@ def export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
         "limited_by_max_pages": bool(fidelity.get("limited_by_max_pages")),
         "full_page_raster_fallback": full_page_raster_fallback,
         "full_page_images": int(stats.get("full_page_images") or 0),
-        "visual_sync_requires_human_review": payload.layout_mode == "coordinate",
+        "visual_sync_requires_human_review": (
+            payload.layout_mode == "coordinate" or structured_visual_math
+        ),
     }
     quality.update(
         _pdf_layout_objective_score(

@@ -449,6 +449,24 @@ def _verify_no_page_images(path: Path) -> list[str]:
             page_area = page_width * page_height
             if page_area <= 0:
                 continue
+            long_page_tables = 0
+            for table in section.findall(".//hp:tbl", ns):
+                size = table.find("hp:sz", ns)
+                if size is None:
+                    continue
+                try:
+                    columns = int(table.get("colCnt") or 0)
+                    height = int(size.get("height") or 0)
+                except ValueError:
+                    continue
+                if columns == 2 and height > 40000:
+                    long_page_tables += 1
+            paragraph_page_breaks = sum(
+                1
+                for paragraph in section.findall(".//hp:p", ns)
+                if paragraph.get("pageBreak") == "1"
+            )
+            estimated_pages = max(1, long_page_tables, paragraph_page_breaks + 1)
             total_pic_area = 0
             for pic_index, pic in enumerate(section.findall(".//hp:pic", ns), start=1):
                 size = pic.find(".//hp:sz", ns)
@@ -462,8 +480,8 @@ def _verify_no_page_images(path: Path) -> list[str]:
                         f"{section_name}: pic #{pic_index} looks like a full-page raster fallback "
                         f"(area_ratio={ratio:.3f})"
                     )
-            if total_pic_area > page_area * 0.85:
-                ratio = total_pic_area / page_area
+            if total_pic_area > page_area * estimated_pages * 0.85:
+                ratio = total_pic_area / (page_area * estimated_pages)
                 issues.append(
                     f"{section_name}: combined picture area looks like tiled full-page raster fallback "
                     f"(area_ratio={ratio:.3f})"

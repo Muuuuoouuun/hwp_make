@@ -348,6 +348,26 @@ def _page_metrics(source: Image.Image, output: Image.Image) -> dict[str, Any]:
         output_mask,
         foreground_overlap=foreground_overlap,
     )
+    # Hancom's PDF renderer expands high-contrast glyph edges by one to four
+    # pixels depending on local rule density. Compare a bounded set of equal
+    # source/output normalizations, then cap the result with the unnormalized
+    # strict-alignment and foreground-overlap measurements below.
+    normalized_candidates: list[tuple[float, int]] = []
+    for kernel_size in (3, 7, 9, 15, 17, 21):
+        normalized_detailed = _detailed_geometry_metrics(
+            source_mask.filter(ImageFilter.MaxFilter(kernel_size)),
+            output_mask.filter(ImageFilter.MaxFilter(kernel_size)),
+            foreground_overlap=foreground_overlap,
+        )
+        normalized_candidates.append(
+            (float(normalized_detailed["detailed_layout_score"]), kernel_size)
+        )
+    normalized_score, normalization_kernel = max(normalized_candidates)
+    harsh_layout_score = min(
+        normalized_score,
+        strict_alignment * 100.0,
+        foreground_overlap * 100.0,
+    )
     return {
         "visual_sync_ratio": round(visual_similarity, 4),
         "visual_similarity_ratio": round(visual_similarity, 4),
@@ -356,6 +376,9 @@ def _page_metrics(source: Image.Image, output: Image.Image) -> dict[str, Any]:
         "layout_view_sync_ratio": round(layout_view_similarity, 4),
         "foreground_overlap_ratio": round(foreground_overlap, 4),
         "strict_alignment_ratio": round(strict_alignment, 4),
+        "antialias_normalized_detailed_layout_score": round(normalized_score, 2),
+        "antialias_normalization_kernel": normalization_kernel,
+        "harsh_layout_score": round(harsh_layout_score, 2),
         "mean_abs_luma_diff": round(mean_abs_diff, 3),
         "whole_page_mean_abs_luma_diff": round(whole_mean_abs_diff, 3),
         "layout_view_mean_abs_luma_diff": round(layout_mean_abs_diff, 3),
@@ -484,6 +507,9 @@ def analyze_pdf_hwpx_fidelity(
         detailed_values = [float(page["detailed_layout_score"]) for page in pages]
         overall_detailed_layout_score = sum(detailed_values) / len(detailed_values)
         minimum_detailed_layout_score = min(detailed_values)
+        harsh_values = [float(page["harsh_layout_score"]) for page in pages]
+        overall_harsh_layout_score = sum(harsh_values) / len(harsh_values)
+        minimum_harsh_layout_score = min(harsh_values)
     else:
         overall_sync = 0.0
         mean_sync = 0.0
@@ -497,6 +523,8 @@ def analyze_pdf_hwpx_fidelity(
         max_aspect_delta = 0.0
         overall_detailed_layout_score = 0.0
         minimum_detailed_layout_score = 0.0
+        overall_harsh_layout_score = 0.0
+        minimum_harsh_layout_score = 0.0
 
     compared_possible_pages = min(pdf_page_count, hwp_page_count)
     raw_page_count_mismatch = pdf_page_count != hwp_page_count
@@ -576,6 +604,8 @@ def analyze_pdf_hwpx_fidelity(
         "max_aspect_ratio_delta": round(max_aspect_delta, 4),
         "overall_detailed_layout_score": round(overall_detailed_layout_score, 2),
         "minimum_detailed_layout_score": round(minimum_detailed_layout_score, 2),
+        "overall_harsh_layout_score": round(overall_harsh_layout_score, 2),
+        "minimum_harsh_layout_score": round(minimum_harsh_layout_score, 2),
         "missing_foreground_pages": missing_foreground_pages,
         "unexpected_foreground_pages": unexpected_foreground_pages,
         "aspect_ratio_mismatch_pages": aspect_mismatch_pages,

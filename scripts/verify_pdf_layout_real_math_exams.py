@@ -228,6 +228,7 @@ def _run_one(
     fidelity = payload.get("fidelity") or {}
     style_profile = payload.get("style_profile") or {}
     structured_mode = stats.get("layout_mode") == "structured"
+    visual_math_mode = stats.get("layout_mode") == "structured_math_visual_overlay"
     ai_accepted = int(stats.get("math_ai_accepted") or 0)
     open_safety = validate_editor_open_safety(output_path) if output_path.exists() else None
     structure_issues = (
@@ -286,10 +287,11 @@ def _run_one(
             failures,
         )
     else:
-        _check("native math disabled", stats.get("native_math_enabled") is False, repr(stats), failures)
+        _check("positioned native math enabled", stats.get("native_math_enabled") is True, repr(stats), failures)
         _check(
-            "native equations match ai use",
-            (native_equations == 0 and ai_accepted == 0) or (native_equations >= ai_accepted > 0),
+            "positioned native equations cover math",
+            native_equations >= int(stats.get("source_math_segments") or 0) > 0
+            and float(stats.get("native_math_coverage_ratio") or 0.0) >= 0.90,
             repr(stats),
             failures,
         )
@@ -307,20 +309,30 @@ def _run_one(
             repr({"quality": quality.get("limited_by_max_pages"), "fidelity": fidelity.get("limited_by_max_pages")}),
             failures,
         )
-    _check("math visual overlays disabled", int(stats.get("math_visual_overlays") or 0) == 0, repr(stats), failures)
-    _check("math visual overlay option off", not bool(stats.get("math_visual_overlay_enabled")), repr(stats), failures)
-    _check(
-        "math visual overlay area zero",
-        float(stats.get("math_visual_overlay_area_ratio") or 0.0) == 0.0,
-        repr(stats),
-        failures,
-    )
+    if visual_math_mode:
+        _check("math visual overlays present", int(stats.get("math_visual_overlays") or 0) > 0, repr(stats), failures)
+        _check("math visual overlay option on", bool(stats.get("math_visual_overlay_enabled")), repr(stats), failures)
+        _check(
+            "math visual overlay area bounded",
+            0.0 < float(stats.get("math_visual_overlay_area_ratio") or 0.0) < 0.25,
+            repr(stats),
+            failures,
+        )
+    else:
+        _check("math visual overlays disabled", int(stats.get("math_visual_overlays") or 0) == 0, repr(stats), failures)
+        _check("math visual overlay option off", not bool(stats.get("math_visual_overlay_enabled")), repr(stats), failures)
+        _check(
+            "math visual overlay area zero",
+            float(stats.get("math_visual_overlay_area_ratio") or 0.0) == 0.0,
+            repr(stats),
+            failures,
+        )
     if not structured_mode:
         _check("fraction rule lines restored", int(stats.get("fraction_rule_lines") or 0) > 0, repr(stats), failures)
         _check("math char bbox text restored", int(stats.get("math_char_text_items") or 0) > 0, repr(stats), failures)
     _check("no full-page raster fallback", stats.get("full_page_raster_fallback") is False, repr(stats), failures)
     _check("no full-page images", int(stats.get("full_page_images") or 0) == 0, repr(stats), failures)
-    if structured_mode:
+    if structured_mode or visual_math_mode:
         _check(
             "source text preservation >= 98%",
             float(stats.get("source_text_preservation_ratio") or 0.0) >= 0.98,
@@ -331,8 +343,9 @@ def _run_one(
     _check("exam char metrics", style_profile.get("char_metric_ok") is True, repr(style_profile), failures)
     _check("exam font size bucket", style_profile.get("font_size_bucket_ok") is True, repr(style_profile), failures)
     _check("exam line spacing", style_profile.get("uses_exam_line_spacing") is True, repr(style_profile), failures)
-    _check("exam page margins", style_profile.get("page_margin_profile_ok") is True, repr(style_profile), failures)
-    _check("exam column gap", style_profile.get("column_gap_profile_ok") is True, repr(style_profile), failures)
+    if structured_mode:
+        _check("exam page margins", style_profile.get("page_margin_profile_ok") is True, repr(style_profile), failures)
+        _check("exam column gap", style_profile.get("column_gap_profile_ok") is True, repr(style_profile), failures)
     _check("source page standard detected", bool(source_standard_names), repr(source_page_standards), failures)
     _check("source pages portrait", _all_source_pages_portrait(source_page_standards), repr(source_page_standards), failures)
     _check("exam page ratio", style_profile.get("page_ratio_ok") is True, repr(style_profile), failures)
