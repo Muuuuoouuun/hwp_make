@@ -3,309 +3,366 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>HWP Make</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23111'/%3E%3Cpath d='M4 5h8M4 8h8M4 11h5' stroke='white' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="/static/styles.css?v=11" />
+    <title>시험지 스튜디오 · HWP Make</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232f56c7'/%3E%3Cpath d='M4 5h8M4 8h8M4 11h5' stroke='white' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/static/styles.css?v=24" />
   </head>
   <body>
     <main class="app-shell">
       <header class="topbar">
-        <div>
-          <h1>시험지 만들기</h1>
-          <p id="statusText">가져온 문제 준비 중</p>
+        <div class="brand-block">
+          <span class="brand-mark" aria-hidden="true">H</span>
+          <div>
+            <h1>시험지 스튜디오</h1>
+            <p id="statusText">가져온 문제 준비 중</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div class="view-switcher" role="group" aria-label="작업공간 보기">
+            <button class="view-preset active" type="button" data-view-preset="all" aria-label="전체 패널 보기" aria-pressed="true" title="전체 패널 보기">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="4" width="4" height="12" rx="1"/><rect x="8" y="4" width="4" height="12" rx="1"/><rect x="13.5" y="4" width="4" height="12" rx="1"/></svg>
+            </button>
+            <button class="view-preset" type="button" data-view-preset="source" aria-label="자료 작업 집중 보기" aria-pressed="false" title="자료 작업 집중 보기">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><rect class="preset-emphasis" x="2.5" y="3" width="7" height="14" rx="1.4"/><path d="M12 5h5.5M12 10h5.5M12 15h5.5"/></svg>
+            </button>
+            <button class="view-preset" type="button" data-view-preset="edit" aria-label="문항 편집 집중 보기" aria-pressed="false" title="문항 편집 집중 보기">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><rect class="preset-emphasis" x="5" y="3" width="10" height="14" rx="1.5"/><path d="M2.5 6v8M17.5 6v8"/></svg>
+            </button>
+            <button class="view-preset" type="button" data-view-preset="preview" aria-label="시험지 미리보기 집중 보기" aria-pressed="false" title="시험지 미리보기 집중 보기">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 5h5.5M2.5 10h5.5M2.5 15h5.5"/><rect class="preset-emphasis" x="10.5" y="3" width="7" height="14" rx="1.4"/></svg>
+            </button>
+          </div>
+          <span id="saveStatus" class="save-status" aria-live="polite">변경 없음</span>
+          <button id="shortcutHelpButton" class="utility-button" type="button" aria-haspopup="dialog" aria-keyshortcuts="?">
+            <kbd>?</kbd><span>단축키</span>
+          </button>
+          <button id="aiStatusButton" class="ai-status-button" type="button" aria-haspopup="dialog">
+            <span id="aiStatusDot" class="status-dot" aria-hidden="true"></span>
+            <span id="aiStatusText">AI 확인 중</span>
+          </button>
         </div>
       </header>
 
       <section class="workflow-strip" aria-label="작업 단계">
-        <div class="workflow-step active">
-          <span class="workflow-index">1</span>
-          <div>
-                <b>업로드</b>
-                <span>바로 만들기 또는 편집</span>
-          </div>
-        </div>
-        <div class="workflow-step">
-          <span class="workflow-index">2</span>
-          <div>
-            <b>문제 고르기</b>
-            <span id="flowProblemCount">가져온 문제 0개</span>
-          </div>
-        </div>
-        <div class="workflow-step">
-          <span class="workflow-index">3</span>
-          <div>
-            <b>시험지 구성</b>
-            <span id="flowBasketCount">담은 문제 0개</span>
-          </div>
-        </div>
+        <button class="workflow-step active" type="button" data-workflow-step="1" data-mobile-pane="source" aria-pressed="true"><span>1</span><b>자료 가져오기</b></button>
+        <div class="workflow-line" aria-hidden="true"></div>
+        <button class="workflow-step" type="button" data-workflow-step="2" data-mobile-pane="editor" aria-pressed="false"><span>2</span><b>문항 편집</b><small id="flowProblemCount">0개</small></button>
+        <div class="workflow-line" aria-hidden="true"></div>
+        <button class="workflow-step" type="button" data-workflow-step="3" data-mobile-pane="preview" aria-pressed="false"><span>3</span><b>시험지 만들기</b><small id="flowBasketCount">0개</small></button>
       </section>
 
       <section class="workspace" aria-label="문항 제작 작업공간">
-        <aside class="sidebar side-workbench tool-panel" aria-label="자료 넣기와 문제 고르기">
-          <div class="side-switch" role="tablist" aria-label="왼쪽 패널 전환">
-            <button class="side-switch-button active" type="button" data-side-mode="source" aria-pressed="true">1. 자료 넣기</button>
-            <button class="side-switch-button" type="button" data-side-mode="library" aria-pressed="false">2. 문제 고르기</button>
+        <aside id="sourceWorkPane" class="work-pane source-pane" aria-label="자료와 문제 보관함">
+          <div class="pane-tabs" role="tablist" aria-label="왼쪽 패널 전환">
+            <button class="pane-tab active" type="button" role="tab" data-side-mode="source" aria-selected="true" aria-controls="sourcePanel">자료 가져오기</button>
+            <button class="pane-tab" type="button" role="tab" data-side-mode="library" aria-selected="false" aria-controls="libraryPanel">문제 보관함</button>
           </div>
 
-          <section id="sourcePanel" class="side-pane active" data-side-pane="source" aria-label="문제 가져오기">
-            <div class="sb-block">
-            <div class="panel-title compact">
-              <h2>1. 문제 가져오기</h2>
+          <section id="sourcePanel" class="side-pane active" data-side-pane="source" role="tabpanel" aria-label="문제 가져오기">
+            <div class="pane-heading">
+              <div><span class="section-index">01</span><h2>자료 추가</h2></div>
+              <p>파일·텍스트·URL에서 문항을 가져옵니다.</p>
             </div>
             <div class="mode-tabs" role="tablist" aria-label="가져오기 방식">
-              <button class="mode-tab active" type="button" data-input-mode="file" aria-pressed="true">파일</button>
-              <button class="mode-tab" type="button" data-input-mode="text" aria-pressed="false">텍스트</button>
-              <button class="mode-tab" type="button" data-input-mode="url" aria-pressed="false">URL</button>
+              <button class="mode-tab active" type="button" role="tab" data-input-mode="file" aria-selected="true">파일</button>
+              <button class="mode-tab" type="button" role="tab" data-input-mode="text" aria-selected="false">텍스트</button>
+              <button class="mode-tab" type="button" role="tab" data-input-mode="url" aria-selected="false">URL</button>
             </div>
 
-            <div class="common-metadata">
+            <div class="common-metadata field-group">
               <span class="field-label">분류 정보</span>
               <div class="metadata-grid">
-                <input id="metaSubject" type="text" placeholder="과목" />
-                <input id="metaUnit" type="text" placeholder="단원" />
-                <input id="metaTags" type="text" placeholder="태그" />
+                <input id="metaSubject" type="text" placeholder="과목" aria-label="가져올 문제의 과목" />
+                <input id="metaUnit" type="text" placeholder="단원" aria-label="가져올 문제의 단원" />
+                <input id="metaTags" type="text" placeholder="태그" aria-label="가져올 문제의 태그" />
               </div>
             </div>
 
             <div id="fileModePanel" class="input-mode-panel" data-input-panel="file">
               <label class="field-label" for="importKind">파일 종류</label>
               <select id="importKind">
-                <option value="auto">자동 감지</option>
-                <option value="pdf">PDF</option>
-                <option value="image">이미지</option>
-                <option value="hwp">HWP</option>
-                <option value="hwpx">HWPX</option>
-                <option value="docx">DOCX</option>
-                <option value="text">TXT / Markdown</option>
-                <option value="csv">CSV</option>
-                <option value="sqlite">SQLite</option>
+                <option value="auto">자동 감지</option><option value="pdf">PDF</option><option value="image">이미지</option>
+                <option value="hwp">HWP</option><option value="hwpx">HWPX</option><option value="docx">DOCX</option>
+                <option value="text">TXT / Markdown</option><option value="csv">CSV</option><option value="sqlite">SQLite</option>
               </select>
-
-              <label class="dropzone" for="fileInput" id="dropzone">
-                <span>파일 선택 또는 드래그&amp;드롭</span>
-                <strong id="fileName">HWP, HWPX, DOCX, PDF, 이미지, TXT</strong>
+              <label class="dropzone" for="fileInput" id="dropzone" tabindex="0">
+                <span class="upload-icon" aria-hidden="true">↑</span>
+                <strong>파일 선택 또는 드래그&amp;드롭</strong>
+                <small id="fileName">HWP, HWPX, DOCX, PDF, 이미지, TXT</small>
               </label>
-              <input id="fileInput" type="file" multiple />
-
-              <div class="import-actions three-actions">
+              <input id="fileInput" class="visually-hidden" type="file" multiple />
+              <div class="import-actions">
                 <button id="importButton" type="button">가져와서 편집</button>
                 <button id="quickImportButton" class="primary" type="button">바로 만들기</button>
-                <button id="layoutExportButton" class="wide-action" type="button">PDF 원본 레이아웃 HWPX</button>
               </div>
-              <label class="check-label layout-ai-option" title="선택한 경우 수식 crop을 Gemini 3.5로 인식해 HWPX 수식 입력을 보강합니다.">
-                <input id="layoutMathAi" type="checkbox" />
-                Gemini 3.5 수식 보강
+              <button id="layoutExportButton" class="secondary-full" type="button">PDF 원본 좌표로 HWPX 복원</button>
+              <label class="check-label layout-ai-option" title="PDF의 수식 이미지를 Gemini로 인식해 한컴 수식 입력을 보강합니다.">
+                <input id="layoutMathAi" type="checkbox" /> Gemini 수식 인식 사용
               </label>
             </div>
 
             <div id="textModePanel" class="input-mode-panel hidden" data-input-panel="text">
-              <input id="manualTitle" type="text" placeholder="제목" />
+              <input id="manualTitle" type="text" placeholder="문항 제목" aria-label="문항 제목" />
               <div class="math-toolbar" aria-label="수식 삽입">
-                <button type="button" title="위첨자" data-math-target="manual" data-math-insert="x^2">x²</button>
-                <button type="button" title="아래첨자" data-math-target="manual" data-math-insert="x_{n}">xₙ</button>
-                <button type="button" title="분수" data-math-target="manual" data-math-insert="\frac{a}{b}">a/b</button>
-                <button type="button" title="루트" data-math-target="manual" data-math-insert="\sqrt{x}">√</button>
-                <button type="button" title="합 기호" data-math-target="manual" data-math-insert="\sum_{k=1}^{n}">Σ</button>
-                <button type="button" title="적분" data-math-target="manual" data-math-insert="\int_{0}^{1} dx">∫</button>
-                <button type="button" title="위선" data-math-target="manual" data-math-insert="\overline{x}">x̅</button>
-                <button type="button" title="벡터" data-math-target="manual" data-math-insert="\vec{v}">v⃗</button>
-                <button type="button" title="작거나 같음" data-math-target="manual" data-math-insert="≤">≤</button>
-                <button type="button" title="같지 않음" data-math-target="manual" data-math-insert="≠">≠</button>
+                <button type="button" title="위첨자" data-math-target="manual" data-math-insert="x^2">x²</button><button type="button" title="아래첨자" data-math-target="manual" data-math-insert="x_{n}">xₙ</button>
+                <button type="button" title="분수" data-math-target="manual" data-math-insert="\frac{a}{b}">a/b</button><button type="button" title="루트" data-math-target="manual" data-math-insert="\sqrt{x}">√</button>
+                <button type="button" title="합 기호" data-math-target="manual" data-math-insert="\sum_{k=1}^{n}">Σ</button><button type="button" title="적분" data-math-target="manual" data-math-insert="\int_{0}^{1} dx">∫</button>
               </div>
-              <textarea id="manualStem" rows="8" placeholder="문제 본문, 선지, 정답·해설을 붙여넣기"></textarea>
-              <div class="import-actions">
-                <button id="manualButton" type="button">가져와서 편집</button>
-                <button id="quickManualButton" class="primary" type="button">바로 만들기</button>
-              </div>
+              <textarea id="manualStem" rows="9" placeholder="문제 본문, 선지, 정답·해설을 붙여넣기"></textarea>
+              <div class="import-actions"><button id="manualButton" type="button">가져와서 편집</button><button id="quickManualButton" class="primary" type="button">바로 만들기</button></div>
             </div>
 
             <div id="urlModePanel" class="input-mode-panel hidden" data-input-panel="url">
-              <input id="collectUrl" type="url" placeholder="https:// 자료 페이지 주소" />
-              <div class="import-actions">
-                <button id="collectButton" type="button">가져와서 편집</button>
-                <button id="quickCollectButton" class="primary" type="button">바로 만들기</button>
-              </div>
+              <input id="collectUrl" type="url" placeholder="https:// 자료 페이지 주소" aria-label="수집할 URL" />
+              <div class="import-actions"><button id="collectButton" type="button">가져와서 편집</button><button id="quickCollectButton" class="primary" type="button">바로 만들기</button></div>
             </div>
 
             <details class="history-details">
-              <summary>
-                <span>최근 만든 파일</span>
-                <span id="historyBadge">0</span>
-              </summary>
+              <summary><span>최근 만든 파일</span><span id="historyBadge">0</span></summary>
               <div id="historyList" class="history-list"></div>
             </details>
-            </div>
           </section>
 
-          <section id="libraryPanel" class="side-pane list-panel hidden" data-side-pane="library" aria-label="문제 보관함">
-            <div class="panel-title with-count library-heading">
-              <div>
-                <span class="panel-kicker">문제 보관함</span>
-                <h2>2. 검토해서 시험지에 담기</h2>
-              </div>
-              <span id="countBadge">0</span>
-            </div>
-            <p class="panel-note">가져온 문제를 확인하고, 필요한 문항만 오른쪽 시험지 구성으로 보냅니다.</p>
-            <div class="selection-bridge" aria-label="문제 담기 흐름">
-              <div>
-                <strong>가져온 문제</strong>
-                <span id="libraryProblemHint">검색 결과 0개</span>
-              </div>
-              <span aria-hidden="true">→</span>
-              <div>
-                <strong>오른쪽 시험지</strong>
-                <span id="libraryBasketHint">담은 문제 0개</span>
-              </div>
+          <section id="libraryPanel" class="side-pane hidden" data-side-pane="library" role="tabpanel" aria-label="문제 보관함">
+            <div class="pane-heading with-count">
+              <div><span class="section-index">02</span><h2>문제 보관함</h2></div><span id="countBadge" class="count-label">0</span>
+              <p>문항을 선택해 편집하고 시험지에 담습니다.</p>
             </div>
             <div class="filters">
-              <input id="searchInput" type="search" placeholder="번호, 제목, 본문 검색" aria-label="문제 검색" />
+              <input id="searchInput" type="search" placeholder="번호·제목·본문 검색" aria-label="문제 검색" />
               <select id="sourceFilter" aria-label="자료 종류 필터">
-                <option value="">전체</option>
-                <option value="manual">직접</option>
-                <option value="pdf">PDF</option>
-                <option value="image">이미지</option>
-                <option value="hwp">HWP</option>
-                <option value="hwpx">HWPX</option>
-                <option value="docx">DOCX</option>
-                <option value="text">텍스트</option>
-                <option value="web">웹</option>
-                <option value="csv">CSV</option>
-                <option value="sqlite">SQLite</option>
+                <option value="">전체 자료</option><option value="manual">직접</option><option value="pdf">PDF</option><option value="image">이미지</option>
+                <option value="hwp">HWP</option><option value="hwpx">HWPX</option><option value="docx">DOCX</option><option value="text">텍스트</option>
+                <option value="web">웹</option><option value="csv">CSV</option><option value="sqlite">SQLite</option>
               </select>
             </div>
-            <div class="bulk-row">
-              <button id="selectAllButton">검색 결과 모두 담기</button>
-              <button id="clearSelectionButton">담은 문제 비우기</button>
-            </div>
+            <div class="selection-summary"><span id="libraryProblemHint">검색 결과 0개</span><span id="libraryBasketHint">시험지 0개</span></div>
+            <div class="bulk-row"><button id="selectAllButton">검색 결과 모두 담기</button><button id="clearSelectionButton">시험지 비우기</button></div>
             <div id="problemList" class="problem-list"></div>
           </section>
         </aside>
 
-        <section class="editor-panel tool-panel" aria-label="시험지 구성과 문제 확인">
-          <section class="merge-panel" aria-label="시험지 구성">
-            <div class="panel-title with-count">
-              <h2>3. 시험지 구성</h2>
-              <span id="basketBadge">0</span>
-            </div>
-            <div class="export-box">
-              <input id="exportTitle" type="text" value="새 시험지" aria-label="문서 제목" />
-              <select id="exportTemplate" aria-label="내보내기 양식">
-                <option value="basic">기본 문항 모음</option>
-              </select>
-              <select id="exportFormat" aria-label="내보내기 형식">
-                <option value="hwpx">HWPX</option>
-                <option value="docx">DOCX</option>
-              </select>
-              <label class="check-label" title="문서 끝에 새 페이지로 빠른 정답표와 문항별 해설을 붙입니다">
-                <input id="exportAnswerSheet" type="checkbox" />
-                정답·해설지
-              </label>
-              <label id="nativeMathLabel" class="check-label" title="HWPX에서 지원 수식을 한컴 수식 객체로 내보냅니다">
-                <input id="exportNativeMath" type="checkbox" />
-                네이티브 수식
-              </label>
-              <button id="previewButton">시험지 미리보기</button>
-              <button id="exportButton" class="primary">시험지 파일 만들기</button>
-            </div>
-            <div class="merge-actions">
-              <span id="selectedText">담은 문제 0개</span>
-              <button id="basketClearButton" class="ghost mini-button">비우기</button>
-            </div>
-            <div class="layout-toolbar" aria-label="시험지 위치 기준">
-              <span>2단 시험지</span>
-              <span>드래그해서 순서·위치 변경</span>
-            </div>
-            <div class="paper-stage" aria-label="시험지 페이지 배치 미리보기">
-              <div class="paper-sheet">
-                <div class="paper-header">
-                  <div>
-                    <span class="paper-kicker">모의평가형 문제지</span>
-                    <strong id="paperTitlePreview">새 시험지</strong>
-                  </div>
-                  <div class="paper-meta">
-                    <span>성명</span>
-                    <i></i>
-                    <span id="paperCountPreview">0문항</span>
-                  </div>
-                </div>
-                <div class="paper-subhead">
-                  <span>홀수 문항은 왼쪽, 짝수 문항은 오른쪽 열에 배치됩니다.</span>
-                  <span>수능·평가원형 2단 기준</span>
-                </div>
-                <div id="basketList" class="basket-list"></div>
-              </div>
-            </div>
-          </section>
+        <div id="sourceDivider" class="pane-divider source-divider" role="separator" aria-label="자료 패널 너비 조절" aria-orientation="vertical" aria-valuemin="240" aria-valuemax="440" aria-valuenow="280" tabindex="0" data-divider="source">
+          <button class="pane-collapse-button" type="button" data-collapse-pane="source" aria-controls="sourceWorkPane" aria-expanded="true" aria-label="자료 패널 접기">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12.5 5-5 5 5 5" /></svg>
+          </button>
+          <span class="divider-grip" aria-hidden="true"></span>
+        </div>
 
-          <section class="edit-panel" aria-label="문제 확인과 수정">
-            <div class="panel-title">
-              <h2>문제 확인·수정</h2>
-              <button id="deleteButton" class="danger ghost">삭제</button>
-            </div>
-
-            <div id="emptyEditor" class="empty-editor">가져온 문제를 선택하세요.</div>
-
-            <form id="editorForm" class="editor-form hidden">
+        <section class="work-pane editor-pane" aria-label="문항 편집">
+          <div class="pane-titlebar">
+            <div><span class="section-index">02</span><h2>문항 편집</h2><span id="editorContext" class="pane-context">선택 없음</span></div>
+            <button id="deleteButton" class="danger ghost" type="button" disabled>삭제</button>
+          </div>
+          <div id="emptyEditor" class="empty-editor">
+            <div class="empty-symbol" aria-hidden="true">✎</div>
+            <strong>편집할 문항을 선택하세요</strong>
+            <span>왼쪽 문제 보관함이나 오른쪽 문항 순서에서 문항을 고르면 이곳에서 바로 수정할 수 있습니다.</span>
+          </div>
+          <form id="editorForm" class="editor-form hidden">
             <section id="contentInspector" class="content-inspector" aria-label="내용 확인">
               <div class="inspector-head">
-                <h3>내용 확인</h3>
-                <div id="contentBadges" class="content-badges"></div>
+                <h3>내용 상태</h3>
+                <div class="inspector-actions">
+                  <div id="contentBadges" class="content-badges"></div>
+                  <button id="recognitionLayerButton" class="ghost mini-button inspector-layer-button" type="button" disabled>인식 레이어</button>
+                </div>
               </div>
-              <div class="stem-preview-block">
-                <div class="preview-label">본문 미리보기</div>
-                <div id="stemPreview" class="stem-preview"></div>
-              </div>
+              <div id="stemPreview" class="stem-preview"></div>
             </section>
-            <div class="two-col">
-              <input id="editNumber" type="text" placeholder="번호" />
-              <input id="editTitle" type="text" placeholder="제목" />
+            <div class="editor-meta-strip" aria-label="문항 기본 정보">
+              <label class="meta-number"><span>번호</span><input id="editNumber" type="text" placeholder="1" /></label>
+              <label class="meta-title"><span>제목</span><input id="editTitle" type="text" placeholder="문항 제목" /></label>
+              <label class="meta-subject"><span>과목</span><input id="editSubject" type="text" placeholder="수학" /></label>
+              <label class="meta-unit"><span>단원</span><input id="editUnit" type="text" placeholder="단원" /></label>
+              <label class="meta-tags"><span>태그</span><input id="editTags" type="text" placeholder="쉼표로 구분" /></label>
             </div>
-            <div class="two-col">
-              <input id="editSubject" type="text" placeholder="과목" />
-              <input id="editUnit" type="text" placeholder="단원" />
+            <label class="field stem-field-label" for="editStem"><span>문제 본문</span></label>
+            <div class="math-toolbar editor-math-toolbar" aria-label="수식 삽입">
+              <button type="button" title="위첨자" data-math-target="editor" data-math-insert="x^2">x²</button><button type="button" title="아래첨자" data-math-target="editor" data-math-insert="x_{n}">xₙ</button>
+              <button type="button" title="분수" data-math-target="editor" data-math-insert="\frac{a}{b}">a/b</button><button type="button" title="루트" data-math-target="editor" data-math-insert="\sqrt{x}">√</button>
+              <button type="button" title="합 기호" data-math-target="editor" data-math-insert="\sum_{k=1}^{n}">Σ</button><button type="button" title="적분" data-math-target="editor" data-math-insert="\int_{0}^{1} dx">∫</button>
+              <button type="button" title="위선" data-math-target="editor" data-math-insert="\overline{x}">x̅</button><button type="button" title="벡터" data-math-target="editor" data-math-insert="\vec{v}">v⃗</button>
+              <button type="button" title="작거나 같음" data-math-target="editor" data-math-insert="≤">≤</button><button type="button" title="같지 않음" data-math-target="editor" data-math-insert="≠">≠</button>
             </div>
-            <input id="editTags" type="text" placeholder="태그" />
-            <div class="math-toolbar" aria-label="수식 삽입">
-              <button type="button" title="위첨자" data-math-target="editor" data-math-insert="x^2">x²</button>
-              <button type="button" title="아래첨자" data-math-target="editor" data-math-insert="x_{n}">xₙ</button>
-              <button type="button" title="분수" data-math-target="editor" data-math-insert="\frac{a}{b}">a/b</button>
-              <button type="button" title="루트" data-math-target="editor" data-math-insert="\sqrt{x}">√</button>
-              <button type="button" title="합 기호" data-math-target="editor" data-math-insert="\sum_{k=1}^{n}">Σ</button>
-              <button type="button" title="적분" data-math-target="editor" data-math-insert="\int_{0}^{1} dx">∫</button>
-              <button type="button" title="위선" data-math-target="editor" data-math-insert="\overline{x}">x̅</button>
-              <button type="button" title="벡터" data-math-target="editor" data-math-insert="\vec{v}">v⃗</button>
-              <button type="button" title="작거나 같음" data-math-target="editor" data-math-insert="≤">≤</button>
-              <button type="button" title="같지 않음" data-math-target="editor" data-math-insert="≠">≠</button>
+            <textarea id="editStem" rows="7" placeholder="문제 본문"></textarea>
+            <div class="secondary-editor-grid">
+              <label class="choices-field"><span>선지</span><textarea id="editChoices" rows="5" placeholder="한 줄에 하나씩 입력"></textarea></label>
+              <div class="secondary-side">
+                <div class="answer-source-row">
+                  <label><span>정답</span><input id="editAnswer" type="text" placeholder="정답" /></label>
+                  <label><span>출처</span><input id="editSource" type="text" placeholder="출처" /></label>
+                </div>
+                <label class="explanation-field"><span>해설</span><textarea id="editExplanation" rows="3" placeholder="정답 근거와 풀이"></textarea></label>
+              </div>
             </div>
-            <textarea id="editStem" rows="9" placeholder="문제 본문"></textarea>
-            <textarea id="editChoices" rows="5" placeholder="선지: 한 줄에 하나씩"></textarea>
-            <div class="two-col">
-              <input id="editAnswer" type="text" placeholder="정답" />
-              <input id="editSource" type="text" placeholder="출처" />
-            </div>
-            <textarea id="editExplanation" rows="5" placeholder="해설"></textarea>
             <div id="imagePreview" class="image-preview"></div>
-            <div class="image-actions">
-              <button id="attachButton" type="button">이미지 추가</button>
-              <input id="attachInput" type="file" accept="image/*" multiple hidden />
+            <div class="image-actions"><button id="attachButton" type="button">이미지 추가</button><input id="attachInput" type="file" accept="image/*" multiple hidden /></div>
+
+            <section class="ai-assistant" aria-label="AI 문항 도우미">
+              <div class="ai-assistant-head">
+                <div><h3>AI 문항 도우미</h3><p id="aiPanelStatus">원문을 바꾸지 않고 검토 결과만 제안합니다.</p></div>
+                <button id="aiSettingsButton" class="ghost mini-button" type="button">설정</button>
+              </div>
+              <div class="ai-actions">
+                <button id="aiReviewButton" type="button"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="m7 10 2 2 4-4"/></svg><strong>문항 점검</strong><span>완결성·정답·해설 검사</span></button>
+                <button id="aiMathButton" type="button"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M14.5 4H6l4 6-4 6h8.5M5 4h2M5 16h2"/></svg><strong>수식 분석</strong><span>수식 구조와 표기 확인</span></button>
+                <button id="aiOcrButton" type="button"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4M6 8h8M6 11h6M6 14h8"/></svg><strong>이미지 OCR</strong><span>첨부 이미지 글자 인식</span></button>
+                <button id="aiReconstructButton" type="button"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="12" height="12" rx="2"/><path d="m5 13 3-3 2 2 2-2 3 3M15 3v4M13 5h4"/></svg><strong>그림 복원</strong><span>문제 그림을 선명하게 재구성</span></button>
+              </div>
+              <div id="aiResult" class="ai-result hidden" aria-live="polite"><div class="ai-result-head"><strong>AI 결과</strong><button id="aiResultClose" class="ghost mini-button" type="button">닫기</button></div><div id="aiResultContent"></div></div>
+            </section>
+            <div class="editor-submitbar"><span>미리보기·내보내기 전 자동 저장됩니다.</span><button class="primary" type="submit">문항 저장</button></div>
+          </form>
+        </section>
+
+        <div id="previewDivider" class="pane-divider preview-divider" role="separator" aria-label="미리보기 패널 너비 조절" aria-orientation="vertical" aria-valuemin="340" aria-valuemax="620" aria-valuenow="400" tabindex="0" data-divider="preview">
+          <button class="pane-collapse-button" type="button" data-collapse-pane="preview" aria-controls="previewWorkPane" aria-expanded="true" aria-label="미리보기 패널 접기">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.5 5 5 5-5 5" /></svg>
+          </button>
+          <span class="divider-grip" aria-hidden="true"></span>
+        </div>
+
+        <section id="previewWorkPane" class="work-pane preview-pane" aria-label="시험지 미리보기와 내보내기">
+          <div class="pane-titlebar">
+            <div><span class="section-index">03</span><h2>시험지 미리보기</h2></div>
+            <div class="preview-title-actions">
+              <div class="zoom-toolbar" role="toolbar" aria-label="시험지 확대와 이동">
+                <button id="zoomOutButton" type="button" title="축소 (-)" aria-label="시험지 축소" aria-keyshortcuts="-">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10h10" /></svg>
+                </button>
+                <button id="zoomLabel" class="zoom-label" type="button" title="100%로 초기화 (Shift+0)" aria-label="시험지 배율 100%, 눌러 초기화" aria-live="polite">100%</button>
+                <button id="zoomInButton" type="button" title="확대 (+)" aria-label="시험지 확대" aria-keyshortcuts="+">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10h10M10 5v10" /></svg>
+                </button>
+                <button id="zoomFitButton" type="button" title="화면 맞춤 (Shift+1)" aria-label="시험지를 화면에 맞춤" aria-keyshortcuts="Shift+1">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 3H3v4M13 3h4v4M17 13v4h-4M7 17H3v-4" /></svg>
+                </button>
+                <button id="previewPanButton" type="button" title="이동 도구 (Space+드래그)" aria-label="시험지 이동 도구" aria-pressed="false">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.3 9V5.7a1.2 1.2 0 0 1 2.4 0V9 4.8a1.2 1.2 0 0 1 2.4 0V9 6a1.2 1.2 0 0 1 2.4 0v5.1l1-1a1.4 1.4 0 0 1 2 2l-3.7 4.3c-.7.8-1.7 1.3-2.8 1.3H8.7c-1.3 0-2.5-.7-3.2-1.8L3 12a1.3 1.3 0 0 1 2.2-1.4L7.3 13V9Z" /></svg>
+                </button>
+              </div>
+              <span id="basketBadge" class="count-label">0</span>
             </div>
-              <button class="primary" type="submit">저장</button>
-            </form>
-          </section>
+          </div>
+          <div class="preview-controls">
+            <label><span>제목</span><input id="exportTitle" type="text" value="새 시험지" /></label>
+            <div class="field-row">
+              <label><span>양식</span><select id="exportTemplate"><option value="basic">기본 문항 모음</option></select></label>
+              <label><span>형식</span><select id="exportFormat"><option value="hwpx">HWPX</option><option value="docx">DOCX</option></select></label>
+            </div>
+            <div class="option-row">
+              <label class="check-label"><input id="exportAnswerSheet" type="checkbox" /> 정답·해설지</label>
+              <label id="nativeMathLabel" class="check-label"><input id="exportNativeMath" type="checkbox" /> 네이티브 수식</label>
+            </div>
+          </div>
+          <div id="paperStage" class="paper-stage" role="region" tabindex="0" aria-label="시험지 작업 캔버스, 현재 배율 100%. Space를 누른 채 드래그하여 이동합니다.">
+            <div id="paperViewport" class="paper-viewport">
+            <div id="paperSheet" class="paper-sheet one-column">
+              <div class="paper-header">
+                <div><span id="paperTemplateLabel" class="paper-kicker">문항 모음</span><strong id="paperTitlePreview">새 시험지</strong></div>
+                <div class="paper-meta"><span>성명</span><i></i><span id="paperCountPreview">0문항</span></div>
+              </div>
+              <div class="paper-subhead"><span id="paperLayoutHint">선택한 양식은 1단으로 출력됩니다.</span><span id="paperColumnLabel">1단</span></div>
+              <div id="basketList" class="basket-list"></div>
+            </div>
+            </div>
+          </div>
+          <footer class="preview-footer">
+            <div class="merge-actions"><span id="selectedText">담은 문제 0개</span><div><button id="orderEditorButton" class="ghost mini-button" type="button" disabled>순서 편집</button><button id="basketClearButton" class="ghost mini-button" type="button">비우기</button></div></div>
+            <div class="export-actions"><button id="previewButton" type="button">실제 미리보기</button><button id="exportButton" class="primary" type="button">HWPX 만들기</button></div>
+            <div class="preview-note visually-hidden">화면은 문항 순서와 양식을 빠르게 확인하는 작업 미리보기입니다. 실제 페이지 버튼에서 최종 HWPX 렌더를 확인하세요.</div>
+          </footer>
         </section>
       </section>
     </main>
-    <div id="previewModal" class="preview-modal hidden">
+
+    <div id="previewModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="previewModalTitle">
       <div class="preview-dialog">
-        <div class="preview-head">
-          <h2>시험지 미리보기</h2>
-          <span id="previewNote" class="hint"></span>
-          <button id="previewClose" type="button">닫기</button>
+        <div class="modal-head"><div><h2 id="previewModalTitle">실제 페이지 미리보기</h2><span id="previewNote" class="hint"></span></div><button id="previewClose" type="button">닫기</button></div>
+        <div class="actual-preview-toolbar" role="toolbar" aria-label="실제 페이지 미리보기 도구">
+          <div class="actual-preview-pages-control">
+            <button id="actualPreviewPrev" type="button" aria-label="이전 페이지">‹</button>
+            <strong id="actualPreviewPageLabel" aria-live="polite">0 / 0</strong>
+            <button id="actualPreviewNext" type="button" aria-label="다음 페이지">›</button>
+          </div>
+          <div class="actual-preview-zoom-control">
+            <button id="actualPreviewZoomOut" type="button" aria-label="실제 페이지 축소">−</button>
+            <button id="actualPreviewZoomLabel" type="button" aria-label="실제 페이지 100%로 초기화">100%</button>
+            <button id="actualPreviewZoomIn" type="button" aria-label="실제 페이지 확대">＋</button>
+            <button id="actualPreviewFit" type="button">화면 맞춤</button>
+          </div>
         </div>
-        <div id="previewPages" class="preview-pages"></div>
+        <div class="actual-preview-layout">
+          <nav id="previewThumbs" class="preview-thumbs" aria-label="미리보기 페이지 목록"></nav>
+          <div id="actualPreviewStage" class="actual-preview-stage" tabindex="0" aria-label="실제 출력 페이지">
+            <div id="actualPreviewViewport" class="actual-preview-viewport">
+              <img id="actualPreviewImage" alt="" />
+            </div>
+            <div id="previewPages" class="preview-pages visually-hidden" aria-hidden="true"></div>
+          </div>
+        </div>
       </div>
     </div>
+
+    <div id="orderEditorModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="orderEditorTitle">
+      <div class="order-dialog">
+        <div class="modal-head"><div><h2 id="orderEditorTitle">문항 순서 편집</h2><p id="orderEditorCount">담은 문제 0개</p></div><button id="orderEditorClose" type="button">닫기</button></div>
+        <p class="order-editor-help">위·아래 버튼 또는 Alt + ↑↓로 이동하세요. 적용 전에는 원래 순서가 유지됩니다.</p>
+        <div id="orderEditorList" class="order-editor-list"></div>
+        <div class="modal-actions"><span id="orderEditorStatus" class="hint" aria-live="polite"></span><div><button id="orderEditorCancel" type="button">취소</button><button id="orderEditorApply" class="primary" type="button">순서 적용</button></div></div>
+      </div>
+    </div>
+
+    <div id="recognitionLayerModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="recognitionLayerTitle">
+      <div class="recognition-dialog">
+        <div class="modal-head"><div><h2 id="recognitionLayerTitle">문제 인식 레이어</h2><p id="recognitionLayerContext">선택한 문항의 실제 구조 데이터를 표시합니다.</p></div><button id="recognitionLayerClose" type="button">닫기</button></div>
+        <div class="recognition-body">
+          <div id="recognitionLayerSummary" class="recognition-summary" aria-label="인식 요약"></div>
+          <section class="recognition-map-card" aria-labelledby="recognitionMapTitle">
+            <div class="recognition-section-head"><div><h3 id="recognitionMapTitle">페이지 구조 지도</h3><p>원본 이미지가 아닌 페이지 좌표·문항 영역·줄 위치의 구조 보기입니다.</p></div><span id="recognitionPageLabel"></span></div>
+            <div id="recognitionLayerMap" class="recognition-map"></div>
+          </section>
+          <section class="recognition-list-card" aria-labelledby="recognitionListTitle">
+            <div class="recognition-section-head"><div><h3 id="recognitionListTitle">인식 항목</h3><p>값이 없는 항목도 누락 여부를 빠르게 확인할 수 있습니다.</p></div></div>
+            <div id="recognitionLayerList" class="recognition-layer-list"></div>
+          </section>
+        </div>
+        <div class="modal-actions"><span class="hint">표시 전용이며 문항 내용은 변경하지 않습니다.</span><button id="recognitionLayerDone" class="primary" type="button">편집으로 돌아가기</button></div>
+      </div>
+    </div>
+
+    <div id="aiSettingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="aiSettingsTitle">
+      <form id="aiSettingsForm" class="settings-dialog">
+        <div class="modal-head"><div><h2 id="aiSettingsTitle">AI 연결 설정</h2><p>키는 이 컴퓨터의 로컬 설정에 저장되며 화면에 다시 표시되지 않습니다.</p></div><button id="aiSettingsClose" type="button">닫기</button></div>
+        <div class="settings-body">
+          <label><span>Gemini API 키</span><input id="geminiApiKey" type="password" autocomplete="off" placeholder="변경할 때만 입력" /><small id="geminiKeyStatus">상태 확인 중</small></label>
+          <label><span>OpenAI API 키</span><input id="openAiApiKey" type="password" autocomplete="off" placeholder="변경할 때만 입력" /><small id="openAiKeyStatus">상태 확인 중</small></label>
+          <p>원격 OCR·그림 복원은 실행 직전에 전송 동의를 다시 확인합니다. 로컬 문항 점검과 수식 분석은 키 없이 작동합니다.</p>
+        </div>
+        <div class="settings-actions"><button id="aiSettingsSave" class="primary" type="submit">설정 저장</button></div>
+      </form>
+    </div>
+
+    <div id="shortcutHelpModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shortcutHelpTitle">
+      <div class="shortcut-dialog">
+        <div class="modal-head"><div><h2 id="shortcutHelpTitle">키보드 단축키</h2><p>Windows에서는 Ctrl, macOS에서는 ⌘ 키를 사용합니다.</p></div><button id="shortcutHelpClose" type="button">닫기</button></div>
+        <div class="shortcut-list">
+          <div><span>현재 문항 저장</span><kbd>Ctrl/⌘ S</kbd></div>
+          <div><span>파일 열기</span><kbd>Ctrl/⌘ O</kbd></div>
+          <div><span>실제 페이지 미리보기</span><kbd>Ctrl/⌘ Enter</kbd></div>
+          <div><span>자료 패널 접기</span><kbd>Ctrl/⌘ B</kbd></div>
+          <div><span>미리보기 패널 접기</span><kbd>Ctrl/⌘ \</kbd></div>
+          <div><span>문제 검색</span><kbd>/</kbd></div>
+          <div><span>시험지 확대 / 축소</span><kbd>+ / −</kbd></div>
+          <div><span>100% / 화면 맞춤</span><kbd>Shift 0 / Shift 1</kbd></div>
+          <div><span>시험지 이동</span><kbd>Space + Drag</kbd></div>
+          <div><span>도움말 열기</span><kbd>?</kbd></div>
+        </div>
+      </div>
+    </div>
+
     <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
-    <script src="/static/app.js?v=12" type="module"></script>
+    <script src="/static/app.js?v=25" type="module"></script>
   </body>
 </html>
