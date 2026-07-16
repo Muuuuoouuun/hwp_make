@@ -26,7 +26,10 @@ from .math_text import normalize_math_token, split_math_text, strip_math_delimit
 
 CIRCLED_NUMBERS = ("①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨")
 QUESTION_PREFIX_RE = re.compile(r"^\s*(?:문제\s*)?(\d{1,3})\s*[\.\)]\s*")
-CHOICE_PREFIX_RE = re.compile(r"^\s*(?:[①②③④⑤⑥⑦⑧⑨]|\d+\s*[\.\)]|[1-9](?=\s))\s*")
+CHOICE_PREFIX_RE = re.compile(
+    r"^\s*(?:[①②③④⑤⑥⑦⑧⑨❶❷❸❹❺❻❼❽❾➀➁➂➃➄➅➆➇➈]|"
+    r"\d+\s*[\.\)]|[1-9](?=\s))\s*"
+)
 
 # XML에서 허용되지 않는 제어문자. python-docx는 이런 문자가 있으면 저장 시 예외를 던진다.
 _XML_ILLEGAL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")

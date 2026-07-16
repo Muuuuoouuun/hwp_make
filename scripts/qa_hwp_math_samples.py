@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("HWP_MAKE_DATA_DIR", str(ROOT / "data" / "hwp_math_sample_qa"))
 
-from app import hwpx_writer, hwpx_writer_v2, importers, math_text, storage  # noqa: E402
+from app import hwpx_writer, hwpx_writer_v2, importers, importers_hwp_ir, math_text, storage  # noqa: E402
 
 
 HP_NS = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
@@ -49,7 +49,10 @@ EXPECTED_SAMPLE_NAMES = (
     "2025\ud559\ub144\ub3c4 \uc218\ub2a5 \uc218\ud559(\ud3b8\uc9d1).hwp",
 )
 PROBLEM_LABEL_RE = re.compile(r"^\s*(?P<number>\d{1,3})\.\s*")
-UNIT_MARKER_RE = re.compile("^\\s*\\[(?P<score>\\d+\\s*점)\\]\\[(?P<section>.*?)(?P<number>\\d{1,3})\\]\\s*$")
+UNIT_MARKER_RE = re.compile(
+    "^\\s*\\[(?P<score>\\d+\\s*점)\\]\\[(?P<section>.*?)(?P<number>\\d{1,3})"
+    "\\s*(?:번)?\\]\\s*$"
+)
 HANGUL_RE = re.compile(r"[\uac00-\ud7a3]")
 BAD_EQN_SQRT_RE = re.compile(
     r"(?<![A-Za-z])sqrt(?=\{|[A-Za-z0-9])|(?<![A-Za-z])sqrt\s*(?=$|[^\s{])"
@@ -87,6 +90,32 @@ def _discover_default_samples() -> tuple[list[Path], list[str]]:
     ordered = [by_name[name] for name in EXPECTED_SAMPLE_NAMES if name in by_name]
     extras = [path for path in discovered if path.name not in EXPECTED_SAMPLE_NAMES]
     return [*ordered, *extras], missing
+
+
+def _source_problem_count(path: Path) -> int:
+    """원본 IR의 결합/후행 출처 마커 수로 기대 문항 수를 정한다."""
+    try:
+        stream = importers_hwp_ir._ordered_stream(
+            path.read_bytes(),
+            path.name,
+            lambda name, payload: None,
+        )
+    except Exception:
+        return 0
+    if not stream:
+        return 0
+    trailing = sum(
+        1
+        for kind, value in stream
+        if kind == "text" and importers_hwp_ir._trailing_source_match(str(value).strip())
+    )
+    if trailing:
+        return trailing
+    return sum(
+        1
+        for kind, value in stream
+        if kind == "text" and importers_hwp_ir._MARKER_RE.match(str(value).strip())
+    )
 
 
 def _inspect_hwpx(path: Path) -> dict[str, Any]:
@@ -357,19 +386,32 @@ def _inspect_hwpx(path: Path) -> dict[str, Any]:
                             "pageBreak": paragraph.get("pageBreak"),
                         }
                     )
+                table_size_nodes = {
+                    id(size_node)
+                    for table in paragraph.iter(f"{HP_NS}tbl")
+                    for size_node in table.iter(f"{HP_NS}sz")
+                }
                 for size_node in paragraph.iter(f"{HP_NS}sz"):
                     try:
                         width = int(size_node.get("width") or "0")
                         height = int(size_node.get("height") or "0")
                     except ValueError:
                         continue
-                    if width > 0 and height > 30000:
+                    is_table = id(size_node) in table_size_nodes
+                    safe_height = (
+                        int(hwpx_writer_v2.KICE_MATH_COLUMN_BODY_HEIGHT * 0.90)
+                        if is_table
+                        else 30000
+                    )
+                    if width > 0 and height > safe_height:
                         oversized_objects.append(
                             {
                                 "section": name,
                                 "paragraph": index,
+                                "kind": "table" if is_table else "drawing",
                                 "width": width,
                                 "height": height,
+                                "safe_height": safe_height,
                                 "text": para_text[:80],
                             }
                         )
@@ -881,11 +923,11 @@ def _number_failures(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     failures = []
     for index, item in enumerate(items, start=1):
         number = str(item.get("number") or "").strip()
-        if not number.isdigit() or not 1 <= int(number) <= 46:
+        if not number.isdigit() or not 1 <= int(number) <= 99:
             failures.append({"index": index, "number": number, "unit": item.get("unit")})
             continue
         unit = str(item.get("unit") or "")
-        unit_number = re.search(r"(\d{1,2})\]\s*$", unit)
+        unit_number = re.search(r"(\d{1,3})\s*(?:번)?\]\s*$", unit)
         if unit_number and str(int(unit_number.group(1))) != number:
             failures.append({"index": index, "number": number, "unit": unit})
     return failures
@@ -1832,6 +1874,7 @@ def _run_one(
     storage.DB_PATH.unlink(missing_ok=True)
     storage.init_db()
 
+    expected_problem_count = _source_problem_count(path) or 46
     result = importers.import_hwp(path.name, path.read_bytes(), {})
     items = list(result.get("created") or [])
     choice_dist = Counter(len(item.get("choices") or []) for item in items)
@@ -1877,8 +1920,10 @@ def _run_one(
     mojibake_hits = _mojibake_text_hits(inspect)
 
     failures: list[str] = []
-    if len(items) != 46:
-        failures.append(f"expected 46 imported problems for KICE-style math sample, got {len(items)}")
+    if len(items) != expected_problem_count:
+        failures.append(
+            f"expected {expected_problem_count} imported problems from source markers, got {len(items)}"
+        )
     bad_choices = _choice_failures(items)
     if bad_choices:
         failures.append(f"bad choice counts: {bad_choices[:8]}")
@@ -1991,7 +2036,10 @@ def _run_one(
     if inspect.get("choice_table_breaks"):
         failures.append(f"choice grids start a new page/column away from their stems: {inspect['choice_table_breaks'][:8]}")
     if inspect.get("oversized_objects"):
-        failures.append(f"drawings are taller than a two-column math layout can safely hold: {inspect['oversized_objects'][:8]}")
+        failures.append(
+            "objects are taller than a two-column math layout can safely hold: "
+            f"{inspect['oversized_objects'][:8]}"
+        )
     if render.get("error"):
         failures.append(f"rhwp render failed: {render['error']}")
     if render.get("overflow_count"):
@@ -2033,6 +2081,7 @@ def _run_one(
     report = {
         "source": str(path),
         "output": str(out_path),
+        "expected_problem_count": expected_problem_count,
         "created": len(items),
         "choice_dist": dict(sorted(choice_dist.items())),
         "first_unit": items[0].get("unit") if items else "",

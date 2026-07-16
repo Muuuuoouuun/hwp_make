@@ -1,8 +1,9 @@
-"""python-hwpx(airmang, vendored) 기반 HWPX 작성기 — 시범 포팅(평가용).
+"""python-hwpx(airmang, vendored) 기반 HWPX 작성기.
 
 기존 hwpx_writer.py는 HWPX를 문자열 템플릿으로 손수 직렬화한다. 이 모듈은
 동일한 write_hwpx 시그니처를 vendored python-hwpx 고수준 API로 재구현해
-출력/렌더 호환성을 비교하기 위한 실험본이다. 아직 main.py에 연결하지 않는다.
+출력/렌더 호환성을 높인 현재 기본 writer이며 ``app.main``의 HWPX 내보내기
+경로에 연결되어 있다. ``v2`` 이름은 기존 모듈과의 구분을 위해 유지한다.
 """
 from __future__ import annotations
 

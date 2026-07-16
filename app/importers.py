@@ -40,7 +40,9 @@ SAFE_NAME_RE = re.compile(r"[^0-9A-Za-z가-힣._ -]+")
 QUESTION_START_RE = re.compile(
     r"(?m)(?=^\s*(?:문제\s*)?\d{1,3}\s*[\.\)]|\n\s*(?:문제\s*)?\d{1,3}\s*[\.\)])"
 )
-CIRCLED_CHOICE_MARKERS = "①②③④⑤⑥⑦⑧⑨"
+# 시험지 제작 도구마다 서로 다른 원문자 블록을 쓴다. 한컴 기본 원문자(①),
+# dingbat 음각(❶), dingbat sans-serif(➀)를 모두 같은 선택지 마커로 취급한다.
+CIRCLED_CHOICE_MARKERS = "①②③④⑤⑥⑦⑧⑨❶❷❸❹❺❻❼❽❾➀➁➂➃➄➅➆➇➈"
 INLINE_CIRCLED_CHOICE_RE = re.compile(rf"([{CIRCLED_CHOICE_MARKERS}])\s*")
 INLINE_NUMERIC_CHOICE_RE = re.compile(r"(?<![\w/])([1-5])(?:[\.\)])?(?:\s+|$)")
 CHOICE_LINE_RE = re.compile(
@@ -249,7 +251,9 @@ def _import_pdf_recognized(
         if box is not None:
             bbox_px = [box.left, box.top, box.width, box.height]
         pdf_lines = list(getattr(prob, "line_geometries", []) or [])
-        return {
+        shared_passage_lines = list(getattr(prob, "shared_passage_line_geometries", []) or [])
+        passage_range = getattr(prob, "shared_passage_range", None)
+        payload = {
             "column_count": int(getattr(prob, "column_count", 0) or 0),
             "column_index": int(getattr(prob, "column_index", 0) or 0),
             "page": {
@@ -258,10 +262,23 @@ def _import_pdf_recognized(
                 "height_px": int(getattr(prob, "page_height_px", 0) or 0),
             },
             "bbox_px": bbox_px,
-            "block_type": "image_fallback" if getattr(prob, "problem_image_png", None) else "problem",
-            "pdf_lines": pdf_lines,
-            "pdf_line_count": len(pdf_lines),
+            "block_type": (
+                "image_fallback"
+                if getattr(prob, "problem_image_png", None)
+                else "problem_with_shared_passage"
+                if getattr(prob, "shared_passage_text", "")
+                else "problem"
+            ),
+            "pdf_lines": [*shared_passage_lines, *pdf_lines],
+            "pdf_line_count": len(shared_passage_lines) + len(pdf_lines),
         }
+        if passage_range:
+            payload["shared_passage"] = {
+                "range": [int(passage_range[0]), int(passage_range[1])],
+                "source_page": int(getattr(prob, "shared_passage_page_number", 0) or 0),
+                "line_count": len(shared_passage_lines),
+            }
+        return payload
 
     for prob in result.problems:
         image_paths: list[str] = []
@@ -299,6 +316,9 @@ def _import_pdf_recognized(
             geometry_stem = _repair_pdf_stem_fractions_from_geometry(stem_text, pdf_line_geometries)
             if _placeholder_count_in_fields(geometry_stem, choices) < _placeholder_count_in_fields(stem_text, choices):
                 stem_text = geometry_stem
+            shared_passage_text = str(getattr(prob, "shared_passage_text", "") or "").strip()
+            if shared_passage_text:
+                stem_text = f"{shared_passage_text}\n{stem_text}".strip()
 
         number = str(prob.number) if prob.number else ""
         loose_key = _recognized_pdf_loose_duplicate_key(number, stem_text) if loose_dedup_enabled else ""
@@ -1377,7 +1397,7 @@ def import_sqlite(filename: str, payload: bytes, metadata: dict[str, Any]) -> di
 QUESTION_LINE_RE = re.compile(r"^\s*(?:문제\s*)?(\d{1,3})\s*[\.\)]")
 PASSAGE_LEAD_RE = re.compile(r"^\s*\[\s*\d{1,2}\s*[~∼\-–]\s*\d{1,2}\s*\]")
 QUESTION_TRAILER_RE = re.compile(
-    r"^\s*\[(?P<score>\d+점)\]\[(?P<context>[^\]]*?(?P<number>\d{1,3}))\]\s*$"
+    r"^\s*\[(?P<score>\d+점)\]\[(?P<context>[^\]]*?(?P<number>\d{1,3})\s*(?:번)?)\]\s*$"
 )
 
 
@@ -1983,6 +2003,8 @@ def _import_hwp_via_ir(
     stem_name = Path(filename).stem
     sink = _Sink()
     answer_section = False
+    trailing_source_count = 0
+    intent_count = 0
     for prob in problems:
         num = str(prob.get("number") or "")
         stem_text = prob.get("stem", "") or ""
@@ -2024,6 +2046,18 @@ def _import_hwp_via_ir(
             stem_text, choices = _split_stem_and_choices(stem_text)
         else:
             stem_text = _strip_leading_leaked_choice_block(stem_text, choices)
+        source_metadata: dict[str, Any] = {}
+        for key in ("score", "source_marker", "intent", "marker_style"):
+            value = prob.get(key)
+            if value not in (None, ""):
+                source_metadata[key] = value
+        if prob.get("marker_style") == "trailing_source":
+            trailing_source_count += 1
+        if prob.get("intent"):
+            intent_count += 1
+        problem_layout = dict(prob.get("layout") or {})
+        if source_metadata:
+            problem_layout["source_metadata"] = source_metadata
         sink.add(
             {
                 **metadata,
@@ -2036,9 +2070,14 @@ def _import_hwp_via_ir(
                 "choices": choices,
                 "image_paths": prob.get("image_paths", []),
                 "tables": prob.get("tables", []),
+                "layout": problem_layout or None,
             }
         )
     notices = [f"{len(sink.created)}개 문항을 HWP에서 편집 가능하게 가져왔습니다(수식·이미지 포함)."]
+    if trailing_source_count:
+        notices.append(
+            f"후행 출처 마커 {trailing_source_count}개와 출제의도 {intent_count}개를 문항 메타데이터로 보존했습니다."
+        )
     notices.extend(_dedup_notices(sink))
     return {"created": sink.created, "notices": notices}
 

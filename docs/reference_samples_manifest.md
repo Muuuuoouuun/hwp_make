@@ -1,6 +1,6 @@
 # Reference Samples Manifest
 
-Updated: 2026-07-09
+Updated: 2026-07-16
 
 This repository does not commit real KICE, school-exam, or private HWP/PDF reference files by default. This manifest records which local samples are used for QA and why, without storing the files themselves.
 
@@ -39,6 +39,12 @@ Additional local form/template references currently visible in Downloads:
 - `평가원 과탐 양식.hwp`
 - `평가원 사탐 양식.hwp`
 
+2026년 6월 전과목 경향 QA에 추가한 사용자 제공 HWP:
+
+- `2026학년도 6월 고2 국어.hwp`
+- `2026학년도 6월 고1 국어.hwp`
+- `[고1]_2026년_06월_수학.hwp` — 개인 편집본이므로 문구 오타보다 문항 경계, 수식, 표·그림, 레이아웃 경향 검증에 사용
+
 ## Named PDF References
 
 Representative real PDFs currently visible under `data/uploads`:
@@ -52,6 +58,17 @@ Representative real PDFs currently visible under `data/uploads`:
 - `25수능 물리.pdf`
 - `25수능 화학.pdf`
 - `25수능 지구과학.pdf`
+
+`data/full_subject_qa/sources`에 로컬로 내려받은 2026년 6월 고1 문제 PDF:
+
+- `2026-06-고1-국어-문제.pdf`
+- `2026-06-고1-수학-문제.pdf`
+- `2026-06-고1-영어-문제.pdf`
+- `2026-06-고1-한국사-문제.pdf`
+- `2026-06-고1-통합사회-문제.pdf`
+- `2026-06-고1-통합과학-문제.pdf`
+
+위 PDF는 `https://horaeng.com/460`의 과목별 `문제` 링크만 사용했다. 해설과 영어 듣기대본은 내려받지 않았다. 상세 결과는 `docs/full_subject_qa_2026_06.md`에 기록한다.
 
 ## Current Verification Use
 

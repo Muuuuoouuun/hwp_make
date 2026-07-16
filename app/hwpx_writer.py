@@ -860,7 +860,10 @@ COLUMN_GAP = 1200
 PX_TO_HWPUNIT = 75  # 96dpi 기준: px / 96 * 7200
 CIRCLED_NUMBERS = ("①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨")
 QUESTION_PREFIX_RE = re.compile(r"^\s*(?:문제\s*)?(\d{1,3})\s*[\.\)]\s*")
-CHOICE_PREFIX_RE = re.compile(r"^\s*(?:[①②③④⑤⑥⑦⑧⑨]|\d+\s*[\.\)]|[1-9](?=\s))\s*")
+CHOICE_PREFIX_RE = re.compile(
+    r"^\s*(?:[①②③④⑤⑥⑦⑧⑨❶❷❸❹❺❻❼❽❾➀➁➂➃➄➅➆➇➈]|"
+    r"\d+\s*[\.\)]|[1-9](?=\s))\s*"
+)
 SOURCE_MARKER_RE = re.compile(r"^\s*\[\d{1,2}\s*점\]\s*\[[^\]]+\]\s*$")
 
 

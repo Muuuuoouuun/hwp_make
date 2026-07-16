@@ -9,6 +9,8 @@ HWP Make는 PDF, HWP/HWPX, DOCX, 이미지, 텍스트, CSV/SQLite 자료를 문�
 - `README.md`: 실행 방법, 주요 경로, 현재 판정 기준, 검증 명령을 빠르게 확인하는 입구입니다.
 - `docs/product_b_bottleneck_specs.md`: Product B의 현재 기준과 폐기한 옛 기준을 관리하는 canonical 문서입니다.
 - `docs/priority_work_queue.md`: 지금 막아야 하는 P0/P1/P2 작업 큐입니다.
+- `docs/current_self_assessment.md`: 실제 검증 결과를 기준으로 세분화한 현재 완성도와 다음 개발 순서입니다.
+- `docs/full_subject_qa_2026_06.md`: 2026년 6월 고1 전과목 PDF와 사용자 제공 HWP의 과목별 경향 QA입니다.
 - `docs/reference_samples_manifest.md`: 로컬 레퍼런스 시험지 목록과 사용 목적만 기록합니다. 파일 자체는 커밋하지 않습니다.
 - `docs/hwp_open_probe_checklist.md`: 한글 GUI 광고/수정권한/보호보기 이슈를 구분하는 체크리스트입니다.
 

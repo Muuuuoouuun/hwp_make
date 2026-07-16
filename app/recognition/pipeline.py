@@ -16,6 +16,7 @@ storage/importers 에 의존하지 않는다(순환 방지). 산출물은 Recogn
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,6 +29,7 @@ from app.math_text import is_recoverable_pua_math_char, normalize_recognized_mat
 # 문항 본문에서 이 비율 이상이 아직 복원되지 않은 PUA이면 텍스트만으로는 부족하다고 본다.
 # 이 경우 보존용 crop을 붙이되, 가능한 라인/문자 좌표는 계속 남겨 후속 수식 복원에 쓴다.
 _PUA_UNRELIABLE_RATIO = 0.12
+_PASSAGE_RANGE_RE = re.compile(r"\[\s*(\d{1,2})\s*[~～∼\-–]\s*(\d{1,2})\s*\]")
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +49,10 @@ class RecognizedProblem:
     page_width_px: int = 0
     page_height_px: int = 0
     line_geometries: list[dict[str, Any]] = field(default_factory=list)
+    shared_passage_text: str = ""
+    shared_passage_range: tuple[int, int] | None = None
+    shared_passage_page_number: int = 0
+    shared_passage_line_geometries: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -56,6 +62,7 @@ class RecognitionResult:
     exam_title: str = ""
     pages_with_markers: int = 0
     empty_page_numbers: list[int] = field(default_factory=list)
+    passage_page_numbers: list[int] = field(default_factory=list)
     ai_available: bool = False
     ai_used: bool = False
     routing: list[dict[str, Any]] = field(default_factory=list)
@@ -262,6 +269,40 @@ def _page_fallback_problem(page: PageModel, page_number: int, page_img: Any | No
     )
 
 
+def _page_shared_passage(page: PageModel, page_number: int) -> dict[str, Any] | None:
+    """마커 없는 born-digital 페이지에서 ``[N~M]`` 공유 지문을 추출한다."""
+    blocks = page.sorted_blocks()
+    if not blocks:
+        return None
+    start_index = -1
+    start_number = end_number = 0
+    for index, block in enumerate(blocks):
+        match = _PASSAGE_RANGE_RE.search(str(block.text or ""))
+        if match:
+            start_index = index
+            start_number = int(match.group(1))
+            end_number = int(match.group(2))
+            break
+    if start_index < 0 or start_number > end_number:
+        return None
+
+    selected = blocks[start_index:]
+    text = _clean_pua(
+        "\n".join(str(block.text or "").strip() for block in selected if str(block.text or "").strip())
+    ).strip()
+    if not text:
+        return None
+    ids = [block.block_id for block in selected]
+    geometries = _problem_line_geometries({block.block_id: block for block in selected}, ids)
+    return {
+        "page_number": page_number,
+        "start": start_number,
+        "end": end_number,
+        "text": text,
+        "line_geometries": geometries,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 공개 진입점
 # ---------------------------------------------------------------------------
@@ -296,6 +337,7 @@ def recognize_pdf(
     result.exam_title = masthead_from_text(f"{header_source} {filename or ''}")
     result.ai_available = _ai_available()
     any_problems = any(page.problems for page in pages)
+    pending_passages: list[dict[str, Any]] = []
 
     page_images: list[Any] = []
     if any_problems:
@@ -307,14 +349,20 @@ def recognize_pdf(
 
     for page_index, page in enumerate(pages):
         marker_count = int(page.metadata.get("marker_count") or 0)
+        passage = _page_shared_passage(page, page_index + 1) if not page.problems else None
         if marker_count > 0:
             result.pages_with_markers += 1
+        elif passage is not None:
+            result.passage_page_numbers.append(page_index + 1)
         elif page.metadata.get("error") or marker_count == 0:
             # 마커 없음/에러 → AI 폴백 후보
             result.empty_page_numbers.append(page_index + 1)
             result.routing.append(_route_empty_page(page, ai_enabled=result.ai_available))
 
         if not page.problems:
+            if passage is not None:
+                pending_passages.append(passage)
+                continue
             if any_problems:
                 page_img = page_images[page_index] if page_index < len(page_images) else None
                 fallback = _page_fallback_problem(page, page_index + 1, page_img)
@@ -377,6 +425,57 @@ def recognize_pdf(
     result.problems.sort(
         key=lambda p: (p.page_number, p.column_index, p.box.top if p.box else 0.0)
     )
+
+    # 마커 없는 앞쪽 지문 페이지를 범위의 첫 실제 문항에 연결한다. 별도 번호 0 문항을
+    # 만들지 않으므로 inventory는 실제 문항 수를 유지하면서도 지문 텍스트를 잃지 않는다.
+    linked_passages = 0
+    unlinked_passages: list[dict[str, Any]] = []
+    for passage in pending_passages:
+        target = next(
+            (
+                problem
+                for problem in result.problems
+                if problem.number == int(passage["start"])
+                and problem.page_number >= int(passage["page_number"])
+            ),
+            None,
+        )
+        if target is None:
+            unlinked_passages.append(passage)
+            continue
+        passage_text = str(passage.get("text") or "").strip()
+        if target.shared_passage_text:
+            target.shared_passage_text = f"{target.shared_passage_text}\n{passage_text}".strip()
+        else:
+            target.shared_passage_text = passage_text
+        target.shared_passage_range = (int(passage["start"]), int(passage["end"]))
+        target.shared_passage_page_number = int(passage["page_number"])
+        target.shared_passage_line_geometries.extend(passage.get("line_geometries") or [])
+        linked_passages += 1
+
+    # 범위의 첫 문항을 찾지 못한 비정형 문서는 기존 안전망으로 되돌려 콘텐츠를 보존한다.
+    for passage in unlinked_passages:
+        page_number = int(passage["page_number"])
+        page_index = page_number - 1
+        page_img = page_images[page_index] if page_index < len(page_images) else None
+        fallback = _page_fallback_problem(pages[page_index], page_number, page_img)
+        if fallback is not None:
+            result.problems.append(fallback)
+        if page_number not in result.empty_page_numbers:
+            result.empty_page_numbers.append(page_number)
+            result.routing.append(_route_empty_page(pages[page_index], ai_enabled=result.ai_available))
+        if page_number in result.passage_page_numbers:
+            result.passage_page_numbers.remove(page_number)
+
+    if unlinked_passages:
+        result.problems.sort(
+            key=lambda p: (p.page_number, p.column_index, p.box.top if p.box else 0.0)
+        )
+
+    if linked_passages:
+        result.notices.append(
+            f"마커 없는 공유 지문 {linked_passages}쪽을 범위의 첫 문항에 편집 텍스트로 연결했습니다."
+        )
 
     image_fallback = sum(1 for p in result.problems if not p.text_reliable)
     if image_fallback:

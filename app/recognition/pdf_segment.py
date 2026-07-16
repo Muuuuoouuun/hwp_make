@@ -60,8 +60,24 @@ _AMPM_MARKERS = ("오전", "오후", "AM", "PM")
 # 상단 헤더 밴드에서만 배제 근거로 쓰는 토큰(연/월/교시/배점 표기).
 _HEADER_TOKENS = ("年", "월", "교시", "점]", "학년도", "모의평가")
 
-# 객관식 선지 마커(①~⑤). 하단 다듬기(trim) 기준.
-_CHOICE_MARKERS = ("①", "②", "③", "④", "⑤")
+# 객관식 선지 마커. 한컴/출판 도구별 원문자 변형을 함께 받는다.
+_CHOICE_MARKERS = (
+    "①",
+    "②",
+    "③",
+    "④",
+    "⑤",
+    "❶",
+    "❷",
+    "❸",
+    "❹",
+    "❺",
+    "➀",
+    "➁",
+    "➂",
+    "➃",
+    "➄",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +441,64 @@ def _extract_markers(
     return markers
 
 
+def _filter_figure_embedded_markers(
+    markers: list[dict[str, Any]],
+    figures: list[Box],
+    *,
+    width_px: float,
+    height_px: float,
+) -> tuple[list[dict[str, Any]], int]:
+    """자료/그림 안의 번호 목록을 실제 문항 시작과 구분한다.
+
+    단순히 figure 안의 모든 번호를 지우면 문항 전체를 테두리로 감싼 출판물에서 실제
+    번호까지 잃을 수 있다. 따라서 (1) 비교적 작은 지역 figure 안에 완전히 포함되고,
+    (2) figure 밖에서 확인된 문항 마커보다 글자 높이가 확실히 작은 후보만 억제한다.
+    """
+    if not markers or not figures:
+        return markers, 0
+
+    page_area = max(1.0, float(width_px) * float(height_px))
+    max_region_area = page_area * 0.20
+    margin = 2.0
+
+    def containing_region(marker: dict[str, Any]) -> Box | None:
+        box: Box = marker["box"]
+        candidates = [
+            figure
+            for figure in figures
+            if figure.area <= max_region_area
+            and box.left >= figure.left - margin
+            and box.right <= figure.right + margin
+            and box.top >= figure.top - margin
+            and box.bottom <= figure.bottom + margin
+        ]
+        return min(candidates, key=lambda figure: figure.area) if candidates else None
+
+    outside_heights = sorted(
+        float(marker["box"].height)
+        for marker in markers
+        if containing_region(marker) is None and float(marker["box"].height) > 0
+    )
+    if not outside_heights:
+        return markers, 0
+    middle = len(outside_heights) // 2
+    if len(outside_heights) % 2:
+        reference_height = outside_heights[middle]
+    else:
+        reference_height = (outside_heights[middle - 1] + outside_heights[middle]) / 2.0
+
+    kept: list[dict[str, Any]] = []
+    suppressed = 0
+    for marker in markers:
+        region = containing_region(marker)
+        marker_height = float(marker["box"].height)
+        if region is not None and marker_height <= reference_height * 0.92:
+            suppressed += 1
+            continue
+        kept.append(marker)
+    return kept, suppressed
+
+
 def _union_box(a: Box, b: Box) -> Box:
     return Box.from_points(
         min(a.left, b.left), min(a.top, b.top), max(a.right, b.right), max(a.bottom, b.bottom)
@@ -738,12 +812,19 @@ def _segment_page(
     ]
 
     raw_markers = _extract_markers(text_lines, height_px=float(height_px))
-    markers, suppressed_choice_markers = _filter_choice_like_markers(
+    figure_filtered_markers, suppressed_figure_markers = _filter_figure_embedded_markers(
         raw_markers,
+        figures,
+        width_px=float(width_px),
+        height_px=float(height_px),
+    )
+    markers, suppressed_choice_markers = _filter_choice_like_markers(
+        figure_filtered_markers,
         width_px=float(width_px),
         height_px=float(height_px),
     )
     base_metadata["raw_marker_count"] = len(raw_markers)
+    base_metadata["figure_marker_suppressed_count"] = suppressed_figure_markers
     base_metadata["choice_marker_suppressed_count"] = suppressed_choice_markers
     base_metadata["marker_count"] = len(markers)
 
@@ -760,6 +841,41 @@ def _segment_page(
 
     if not markers:
         base_metadata["column_count"] = 0
+        # 마커 없는 born-digital 페이지도 텍스트를 버리지 않는다. 공유 지문 페이지는 다음
+        # 페이지의 실제 문항과 연결할 수 있고, 일반 혼합 페이지 fallback도 검색 가능한
+        # 텍스트를 유지할 수 있다. 2단 시험지의 기본 읽기 순서(왼쪽→오른쪽)를 적용한다.
+        ordered_lines = sorted(
+            text_lines,
+            key=lambda line: (
+                0 if line["box"].left < float(width_px) * 0.5 else 1,
+                line["box"].top,
+                line["box"].left,
+            ),
+        )
+        for order, line in enumerate(ordered_lines):
+            block_metadata = {
+                "segmenter": "pdf-unsegmented-text",
+                "unsegmented_page": True,
+            }
+            block_metadata.update(
+                {
+                    key: value
+                    for key, value in line.items()
+                    if key in {"pdf_line_chars", "pdf_line_spans"} and value
+                }
+            )
+            page_model.blocks.append(
+                ContentBlock(
+                    block_id=f"{page_id}-unsegmented-{order + 1:03d}",
+                    block_type=classify_text_block(str(line.get("text") or "")),
+                    bbox=line["box"],
+                    reading_order=order,
+                    text=str(line.get("text") or ""),
+                    confidence=1.0,
+                    metadata=block_metadata,
+                )
+            )
+        base_metadata["unsegmented_text_block_count"] = len(page_model.blocks)
         return page_model
 
     columns, bounds = _cluster_columns(markers, float(width_px))

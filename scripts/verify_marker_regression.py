@@ -56,6 +56,20 @@ def problem_numbers(pdf_bytes: bytes) -> list[int]:
     return numbers
 
 
+def make_figure_number_pdf() -> bytes:
+    """실제 문항 사이의 작은 자료 상자 안에 번호 목록이 있는 PDF."""
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 100), "1. First real problem statement.", fontsize=13)
+    page.draw_rect(fitz.Rect(320, 130, 540, 260), width=0.8)
+    page.insert_text((340, 160), "1. embedded data item", fontsize=9)
+    page.insert_text((340, 185), "2. another data item", fontsize=9)
+    page.insert_text((72, 320), "2. Second real problem statement.", fontsize=13)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
 # --- 케이스 정의 -------------------------------------------------------------
 # 각 케이스: (이름, 라인들, 기대 문항번호 리스트)
 
@@ -107,6 +121,14 @@ def main() -> int:
         print(f"  [{status}] {name}: expected={expected} got={got}")
         if not ok:
             failures += 1
+    figure_got = problem_numbers(make_figure_number_pdf())
+    figure_ok = figure_got == [1, 2]
+    print(
+        f"  [{'PASS' if figure_ok else 'FAIL'}] 자료 상자 안 번호 억제: "
+        f"expected={[1, 2]} got={figure_got}"
+    )
+    if not figure_ok:
+        failures += 1
     if failures:
         print(f"MARKER_REGRESSION_FAIL ({failures} case(s)) — 마커 과분할 회귀 감지")
         return 1

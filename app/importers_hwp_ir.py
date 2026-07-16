@@ -27,12 +27,24 @@ try:
 except Exception:  # pragma: no cover - 선택 의존성
     rhwp = None
 
-# HWP 편집본 트레일러 마커: 문항 stem 뒤·선지 앞에 오는 "[N점][시험명 NN]".
-_MARKER_RE = re.compile(r"^\s*\[(\d{1,2})\s*점\]\s*\[[^\]]*?(\d{1,3})\]\s*$")
-_MARKER_DETAIL_RE = re.compile(
-    r"^\s*\[(?P<score>\d{1,2})\s*점\]\s*\[(?P<section>.*?)(?P<number>\d{1,3})\]\s*$"
+# HWP 편집본 결합 마커: 문항 stem 뒤·선지 앞에 오는 "[N점][시험명 NN]".
+# 일부 개인 편집본은 번호 뒤에 "번"을 붙인다.
+_MARKER_RE = re.compile(
+    r"^\s*\[(\d{1,2})\s*점\]\s*\[[^\]]*?(\d{1,3})\s*(?:번)?\]\s*$"
 )
-_CIRCLED = "①②③④⑤⑥⑦⑧⑨"
+_MARKER_DETAIL_RE = re.compile(
+    r"^\s*\[(?P<score>\d{1,2})\s*점\]\s*\[(?P<section>.*?)(?P<number>\d{1,3})"
+    r"(?P<number_suffix>\s*번)?\]\s*$"
+)
+_TRAILING_SOURCE_RE = re.compile(
+    r"^\s*\[(?P<section>.*?)(?P<number>\d{1,3})\s*번\]\s*$"
+)
+_TRAILING_SOURCE_HINT_RE = re.compile(
+    r"(?:\d{2,4}|[년월]|고[123]|중[123]|전국|모의|수능|평가|교육청|평가원)"
+)
+_INTENT_RE = re.compile(r"^\s*\[출제의도\]\s*(?P<intent>.*)$")
+_INLINE_SCORE_RE = re.compile(r"\[\s*(?P<score>\d{1,2})\s*점\s*\]")
+_CIRCLED = "①②③④⑤⑥⑦⑧⑨❶❷❸❹❺❻❼❽❾➀➁➂➃➄➅➆➇➈"
 _ANSWER_SECTION_TEXT_RE = re.compile(
     r"^\s*(?:\[\uc815\ub2f5\]|\ube60\ub978\s*\uc815\ub2f5|\uc815\ub2f5\s*(?:\ubc0f|\uacfc)\s*\ud574\uc124|\uc815\ub2f5\s*\ud45c)"
 )
@@ -91,6 +103,13 @@ def available() -> bool:
     return rhwp is not None and hasattr(rhwp, "parse")
 
 
+def _trailing_source_match(value: str) -> re.Match[str] | None:
+    match = _TRAILING_SOURCE_RE.match(str(value or "").strip())
+    if not match or not _TRAILING_SOURCE_HINT_RE.search(match.group("section")):
+        return None
+    return match
+
+
 def _prov(block: Any) -> tuple[int, int, int | None]:
     pr = getattr(block, "prov", None) or getattr(block, "provenance", None)
     return (
@@ -98,6 +117,42 @@ def _prov(block: Any) -> tuple[int, int, int | None]:
         int(getattr(pr, "para_idx", 0) or 0),
         getattr(pr, "char_start", None),
     )
+
+
+_BOXED_HANGUL_RE = re.compile(
+    r"(?i)(?:\{\s*)?box\s*(?:\{\s*)?~*\s*"
+    r"(?P<label>\(\s*[가-힣]+\s*\)|[가-힣]+)"
+    r"\s*~*\s*\}?(?:\s*\})?"
+)
+_PLAIN_HANGUL_TOKEN_RE = re.compile(r"(\(\s*[가-힣]+\s*\)|[가-힣]+)")
+_HANGUL_SENTINEL_RE = re.compile(r"@@HWP_TEXT_(\d+)@@")
+
+
+def _wrap_mixed_hangul_eqn(script: str) -> str:
+    """EQN 속 한글 라벨은 평문, 나머지는 native equation으로 분리한다."""
+    labels: list[str] = []
+
+    def boxed_repl(match: re.Match[str]) -> str:
+        labels.append(re.sub(r"\s+", "", match.group("label")))
+        return f"@@HWP_TEXT_{len(labels) - 1}@@"
+
+    replaced = _BOXED_HANGUL_RE.sub(boxed_repl, script)
+    pieces = re.split(r"(@@HWP_TEXT_\d+@@|\(\s*[가-힣]+\s*\)|[가-힣]+)", replaced)
+    out: list[str] = []
+    for piece in pieces:
+        if not piece:
+            continue
+        sentinel = _HANGUL_SENTINEL_RE.fullmatch(piece)
+        if sentinel:
+            out.append(labels[int(sentinel.group(1))])
+            continue
+        if _PLAIN_HANGUL_TOKEN_RE.fullmatch(piece):
+            out.append(re.sub(r"\s+", "", piece))
+            continue
+        math_part = piece.replace("$", " ").strip()
+        if math_part:
+            out.append(f"${math_part}$")
+    return " ".join(out).strip()
 
 
 def _wrap_eqn(script: str) -> str:
@@ -111,6 +166,9 @@ def _wrap_eqn(script: str) -> str:
         return ""
     if re.search(r"[\uac00-\ud7a3]", s):
         converted = _wrap_hangul_cases_eqn(s)
+        if converted:
+            return converted
+        converted = _wrap_mixed_hangul_eqn(s)
         if converted:
             return converted
     # 단순 정수/한 글자 숫자는 수식 개체로 만들 필요 없음(선지 "1" 등) — 평문 유지
@@ -501,7 +559,8 @@ def _replace_marker_number(unit: str, number: int, width: int) -> str:
         return f"{match.group('head')}{number:0{width}d}{match.group('tail')}"
 
     return re.sub(
-        r"(?P<head>^\s*\[\d{1,2}\s*점\]\s*\[.*?)(?P<number>\d{1,3})(?P<tail>\]\s*$)",
+        r"(?P<head>^\s*\[\d{1,2}\s*점\]\s*\[.*?)(?P<number>\d{1,3})"
+        r"(?P<tail>\s*(?:번)?\]\s*$)",
         repl,
         str(unit or ""),
         count=1,
@@ -546,6 +605,96 @@ def _repair_problem_marker_sequence(problems: list[dict[str, Any]]) -> None:
         start = end
 
 
+def _problems_from_trailing_source_stream(
+    stream: list[tuple[str, Any]],
+    *,
+    split_choices: Callable[[str], tuple[str, list[str]]],
+    split_stem_choices: Callable[[str], tuple[str, list[str]]] | None,
+) -> list[dict[str, Any]] | None:
+    """후행 ``[... N번]`` 편집본을 문항 단위로 묶는다.
+
+    개인/학교 편집본에는 점수가 본문 끝에 있고, 선지 뒤의 출처 문단이 문항을 닫은 뒤
+    ``[출제의도]``가 따라오는 변형이 있다. 결합 마커 경로와 순서가 반대이므로 별도
+    상태기계로 처리한다. 출처 마커가 확인된 문항만 확정해 뒤쪽 정답·해설이 새 문항으로
+    섞이지 않게 한다.
+    """
+    problems: list[dict[str, Any]] = []
+    text_parts: list[str] = []
+    images: list[str] = []
+    tables: list[list[list[str]]] = []
+
+    def reset() -> None:
+        text_parts.clear()
+        images.clear()
+        tables.clear()
+
+    def flush(marker_text: str, marker: re.Match[str]) -> None:
+        raw_text = "\n".join(part for part in text_parts if part.strip()).strip()
+        score_match = _INLINE_SCORE_RE.search(raw_text)
+        score = score_match.group("score") if score_match else ""
+        body = _INLINE_SCORE_RE.sub("", raw_text, count=1).strip()
+
+        if split_stem_choices is not None:
+            stem, choices = split_stem_choices(body)
+        else:
+            stem, choices = split_choices(body)
+        if not choices:
+            remainder, inline_choices = split_choices(body)
+            if inline_choices:
+                stem, choices = remainder, inline_choices
+
+        inner_source = marker_text.strip()[1:-1].strip()
+        unit = f"[{score}점][{inner_source}]" if score else marker_text.strip()
+        if stem or choices or images or tables:
+            problems.append(
+                {
+                    "number": str(int(marker.group("number"))),
+                    "unit": unit,
+                    "score": score,
+                    "source_marker": marker_text.strip(),
+                    "intent": "",
+                    "marker_style": "trailing_source",
+                    "stem": stem,
+                    "choices": choices[:5],
+                    "image_paths": list(images),
+                    "tables": list(tables),
+                }
+            )
+        reset()
+
+    for kind, value in stream:
+        if kind == "image":
+            images.append(value)
+            continue
+        if kind == "table":
+            if _looks_like_answer_section_table(value):
+                break
+            if not text_parts and not images and _looks_like_masthead_table(value):
+                continue
+            tables.append(value)
+            continue
+
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if _looks_like_answer_section_text(text):
+            break
+
+        intent_match = _INTENT_RE.match(text)
+        if intent_match and problems and not text_parts and not images and not tables:
+            problems[-1]["intent"] = intent_match.group("intent").strip()
+            continue
+
+        marker = _trailing_source_match(text)
+        if marker:
+            flush(text, marker)
+            continue
+
+        text_parts.append(text)
+
+    return problems or None
+
+
 def hwp_to_problems(
     payload: bytes,
     filename: str,
@@ -565,6 +714,20 @@ def hwp_to_problems(
     stream = _ordered_stream(payload, filename, save_image)
     if not stream:
         return None
+
+    has_trailing_source_markers = any(
+        kind == "text" and _trailing_source_match(str(val).strip())
+        for kind, val in stream
+    )
+    if has_trailing_source_markers:
+        trailing = _problems_from_trailing_source_stream(
+            stream,
+            split_choices=split_choices,
+            split_stem_choices=split_stem_choices,
+        )
+        if trailing:
+            _repair_problem_marker_sequence(trailing)
+            return trailing
 
     has_markers = any(kind == "text" and _MARKER_RE.match(str(val).strip()) for kind, val in stream)
     if not has_markers and chunk_paragraphs is not None:
