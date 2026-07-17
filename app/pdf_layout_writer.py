@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import statistics
 import sys
 import tempfile
 import time
@@ -21,6 +22,8 @@ from uuid import uuid4
 import fitz
 from lxml import etree
 from PIL import Image
+
+from .hancom_pua_map import HANCOM_PUA_MAP, is_hancom_eq_font
 
 _VENDOR = Path(__file__).resolve().parent / "_vendor"
 if str(_VENDOR) not in sys.path:
@@ -163,9 +166,10 @@ _PDF_FONT_FACES = (
     "HCR Batang",
 )
 
-_FLOW_CHAR_RATIO = 95
+_FLOW_CHAR_RATIO = 86
 _FLOW_CHAR_SPACING = -5
-_FLOW_BODY_LINE_SPACING = 165
+_FLOW_BODY_LINE_SPACING = 150
+_FLOW_QUESTION_MARKER_RE = re.compile(r"^\s*([1-9][0-9]?)([.)])(?:\s|$)")
 
 
 def _ensure_pdf_font_faces(header: Any) -> None:
@@ -266,6 +270,8 @@ def _flow_font_for_span(span: dict[str, Any]) -> str:
     text = str(span.get("text") or "")
     font = str(span.get("font") or "")
     recovered = _recover_pdf_font_name(font)
+    if is_hancom_eq_font(font):
+        return "Times New Roman"
     if _latin_ratio(text) >= 0.55 or "Times" in font or "NewRoman" in font:
         return "Times New Roman"
     if _bold_for_span(span):
@@ -282,13 +288,24 @@ def _flow_size_for_span(span: dict[str, Any]) -> float:
         size = float(span.get("size") or 10.0)
     except (TypeError, ValueError):
         size = 10.0
+    return min(38.0, max(7.0, round(size, 1)))
+
+
+_FLOW_SUPERSCRIPT_TRANSLATION = str.maketrans("0123456789n+-", "⁰¹²³⁴⁵⁶⁷⁸⁹ⁿ⁺⁻")
+
+
+def _flow_text_for_span(span: dict[str, Any]) -> str:
+    text = str(span.get("text") or "")
+    if not is_hancom_eq_font(str(span.get("font") or "")):
+        return text
+    mapped = "".join(HANCOM_PUA_MAP.get(char, char) for char in text)
+    try:
+        size = float(span.get("size") or 10.0)
+    except (TypeError, ValueError):
+        size = 10.0
     if size <= 8.6:
-        return 8.8
-    if size <= 12.8:
-        return 10.0
-    if size <= 15.0:
-        return 12.0
-    return min(16.0, round(size, 1))
+        mapped = mapped.translate(_FLOW_SUPERSCRIPT_TRANSLATION)
+    return mapped
 
 
 def _add_text_box(
@@ -825,7 +842,7 @@ def _span_text_runs(
     previous_rect: fitz.Rect | None = None
     previous_size = 10.0
     for span in spans:
-        text = str(span.get("text") or "")
+        text = _flow_text_for_span(span)
         if text == "":
             continue
         rect = fitz.Rect(span["bbox"])
@@ -1180,6 +1197,62 @@ def _ensure_column_divider_border_fill(header: Any) -> str:
     return str(next_id)
 
 
+def _ensure_header_bottom_border_fill(header: Any) -> str:
+    border_fills = header.element.find(f".//{_hh('borderFills')}")
+    if border_fills is None:
+        ref_list = header.element.find(f".//{_hh('refList')}")
+        if ref_list is None:
+            return _ensure_no_border_fill(header)
+        border_fills = ref_list.makeelement(_hh("borderFills"), {"itemCnt": "0"})
+        ref_list.append(border_fills)
+    for border_fill in border_fills.findall(_hh("borderFill")):
+        bottom = border_fill.find(_hh("bottomBorder"))
+        others = [
+            border_fill.find(_hh(name))
+            for name in ("leftBorder", "rightBorder", "topBorder")
+        ]
+        if (
+            bottom is not None
+            and bottom.get("type") == "SOLID"
+            and bottom.get("width") == "0.2 mm"
+            and all(
+                border is not None and (border.get("type") or "").upper() == "NONE"
+                for border in others
+            )
+        ):
+            return str(border_fill.get("id") or "0")
+    next_id = 1
+    for border_fill in border_fills.findall(_hh("borderFill")):
+        try:
+            next_id = max(next_id, int(border_fill.get("id") or 0) + 1)
+        except ValueError:
+            continue
+    element = border_fills.makeelement(
+        _hh("borderFill"),
+        {
+            "id": str(next_id),
+            "threeD": "0",
+            "shadow": "0",
+            "centerLine": "NONE",
+            "breakCellSeparateLine": "0",
+        },
+    )
+    for child_name, attrs in (
+        ("slash", {"type": "NONE", "Crooked": "0", "isCounter": "0"}),
+        ("backSlash", {"type": "NONE", "Crooked": "0", "isCounter": "0"}),
+        ("leftBorder", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
+        ("rightBorder", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
+        ("topBorder", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
+        ("bottomBorder", {"type": "SOLID", "width": "0.2 mm", "color": "#000000"}),
+        ("diagonal", {"type": "NONE", "width": "0.0 mm", "color": "#FFFFFF"}),
+    ):
+        element.append(element.makeelement(_hh(child_name), attrs))
+    border_fills.append(element)
+    border_fills.set("itemCnt", str(len(border_fills.findall(_hh("borderFill")))))
+    header.mark_dirty()
+    return str(next_id)
+
+
 def _pt_to_mm(value_pt: float) -> float:
     return float(value_pt) * 25.4 / 72.0
 
@@ -1239,6 +1312,14 @@ def _set_cell_border_fill(cell: Any, border_fill_id_ref: str) -> None:
     cell.table.mark_dirty()
 
 
+def _set_cell_vertical_align(cell: Any, value: str = "TOP") -> None:
+    sub = cell.element.find(_q("subList"))
+    if sub is None:
+        return
+    sub.set("vertAlign", value)
+    cell.table.mark_dirty()
+
+
 def _append_cell_line(
     doc: HwpxDocument,
     cell: Any,
@@ -1261,6 +1342,10 @@ def _append_cell_line(
         node.set(f"{{{XML}}}space", "preserve")
         node.text = text
     return True
+
+
+def _has_flow_math_span(line: dict[str, Any]) -> bool:
+    return any(is_hancom_eq_font(str(span.get("font") or "")) for span in line.get("spans", []))
 
 
 def _iter_flow_images(
@@ -1435,6 +1520,91 @@ def _convert_textual_image_regions(
     return converted, text_regions
 
 
+def _iter_flow_stacked_math_images(
+    page: fitz.Page,
+    text_lines: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Rasterize only stacked equation assemblies that cannot reflow safely.
+
+    Inline HyhwpEQ spans are recovered to Unicode and remain editable.  A
+    fraction or radical assembled from several overlapping PDF text lines has
+    no linear paragraph representation, so preserve that small local region as
+    an image instead of emitting illegible overlapping runs.
+    """
+    candidates: list[dict[str, Any]] = []
+    midpoint = page.rect.width / 2.0
+    column_rails = [page.rect.width * 0.104, midpoint + page.rect.width * 0.01]
+    for line in text_lines:
+        bbox = _item_bbox(line)
+        if bbox.y0 < page.rect.height * 0.12:
+            continue
+        column = 0 if (bbox.x0 + bbox.x1) / 2.0 < midpoint else 1
+        if (column == 0 and bbox.x1 <= midpoint + 10.0) or (column == 1 and bbox.x0 >= midpoint - 10.0):
+            column_rails[column] = min(column_rails[column], bbox.x0)
+        spans = [span for span in line.get("spans", []) if str(span.get("text") or "").strip()]
+        if not spans:
+            continue
+        math_chars = sum(
+            len(str(span.get("text") or "").strip())
+            for span in spans
+            if is_hancom_eq_font(str(span.get("font") or ""))
+        )
+        other_chars = sum(
+            len(str(span.get("text") or "").strip())
+            for span in spans
+            if not is_hancom_eq_font(str(span.get("font") or ""))
+        )
+        if math_chars >= 1 and other_chars <= 1:
+            candidates.append({"line": line, "bbox": bbox, "column": column})
+
+    groups: list[list[dict[str, Any]]] = []
+    for item in sorted(candidates, key=lambda value: (value["column"], value["bbox"].y0, value["bbox"].x0)):
+        placed = False
+        for group in groups:
+            if item["column"] != group[0]["column"]:
+                continue
+            bounds = _union_rect([member["bbox"] for member in group])
+            if item["bbox"].y0 <= bounds.y1 + 7.0 and item["bbox"].y1 >= bounds.y0 - 7.0:
+                group.append(item)
+                placed = True
+                break
+        if not placed:
+            groups.append([item])
+
+    images: list[dict[str, Any]] = []
+    matrix = fitz.Matrix(2.0, 2.0)
+    for group in groups:
+        if len(group) < 2:
+            continue
+        bounds = _union_rect([item["bbox"] for item in group])
+        if bounds.height < 20.0 or bounds.width > page.rect.width * 0.32:
+            continue
+        column = int(group[0]["column"])
+        if (column == 0 and bounds.x1 > midpoint - 5.0) or (column == 1 and bounds.x0 < midpoint + 5.0):
+            continue
+        # Multiple lines occupying nearly the same vertical band indicate a
+        # stacked fraction/radical, not ordinary consecutive equation lines.
+        total_line_height = sum(item["bbox"].height for item in group)
+        if bounds.height >= total_line_height * 0.82:
+            continue
+        region = fitz.Rect(bounds)
+        region.x0 = max(0.0, min(column_rails[column], region.x0) - 2.0)
+        region.y0 = max(0.0, region.y0 - 3.0)
+        region.x1 = min(page.rect.width, region.x1 + 4.0)
+        region.y1 = min(page.rect.height, region.y1 + 3.0)
+        pix = page.get_pixmap(matrix=matrix, clip=region, alpha=False)
+        images.append(
+            {
+                "type": "image",
+                "bbox": region,
+                "image": pix.tobytes("png"),
+                "ext": "png",
+                "stacked_math_image": True,
+            }
+        )
+    return images
+
+
 def _has_table_lines(
     page: fitz.Page,
     rect: fitz.Rect,
@@ -1448,8 +1618,6 @@ def _has_table_lines(
     probe.x1 += 4
     probe.y1 += 4
     geometry = drawing_geometry or _flow_drawing_geometry(page)
-    if geometry["dense"]:
-        return False
     for x0, y0, x1, y1 in geometry["lines"]:
         if not probe.contains(fitz.Point(x0, y0)) and not probe.contains(fitz.Point(x1, y1)):
             continue
@@ -1607,9 +1775,9 @@ def _iter_flow_table_images(
             continue
         if rect.y0 < page.rect.height * 0.35:
             continue
-        if rect.width < page.rect.width * 0.22 or rect.height < 25:
+        if rect.width < page.rect.width * 0.22 or rect.height < 8:
             continue
-        if _span_count(block) < 10 or _x_cluster_count(block) < 5:
+        if _span_count(block) < 5 or _x_cluster_count(block) < 5:
             continue
         seed_probe = fitz.Rect(rect)
         seed_probe.x0 = max(0.0, seed_probe.x0 - 4)
@@ -1681,6 +1849,14 @@ def _is_flow_footer_line(page: fitz.Page, line: dict[str, Any]) -> bool:
     if re.fullmatch(r"\d+/\d+", compact):
         return True
     return "저작권" in text or "한국교육과정평가원" in text
+
+
+def _is_flow_header_rule_line(page: fitz.Page, line: dict[str, Any]) -> bool:
+    bbox = _item_bbox(line)
+    if bbox.y0 > page.rect.height * 0.35 or bbox.width < page.rect.width * 0.55:
+        return False
+    compact = re.sub(r"\s+", "", _line_text(line))
+    return len(compact) >= 12 and not re.sub(r"[━─—―_\-]", "", compact)
 
 
 def _append_cell_image(
@@ -2013,8 +2189,9 @@ def _flow_gap_height_pt(raw_gap_pt: float) -> float:
 def _page_body_top(
     page: fitz.Page,
     drawing_geometry: dict[str, Any] | None = None,
+    text_lines: list[dict[str, Any]] | None = None,
 ) -> float:
-    candidates: list[float] = []
+    separator_candidates: list[float] = []
     geometry = drawing_geometry or _flow_drawing_geometry(page)
     for x0, y0, x1, y1 in geometry["lines"]:
         if abs(y1 - y0) > 0.5:
@@ -2023,10 +2200,81 @@ def _page_body_top(
             continue
         y = (y0 + y1) / 2.0
         if 45 <= y <= page.rect.height * 0.35:
-            candidates.append(y)
-    if not candidates:
-        return 0.0
-    return max(candidates) + 4.0
+            separator_candidates.append(y)
+
+    # Some official exam PDFs draw the first-page header rule as a vector but
+    # omit it on later pages.  The first real question marker is a more stable
+    # semantic boundary than a fixed top margin and keeps repeated page headers
+    # in their own row without turning them into body paragraphs.
+    question_candidates: list[float] = []
+    text_rule_candidates: list[float] = []
+    for line in text_lines or ():
+        bbox = _item_bbox(line)
+        if _is_flow_header_rule_line(page, line):
+            text_rule_candidates.append(bbox.y1 + 2.0)
+        if not page.rect.height * 0.05 <= bbox.y0 <= page.rect.height * 0.42:
+            continue
+        if _FLOW_QUESTION_MARKER_RE.match(_line_text(line)):
+            question_candidates.append(max(0.0, bbox.y0 - 6.0))
+
+    separator_top = max(separator_candidates) + 4.0 if separator_candidates else 0.0
+    text_rule_top = max(text_rule_candidates) if text_rule_candidates else 0.0
+    detected_top = max(separator_top, text_rule_top)
+    question_top = min(question_candidates) if question_candidates else 0.0
+    if detected_top and question_top and abs(detected_top - question_top) <= 30.0:
+        return max(detected_top, question_top)
+    return detected_top or question_top
+
+
+def _flow_source_side_margins(
+    pdf_doc: fitz.Document,
+    *,
+    total_pages: int,
+) -> tuple[float, float, list[tuple[dict[str, Any], list[dict[str, Any]]]]]:
+    """Infer editable flow margins from the source's repeated text rails.
+
+    Flow content is normalized to the left edge of each HWPX column, so using
+    a generic 7 mm page margin makes official exam pages much wider than their
+    source.  Median per-page text extents ignore short lines while preserving
+    the stable outer rails used across Korean, English, math, social studies,
+    science, and history papers.
+    """
+    left_ratios: list[float] = []
+    right_ratios: list[float] = []
+    page_text: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+    for page_index in range(total_pages):
+        page = pdf_doc[page_index]
+        text_dict = page.get_text("dict")
+        text_lines = _iter_text_lines(page, text_dict)
+        page_text.append((text_dict, text_lines))
+        boxes = [
+            _item_bbox(line)
+            for line in text_lines
+            if _line_text(line) and not _is_flow_footer_line(page, line)
+        ]
+        if not boxes or page.rect.width <= 0:
+            continue
+        left_ratios.append(max(0.0, min(box.x0 for box in boxes) / page.rect.width))
+        right_ratios.append(
+            max(0.0, (page.rect.width - max(box.x1 for box in boxes)) / page.rect.width)
+        )
+
+    if not left_ratios or not right_ratios:
+        return 7.0, 7.0, page_text
+
+    page_width_mm = _pt_to_mm(pdf_doc[0].rect.width)
+    # The outer body cells already contribute 0.4 mm of inset.  Subtract that
+    # once so text, rather than the invisible table edge, matches the PDF rail.
+    left_mm = page_width_mm * statistics.median(left_ratios) - 0.4
+    right_mm = page_width_mm * statistics.median(right_ratios) - 0.4
+    upper_bound = page_width_mm * 0.16
+    left_margin = max(7.0, min(upper_bound, left_mm))
+    right_margin = max(7.0, min(upper_bound, right_mm))
+    return (
+        left_margin,
+        right_margin,
+        page_text,
+    )
 
 
 def _flow_header_columns(page: fitz.Page, items: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -2072,7 +2320,9 @@ def _append_header_table(
     table_width: int,
     table_height: int,
     no_border_fill: str,
+    header_border_fill: str,
     compact_para: str,
+    header_para_ids: tuple[str, str, str],
     styles: dict[tuple[str, float, bool], str],
     page_break: bool,
 ) -> int:
@@ -2083,8 +2333,8 @@ def _append_header_table(
         1,
         3,
         width=table_width,
-        height=max(_pt_to_hwp(24), min(table_height, _pt_to_hwp(140))),
-        border_fill_id_ref=no_border_fill,
+        height=max(_pt_to_hwp(24), table_height),
+        border_fill_id_ref=header_border_fill,
         para_pr_id_ref=compact_para,
         **attrs,
     )
@@ -2097,7 +2347,10 @@ def _append_header_table(
     header_cell_widths = [int(round(table_width * weight / weight_total)) for weight in header_weights]
     header_cell_widths[-1] = max(1, table_width - sum(header_cell_widths[:-1]))
     for column in (0, 1, 2):
-        _clear_cell_paragraphs(table.cell(0, column))
+        cell = table.cell(0, column)
+        _clear_cell_paragraphs(cell)
+        _set_cell_border_fill(cell, header_border_fill)
+        _set_cell_vertical_align(cell, "BOTTOM")
     count = 0
     for column_index, column_items in enumerate(_flow_header_columns(page, items)):
         cell = table.cell(0, column_index)
@@ -2108,11 +2361,17 @@ def _append_header_table(
                     cell,
                     item,
                     cell_width=max(1, header_cell_widths[column_index]),
-                    para_pr_id_ref=compact_para,
+                    para_pr_id_ref=header_para_ids[column_index],
                     border_fill_id_ref=no_border_fill,
                 ):
                     count += 1
-            elif _append_cell_line(doc, cell, item, styles=styles, para_pr_id_ref=compact_para):
+            elif _append_cell_line(
+                doc,
+                cell,
+                item,
+                styles=styles,
+                para_pr_id_ref=header_para_ids[column_index],
+            ):
                 count += 1
     return count
 
@@ -2216,7 +2475,26 @@ def _append_flow_block(
         )
         return 0
     if block["type"] == "line":
-        return 1 if _append_cell_line(doc, cell, block["line"], styles=styles, para_pr_id_ref=para_pr_id_ref) else 0
+        line = block["line"]
+        if _has_flow_math_span(line):
+            bbox = _item_bbox(line)
+            table = cell.add_table(
+                1,
+                1,
+                width=max(1, cell_width - _pt_to_hwp(4)),
+                height=_pt_to_hwp(max(18.0, bbox.height + 4.0)),
+                border_fill_id_ref=image_border_fill_id_ref,
+            )
+            nested = table.cell(0, 0)
+            _clear_cell_paragraphs(nested)
+            return 1 if _append_cell_line(
+                doc,
+                nested,
+                line,
+                styles=styles,
+                para_pr_id_ref=para_pr_id_ref,
+            ) else 0
+        return 1 if _append_cell_line(doc, cell, line, styles=styles, para_pr_id_ref=para_pr_id_ref) else 0
     if block["type"] == "image":
         return 1 if _append_cell_image(
             doc,
@@ -2270,10 +2548,24 @@ def write_pdf_flow_hwpx(
     no_border_fill = _ensure_no_border_fill(header)
     box_border_fill = _ensure_box_border_fill(header)
     column_divider_border_fill = _ensure_column_divider_border_fill(header)
+    header_bottom_border_fill = _ensure_header_bottom_border_fill(header)
     compact_para = header.ensure_paragraph_format(
         alignment="LEFT",
         line_spacing_percent=100,
         margins={"prev": 0, "next": 0},
+    )
+    header_para_ids = (
+        compact_para,
+        header.ensure_paragraph_format(
+            alignment="CENTER",
+            line_spacing_percent=100,
+            margins={"prev": 0, "next": 0},
+        ),
+        header.ensure_paragraph_format(
+            alignment="RIGHT",
+            line_spacing_percent=100,
+            margins={"prev": 0, "next": 0},
+        ),
     )
     body_para = header.ensure_paragraph_format(
         alignment="LEFT",
@@ -2290,6 +2582,8 @@ def write_pdf_flow_hwpx(
     axis_line_count = 0
     dense_vector_pages = 0
     page_times_ms: list[int] = []
+    body_tops_pt: list[float] = []
+    header_rows = 0
 
     with fitz.open(pdf_path) as pdf_doc:
         if not pdf_doc:
@@ -2297,8 +2591,11 @@ def write_pdf_flow_hwpx(
         first = pdf_doc[0]
         width_mm = _pt_to_mm(first.rect.width)
         height_mm = _pt_to_mm(first.rect.height)
-        margin_left_mm = 7.0
-        margin_right_mm = 7.0
+        total_pages = len(pdf_doc) if max_pages is None else min(len(pdf_doc), max_pages)
+        margin_left_mm, margin_right_mm, page_text = _flow_source_side_margins(
+            pdf_doc,
+            total_pages=total_pages,
+        )
         margin_top_mm = 7.0
         margin_bottom_mm = 7.0
         body_width_mm = max(10.0, width_mm - margin_left_mm - margin_right_mm)
@@ -2315,21 +2612,22 @@ def write_pdf_flow_hwpx(
             margin_right_mm=margin_right_mm,
             margin_top_mm=margin_top_mm,
             margin_bottom_mm=margin_bottom_mm,
+            header_margin_mm=0.0,
+            footer_margin_mm=0.0,
         )
 
-        total_pages = len(pdf_doc) if max_pages is None else min(len(pdf_doc), max_pages)
         for page_index in range(total_pages):
             page_started_at = time.perf_counter()
             page = pdf_doc[page_index]
             drawing_geometry = _flow_drawing_geometry(page)
-            text_dict = page.get_text("dict")
-            text_lines = _iter_text_lines(page, text_dict)
+            text_dict, text_lines = page_text[page_index]
             drawing_count += int(drawing_geometry["drawing_count"])
             axis_line_count += len(drawing_geometry["lines"])
             dense_vector_pages += int(bool(drawing_geometry["dense"]))
-            body_top = _page_body_top(page, drawing_geometry)
+            body_top = _page_body_top(page, drawing_geometry, text_lines)
             if body_top <= margin_top_pt:
                 body_top = margin_top_pt
+            body_tops_pt.append(round(body_top, 2))
             table_image_items = _iter_flow_table_images(page, drawing_geometry, text_dict)
             table_regions = [_item_bbox(item) for item in table_image_items]
             native_image_items = [
@@ -2343,71 +2641,63 @@ def write_pdf_flow_hwpx(
                 native_image_items,
                 text_lines,
             )
-            excluded_text_regions = table_regions + textual_image_regions
+            stacked_math_items = _iter_flow_stacked_math_images(page, text_lines)
+            stacked_math_regions = [_item_bbox(item) for item in stacked_math_items]
+            excluded_text_regions = table_regions + textual_image_regions + stacked_math_regions
             line_items = [
                 {"type": "line", "bbox": fitz.Rect(line["bbox"]), "spans": line["spans"]}
                 for line in text_lines
                 if _line_text(line)
                 and not _is_flow_footer_line(page, line)
+                and not _is_flow_header_rule_line(page, line)
                 and not _inside_any_region(fitz.Rect(line["bbox"]), excluded_text_regions)
             ]
-            image_items = native_image_items + table_image_items
+            image_items = native_image_items + table_image_items + stacked_math_items
             image_count += len(image_items)
             all_items = line_items + image_items
             header_items = [item for item in all_items if _item_bbox(item).y1 < body_top - 1]
             body_items = [item for item in all_items if _item_bbox(item).y1 >= body_top - 1]
             body_items = _merge_same_row_flow_lines(page, body_items)
-            repeated_header_spacer = 0
             header_gap_pt = max(0.0, body_top - margin_top_pt)
-            if header_items and page_index > 0:
-                repeated_header_spacer = _pt_to_hwp(min(header_gap_pt, 140.0))
-                header_items = []
-            elif header_items and not _has_substantial_flow_header(page, header_items):
+            if header_items and not _has_substantial_flow_header(page, header_items):
                 body_items = all_items
                 header_items = []
                 body_top = margin_top_pt
                 header_gap_pt = 0.0
             header_height = _pt_to_hwp(header_gap_pt)
             body_height_pt = max(24.0, page.rect.height - body_top - margin_bottom_pt)
-            body_height = _pt_to_hwp(min(body_height_pt, page.rect.height * 0.62))
-            header_row_height = 0
-            if header_items:
-                header_row_height = max(_pt_to_hwp(24), min(header_height, _pt_to_hwp(140)))
-            elif repeated_header_spacer > 0:
-                header_row_height = max(_pt_to_hwp(4), repeated_header_spacer)
-            has_header_row = header_row_height > 0
-            body_row_index = 1 if has_header_row else 0
-            table_attrs = {"pageBreak": "1"} if page_index > 0 else {}
+            body_height = _pt_to_hwp(body_height_pt)
+            has_header = bool(header_items)
+            if has_header:
+                line_count += _append_header_table(
+                    doc,
+                    page,
+                    header_items,
+                    table_width=table_width,
+                    table_height=header_height,
+                    no_border_fill=no_border_fill,
+                    header_border_fill=header_bottom_border_fill,
+                    compact_para=compact_para,
+                    header_para_ids=header_para_ids,
+                    styles=styles,
+                    page_break=page_index > 0,
+                )
+                header_rows += 1
+            table_attrs = {"pageBreak": "1"} if page_index > 0 and not has_header else {}
             table = doc.add_table(
-                2 if has_header_row else 1,
+                1,
                 2,
                 width=table_width,
-                height=body_height + header_row_height,
+                height=body_height,
                 border_fill_id_ref=no_border_fill,
                 para_pr_id_ref=compact_para,
                 **table_attrs,
             )
-            body_cells = [table.cell(body_row_index, column) for column in (0, 1)]
-            if has_header_row:
-                header_cell = table.merge_cells(0, 0, 0, 1)
-                header_cell.set_size(table_width, header_row_height)
-                _set_cell_border_fill(header_cell, no_border_fill)
-                _set_cell_margin(header_cell, left_mm=0.0, right_mm=0.0, top_mm=0.0, bottom_mm=0.0)
-                if header_items:
-                    line_count += _append_header_content_to_cell(
-                        doc,
-                        header_cell,
-                        page,
-                        header_items,
-                        table_width=table_width,
-                        table_height=header_row_height,
-                        no_border_fill=no_border_fill,
-                        compact_para=compact_para,
-                        styles=styles,
-                    )
+            body_cells = [table.cell(0, column) for column in (0, 1)]
             for body_cell in body_cells:
                 body_cell.set_size(cell_width, body_height)
                 _clear_cell_paragraphs(body_cell)
+                _set_cell_vertical_align(body_cell)
             left_cell, right_cell = body_cells
             _set_cell_border_fill(left_cell, column_divider_border_fill)
             _set_cell_margin(left_cell, left_mm=0.4, right_mm=2.3, top_mm=0.0, bottom_mm=0.0)
@@ -2445,6 +2735,14 @@ def write_pdf_flow_hwpx(
         "axis_lines": axis_line_count,
         "dense_vector_pages": dense_vector_pages,
         "page_times_ms": page_times_ms,
+        "body_tops_pt": body_tops_pt,
+        "header_rows": header_rows,
+        "page_margins_mm": {
+            "left": round(margin_left_mm, 2),
+            "right": round(margin_right_mm, 2),
+            "top": round(margin_top_mm, 2),
+            "bottom": round(margin_bottom_mm, 2),
+        },
         "slowest_page_ms": max(page_times_ms, default=0),
         "elapsed_ms": round((time.perf_counter() - started_at) * 1000),
     }
