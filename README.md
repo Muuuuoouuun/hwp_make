@@ -11,6 +11,7 @@ HWP Make는 PDF, HWP/HWPX, DOCX, 이미지, 텍스트, CSV/SQLite 자료를 문�
 - `docs/priority_work_queue.md`: 지금 막아야 하는 P0/P1/P2 작업 큐입니다.
 - `docs/current_self_assessment.md`: 실제 검증 결과를 기준으로 세분화한 현재 완성도와 다음 개발 순서입니다.
 - `docs/full_subject_qa_2026_06.md`: 2026년 6월 고1 전과목 PDF와 사용자 제공 HWP의 과목별 경향 QA입니다.
+- `docs/subject_conversion_performance_2026_07.md`: 국어·영어·수학·사회·과학·한국사의 문항 인식/레이아웃 변환시간과 벡터 밀집 PDF 최적화 결과입니다.
 - `docs/reference_samples_manifest.md`: 로컬 레퍼런스 시험지 목록과 사용 목적만 기록합니다. 파일 자체는 커밋하지 않습니다.
 - `docs/hwp_open_probe_checklist.md`: 한글 GUI 광고/수정권한/보호보기 이슈를 구분하는 체크리스트입니다.
 
@@ -115,6 +116,8 @@ python scripts/run_all_verify.py
 - `python scripts/verify_real_pdf_math_samples.py --mode import|write|render|all`
 - `python scripts/qa_hwp_math_samples.py`
 - `python scripts/verify_pdf_layout_export_api.py`
+- `python scripts/verify_pdf_flow_performance.py`
+- `python scripts/benchmark_subject_conversion.py --runs 3 --output-dir data/subject_conversion_benchmark/current`
 - `python scripts/pdf_layout_hwpx_probe.py "data/uploads/sample.pdf" "data/exports/sample_flow.hwpx" --flow --max-pages 1`
 - `python scripts/verify_pdf_layout_hwpx.py "data/exports/sample_flow.hwpx" --render`
 - `python scripts/verify_kice_typography.py`

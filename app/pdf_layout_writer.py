@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import zipfile
 from copy import deepcopy
 from pathlib import Path
@@ -32,6 +33,12 @@ HWP_PER_PT = 100.0
 OPF = "http://www.idpf.org/2007/opf/"
 HH = "http://www.hancom.co.kr/hwpml/2011/head"
 HV = "http://www.hancom.co.kr/hwpml/2011/version"
+
+# Thousands of axis-aligned segments usually come from a map or vector
+# illustration, not document table chrome.  Quadratic component clustering on
+# those paths is both slow and semantically wrong; explicit rectangle objects
+# and embedded images still preserve the visual content on such pages.
+_MAX_FLOW_LAYOUT_AXIS_LINES = 1200
 
 
 def _q(tag: str) -> str:
@@ -751,9 +758,13 @@ def _iter_text_spans(page: fitz.Page) -> list[dict[str, Any]]:
     return spans
 
 
-def _iter_text_lines(page: fitz.Page) -> list[dict[str, Any]]:
+def _iter_text_lines(
+    page: fitz.Page,
+    text_dict: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     lines: list[dict[str, Any]] = []
-    for block in page.get_text("dict").get("blocks", []):
+    source = text_dict if text_dict is not None else page.get_text("dict")
+    for block in source.get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
@@ -1252,9 +1263,13 @@ def _append_cell_line(
     return True
 
 
-def _iter_flow_images(page: fitz.Page) -> list[dict[str, Any]]:
+def _iter_flow_images(
+    page: fitz.Page,
+    text_dict: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     images: list[dict[str, Any]] = []
-    for block in page.get_text("dict").get("blocks", []):
+    source = text_dict if text_dict is not None else page.get_text("dict")
+    for block in source.get("blocks", []):
         if block.get("type") != 1:
             continue
         bbox = fitz.Rect(block.get("bbox") or (0, 0, 0, 0))
@@ -1324,9 +1339,13 @@ def _merge_flow_images(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return merged
 
 
-def _text_line_count_in_region(page: fitz.Page, region: fitz.Rect) -> int:
+def _text_line_count_in_region(
+    page: fitz.Page,
+    region: fitz.Rect,
+    text_lines: list[dict[str, Any]] | None = None,
+) -> int:
     count = 0
-    for line in _iter_text_lines(page):
+    for line in text_lines if text_lines is not None else _iter_text_lines(page):
         if not _line_text(line):
             continue
         bbox = fitz.Rect(line["bbox"])
@@ -1336,13 +1355,70 @@ def _text_line_count_in_region(page: fitz.Page, region: fitz.Rect) -> int:
     return count
 
 
-def _convert_textual_image_regions(page: fitz.Page, images: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[fitz.Rect]]:
+def _point_xy(point: Any) -> tuple[float, float]:
+    """Return coordinates for both regular and compact PyMuPDF drawing points."""
+    if hasattr(point, "x") and hasattr(point, "y"):
+        return float(point.x), float(point.y)
+    return float(point[0]), float(point[1])
+
+
+def _flow_drawing_geometry(page: fitz.Page) -> dict[str, Any]:
+    """Extract reusable flow-layout geometry from a page exactly once.
+
+    ``Page.get_drawings()`` materializes many ``Point`` objects and becomes very
+    expensive for maps and diagrams containing thousands of vector paths.  The
+    compact API returns the same geometry as tuples.  Flow layout only needs
+    rectangles and sufficiently long axis-aligned lines, so discard the rest
+    while building a small cache shared by table and passage-box detection.
+    """
+    try:
+        drawings = page.get_cdrawings()
+    except (AttributeError, RuntimeError):
+        drawings = page.get_drawings()
+
+    rects: list[fitz.Rect] = []
+    lines: list[tuple[float, float, float, float]] = []
+    for drawing in drawings:
+        drawing_rect = drawing.get("rect")
+        if drawing_rect is not None:
+            rects.append(fitz.Rect(drawing_rect))
+        for item in drawing.get("items", []):
+            if not item:
+                continue
+            if item[0] == "re":
+                rects.append(fitz.Rect(item[1]))
+                continue
+            if item[0] != "l":
+                continue
+            x0, y0 = _point_xy(item[1])
+            x1, y1 = _point_xy(item[2])
+            horizontal = abs(y1 - y0) <= 0.7 and abs(x1 - x0) >= 28
+            vertical = abs(x1 - x0) <= 0.7 and abs(y1 - y0) >= 8
+            if horizontal or vertical:
+                lines.append((x0, y0, x1, y1))
+    return {
+        "drawing_count": len(drawings),
+        "rects": rects,
+        "lines": lines,
+        "dense": len(lines) > _MAX_FLOW_LAYOUT_AXIS_LINES,
+    }
+
+
+def _convert_textual_image_regions(
+    page: fitz.Page,
+    images: list[dict[str, Any]],
+    text_lines: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[fitz.Rect]]:
     converted: list[dict[str, Any]] = []
     text_regions: list[fitz.Rect] = []
     matrix = fitz.Matrix(2.0, 2.0)
     for item in images:
         region = _item_bbox(item)
-        if region.width >= page.rect.width * 0.24 and region.height >= 60 and _text_line_count_in_region(page, region) >= 3:
+        if (
+            region.width >= page.rect.width * 0.24
+            and region.height >= 60
+            and _text_line_count_in_region(page, region, text_lines) >= 3
+        ):
             pix = page.get_pixmap(matrix=matrix, clip=region, alpha=False)
             converted.append(
                 {
@@ -1359,7 +1435,11 @@ def _convert_textual_image_regions(page: fitz.Page, images: list[dict[str, Any]]
     return converted, text_regions
 
 
-def _has_table_lines(page: fitz.Page, rect: fitz.Rect) -> bool:
+def _has_table_lines(
+    page: fitz.Page,
+    rect: fitz.Rect,
+    drawing_geometry: dict[str, Any] | None = None,
+) -> bool:
     horizontal = 0
     vertical = 0
     probe = fitz.Rect(rect)
@@ -1367,18 +1447,18 @@ def _has_table_lines(page: fitz.Page, rect: fitz.Rect) -> bool:
     probe.y0 -= 4
     probe.x1 += 4
     probe.y1 += 4
-    for drawing in page.get_drawings():
-        for item in drawing.get("items", []):
-            if not item or item[0] != "l":
-                continue
-            p0, p1 = item[1], item[2]
-            x0, y0, x1, y1 = float(p0.x), float(p0.y), float(p1.x), float(p1.y)
-            if not probe.contains(fitz.Point(x0, y0)) and not probe.contains(fitz.Point(x1, y1)):
-                continue
-            if abs(y1 - y0) <= 0.6 and abs(x1 - x0) >= 30:
-                horizontal += 1
-            elif abs(x1 - x0) <= 0.6 and abs(y1 - y0) >= 12:
-                vertical += 1
+    geometry = drawing_geometry or _flow_drawing_geometry(page)
+    if geometry["dense"]:
+        return False
+    for x0, y0, x1, y1 in geometry["lines"]:
+        if not probe.contains(fitz.Point(x0, y0)) and not probe.contains(fitz.Point(x1, y1)):
+            continue
+        if abs(y1 - y0) <= 0.6 and abs(x1 - x0) >= 30:
+            horizontal += 1
+        elif abs(x1 - x0) <= 0.6 and abs(y1 - y0) >= 12:
+            vertical += 1
+        if horizontal >= 2 and vertical >= 2:
+            return True
     return horizontal >= 2 and vertical >= 2
 
 
@@ -1411,26 +1491,27 @@ def _rects_touch(a: fitz.Rect, b: fitz.Rect, *, gap: float = 10.0) -> bool:
     return expanded.intersects(b)
 
 
-def _drawing_table_regions(page: fitz.Page) -> list[fitz.Rect]:
+def _drawing_table_regions(
+    page: fitz.Page,
+    drawing_geometry: dict[str, Any] | None = None,
+) -> list[fitz.Rect]:
     line_items: list[tuple[fitz.Rect, str]] = []
-    for drawing in page.get_drawings():
-        for item in drawing.get("items", []):
-            if not item or item[0] != "l":
-                continue
-            p0, p1 = item[1], item[2]
-            x0, y0, x1, y1 = float(p0.x), float(p0.y), float(p1.x), float(p1.y)
-            if max(y0, y1) < page.rect.height * 0.35:
-                continue
-            if abs(y1 - y0) <= 0.7 and abs(x1 - x0) >= 28:
-                rect = fitz.Rect(min(x0, x1), y0, max(x0, x1), y1)
-                rect.y0 -= 1
-                rect.y1 += 1
-                line_items.append((rect, "h"))
-            elif abs(x1 - x0) <= 0.7 and abs(y1 - y0) >= 12:
-                rect = fitz.Rect(x0, min(y0, y1), x1, max(y0, y1))
-                rect.x0 -= 1
-                rect.x1 += 1
-                line_items.append((rect, "v"))
+    geometry = drawing_geometry or _flow_drawing_geometry(page)
+    if geometry["dense"]:
+        return []
+    for x0, y0, x1, y1 in geometry["lines"]:
+        if max(y0, y1) < page.rect.height * 0.35:
+            continue
+        if abs(y1 - y0) <= 0.7 and abs(x1 - x0) >= 28:
+            rect = fitz.Rect(min(x0, x1), y0, max(x0, x1), y1)
+            rect.y0 -= 1
+            rect.y1 += 1
+            line_items.append((rect, "h"))
+        elif abs(x1 - x0) <= 0.7 and abs(y1 - y0) >= 12:
+            rect = fitz.Rect(x0, min(y0, y1), x1, max(y0, y1))
+            rect.x0 -= 1
+            rect.x1 += 1
+            line_items.append((rect, "v"))
 
     components: list[list[tuple[fitz.Rect, str]]] = []
     for rect, orientation in line_items:
@@ -1496,12 +1577,18 @@ def _drawing_table_regions(page: fitz.Page) -> list[fitz.Rect]:
     return regions
 
 
-def _iter_flow_table_images(page: fitz.Page) -> list[dict[str, Any]]:
-    blocks = [block for block in page.get_text("dict").get("blocks", []) if block.get("type") == 0]
+def _iter_flow_table_images(
+    page: fitz.Page,
+    drawing_geometry: dict[str, Any] | None = None,
+    text_dict: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    source = text_dict if text_dict is not None else page.get_text("dict")
+    blocks = [block for block in source.get("blocks", []) if block.get("type") == 0]
     used: set[int] = set()
     table_images: list[dict[str, Any]] = []
     matrix = fitz.Matrix(2.0, 2.0)
-    for region in _drawing_table_regions(page):
+    geometry = drawing_geometry or _flow_drawing_geometry(page)
+    for region in _drawing_table_regions(page, geometry):
         pix = page.get_pixmap(matrix=matrix, clip=region, alpha=False)
         table_images.append(
             {
@@ -1529,7 +1616,7 @@ def _iter_flow_table_images(page: fitz.Page) -> list[dict[str, Any]]:
         seed_probe.y0 = max(0.0, seed_probe.y0 - 4)
         seed_probe.x1 = min(page.rect.width, seed_probe.x1 + 4)
         seed_probe.y1 = min(page.rect.height, seed_probe.y1 + 4)
-        if not _has_table_lines(page, seed_probe):
+        if not _has_table_lines(page, seed_probe, geometry):
             continue
         region = fitz.Rect(rect)
         member_indexes = {index}
@@ -1560,7 +1647,7 @@ def _iter_flow_table_images(page: fitz.Page) -> list[dict[str, Any]]:
         padded.y0 = max(0.0, padded.y0 - 4)
         padded.x1 = min(page.rect.width, padded.x1 + 4)
         padded.y1 = min(page.rect.height, padded.y1 + 4)
-        if not _has_table_lines(page, padded):
+        if not _has_table_lines(page, padded, geometry):
             continue
         pix = page.get_pixmap(matrix=matrix, clip=padded, alpha=False)
         table_images.append(
@@ -1621,133 +1708,145 @@ def _append_cell_image(
     return True
 
 
-def _flow_box_rects(page: fitz.Page) -> list[fitz.Rect]:
+def _flow_box_rects(
+    page: fitz.Page,
+    drawing_geometry: dict[str, Any] | None = None,
+) -> list[fitz.Rect]:
     boxes: list[fitz.Rect] = []
     page_area = float(page.rect.width * page.rect.height)
-    for drawing in page.get_drawings():
-        rects: list[fitz.Rect] = []
-        drawing_rect = drawing.get("rect")
-        if drawing_rect is not None:
-            rects.append(fitz.Rect(drawing_rect))
-        for item in drawing.get("items", []):
-            if item and item[0] == "re":
-                rects.append(fitz.Rect(item[1]))
-        for rect in rects:
-            if _is_hidden_header_rect(rect):
-                continue
-            area = float(rect.width * rect.height)
-            if rect.width < 80 or rect.height < 18:
-                continue
-            if rect.width > page.rect.width * 0.55 or rect.height > page.rect.height * 0.33:
-                continue
-            if area > page_area * 0.75:
-                continue
-            if rect.y0 < 35 and rect.height < 35:
-                continue
-            if not any(_rects_close(rect, existing) for existing in boxes):
-                boxes.append(rect)
-    for rect in _drawing_box_rects(page):
+    geometry = drawing_geometry or _flow_drawing_geometry(page)
+    for rect in geometry["rects"]:
+        if _is_hidden_header_rect(rect):
+            continue
+        area = float(rect.width * rect.height)
+        if rect.width < 80 or rect.height < 18:
+            continue
+        if rect.width > page.rect.width * 0.55 or rect.height > page.rect.height * 0.33:
+            continue
+        if area > page_area * 0.75:
+            continue
+        if rect.y0 < 35 and rect.height < 35:
+            continue
+        if not any(_rects_close(rect, existing) for existing in boxes):
+            boxes.append(rect)
+    for rect in _drawing_box_rects(page, geometry):
         if not any(_rects_close(rect, existing) or rect.intersects(existing) for existing in boxes):
             boxes.append(rect)
-    for rect in _rail_box_rects(page):
+    for rect in _rail_box_rects(page, geometry):
         if not any(_rects_close(rect, existing) or rect.intersects(existing) for existing in boxes):
             boxes.append(rect)
     boxes.sort(key=lambda item: (item.y0, item.x0, item.width * item.height))
     return boxes
 
 
-def _rail_box_rects(page: fitz.Page) -> list[fitz.Rect]:
-    verticals: list[fitz.Rect] = []
-    horizontals: list[fitz.Rect] = []
-    for drawing in page.get_drawings():
-        for item in drawing.get("items", []):
-            if not item or item[0] != "l":
+def _rail_box_rects(
+    page: fitz.Page,
+    drawing_geometry: dict[str, Any] | None = None,
+) -> list[fitz.Rect]:
+    """Find local rectangles formed by matching horizontal and vertical rails.
+
+    Vertical segments at the same x position must not be merged across large
+    gaps: on dense history pages that turns several independent passages into
+    one page-high box.  Pair horizontal top/bottom edges first, then require
+    matching vertical edges that span that exact interval.  Quantized sets
+    remove duplicate strokes and keep the dense-vector path near-linear.
+    """
+    geometry = drawing_geometry or _flow_drawing_geometry(page)
+    horizontal_keys: set[tuple[float, float, float]] = set()
+    vertical_keys: set[tuple[float, float, float]] = set()
+    for x0, y0, x1, y1 in geometry["lines"]:
+        if abs(x1 - x0) <= 0.7 and abs(y1 - y0) >= 8:
+            vertical_keys.add((round((x0 + x1) / 2.0, 1), round(min(y0, y1), 1), round(max(y0, y1), 1)))
+        elif abs(y1 - y0) <= 0.7 and abs(x1 - x0) >= 30:
+            horizontal_keys.add((round(min(x0, x1), 1), round(max(x0, x1), 1), round((y0 + y1) / 2.0, 1)))
+
+    verticals = sorted(vertical_keys)
+    # Labels such as ``<보기>`` often interrupt only the top border.  Rebuild a
+    # virtual horizontal edge from the left/right fragments so the surrounding
+    # passage box can still be detected.
+    rows_by_y: dict[int, list[tuple[float, float, float]]] = {}
+    for left, right, y in horizontal_keys:
+        rows_by_y.setdefault(round(y / 2.0), []).append((left, right, y))
+    composite_rows: set[tuple[float, float, float]] = set()
+    for rows_at_y in rows_by_y.values():
+        ordered = sorted(rows_at_y)
+        if not ordered:
+            continue
+        current_left, current_right, current_y = ordered[0]
+        part_count = 1
+        for left, right, y in ordered[1:]:
+            if left - current_right <= 80:
+                current_right = max(current_right, right)
+                current_y = (current_y + y) / 2.0
+                part_count += 1
                 continue
-            p0, p1 = item[1], item[2]
-            x0, y0, x1, y1 = float(p0.x), float(p0.y), float(p1.x), float(p1.y)
-            if abs(x1 - x0) <= 0.7 and abs(y1 - y0) >= 8:
-                verticals.append(fitz.Rect(x0 - 0.6, min(y0, y1), x0 + 0.6, max(y0, y1)))
-            elif abs(y1 - y0) <= 0.7 and abs(x1 - x0) >= 30:
-                horizontals.append(fitz.Rect(min(x0, x1), y0 - 0.6, max(x0, x1), y0 + 0.6))
+            if part_count > 1:
+                composite_rows.add((round(current_left, 1), round(current_right, 1), round(current_y, 1)))
+            current_left, current_right, current_y = left, right, y
+            part_count = 1
+        if part_count > 1:
+            composite_rows.add((round(current_left, 1), round(current_right, 1), round(current_y, 1)))
+    horizontal_keys.update(composite_rows)
 
-    rails: list[fitz.Rect] = []
-    for segment in sorted(verticals, key=lambda rect: (round(rect.x0, 1), rect.y0)):
-        center_x = (segment.x0 + segment.x1) / 2.0
-        matched: fitz.Rect | None = None
-        for rail in rails:
-            rail_x = (rail.x0 + rail.x1) / 2.0
-            if abs(center_x - rail_x) <= 2.0:
-                matched = rail
-                break
-        if matched is None:
-            rails.append(fitz.Rect(segment))
-        else:
-            matched.include_rect(segment)
+    horizontal_groups: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+    for left, right, y in horizontal_keys:
+        key = (round(left / 4.0), round(right / 4.0))
+        horizontal_groups.setdefault(key, []).append((left, right, y))
 
-    rails.sort(key=lambda rect: (rect.x0 + rect.x1) / 2.0)
-
-    def has_edge(left: fitz.Rect, right: fitz.Rect, y: float) -> bool:
-        lx = (left.x0 + left.x1) / 2.0
-        rx = (right.x0 + right.x1) / 2.0
-        for line in horizontals:
-            if abs(((line.y0 + line.y1) / 2.0) - y) > 8:
-                continue
-            if line.x0 <= lx + 4 and line.x1 >= rx - 4:
-                return True
-        return False
+    def has_vertical(x: float, top: float, bottom: float) -> bool:
+        return any(
+            abs(vx - x) <= 3.0 and vy0 <= top + 3.0 and vy1 >= bottom - 3.0
+            for vx, vy0, vy1 in verticals
+        )
 
     boxes: list[fitz.Rect] = []
-    used: set[int] = set()
-    for left_index, left in enumerate(rails):
-        if left_index in used:
-            continue
-        best_index: int | None = None
-        best_rect: fitz.Rect | None = None
-        for right_index in range(left_index + 1, len(rails)):
-            if right_index in used:
+    for group in horizontal_groups.values():
+        rows = sorted(group, key=lambda item: item[2])
+        for top_index, top_row in enumerate(rows):
+            left = top_row[0]
+            right = top_row[1]
+            width = right - left
+            if width < page.rect.width * 0.18 or width > page.rect.width * 0.58:
                 continue
-            right = rails[right_index]
-            width = ((right.x0 + right.x1) - (left.x0 + left.x1)) / 2.0
-            if width < page.rect.width * 0.24 or width > page.rect.width * 0.43:
-                continue
-            top = max(left.y0, right.y0)
-            bottom = min(left.y1, right.y1)
-            if bottom - top < page.rect.height * 0.18:
-                continue
-            if not (has_edge(left, right, top) or has_edge(left, right, bottom)):
-                continue
-            best_index = right_index
-            best_rect = fitz.Rect(left.x0, top, right.x1, bottom)
-            break
-        if best_index is None or best_rect is None:
-            continue
-        padded = fitz.Rect(best_rect)
-        padded.x0 = max(0.0, padded.x0 - 2)
-        padded.y0 = max(0.0, padded.y0 - 2)
-        padded.x1 = min(page.rect.width, padded.x1 + 2)
-        padded.y1 = min(page.rect.height, padded.y1 + 2)
-        boxes.append(padded)
-        used.add(left_index)
-        used.add(best_index)
+            for bottom_row in rows[top_index + 1 :]:
+                bottom = bottom_row[2]
+                height = bottom - top_row[2]
+                if height < 18:
+                    continue
+                if height > page.rect.height * 0.34:
+                    break
+                if abs(bottom_row[0] - left) > 4 or abs(bottom_row[1] - right) > 4:
+                    continue
+                if not has_vertical(left, top_row[2], bottom):
+                    continue
+                if not has_vertical(right, top_row[2], bottom):
+                    continue
+                rect = fitz.Rect(left, top_row[2], right, bottom)
+                if not any(_rects_close(rect, existing) for existing in boxes):
+                    boxes.append(rect)
+                break
+
+    boxes.sort(key=lambda rect: (rect.y0, rect.x0, -(rect.width * rect.height)))
     return boxes
 
 
-def _drawing_box_rects(page: fitz.Page) -> list[fitz.Rect]:
+def _drawing_box_rects(
+    page: fitz.Page,
+    drawing_geometry: dict[str, Any] | None = None,
+) -> list[fitz.Rect]:
     line_items: list[tuple[fitz.Rect, str]] = []
-    for drawing in page.get_drawings():
-        for item in drawing.get("items", []):
-            if not item or item[0] != "l":
-                continue
-            p0, p1 = item[1], item[2]
-            x0, y0, x1, y1 = float(p0.x), float(p0.y), float(p1.x), float(p1.y)
-            if min(y0, y1) < 120:
-                continue
-            if abs(y1 - y0) <= 0.7 and abs(x1 - x0) >= 40:
-                rect = fitz.Rect(min(x0, x1), y0 - 1, max(x0, x1), y1 + 1)
-                line_items.append((rect, "h"))
-            elif abs(x1 - x0) <= 0.7 and abs(y1 - y0) >= 18:
-                rect = fitz.Rect(x0 - 1, min(y0, y1), x1 + 1, max(y0, y1))
-                line_items.append((rect, "v"))
+    geometry = drawing_geometry or _flow_drawing_geometry(page)
+    if geometry["dense"]:
+        return []
+    for x0, y0, x1, y1 in geometry["lines"]:
+        if min(y0, y1) < 120:
+            continue
+        if abs(y1 - y0) <= 0.7 and abs(x1 - x0) >= 40:
+            rect = fitz.Rect(min(x0, x1), y0 - 1, max(x0, x1), y1 + 1)
+            line_items.append((rect, "h"))
+        elif abs(x1 - x0) <= 0.7 and abs(y1 - y0) >= 18:
+            rect = fitz.Rect(x0 - 1, min(y0, y1), x1 + 1, max(y0, y1))
+            line_items.append((rect, "v"))
     components: list[list[tuple[fitz.Rect, str]]] = []
     for rect, orientation in line_items:
         placed = False
@@ -1911,21 +2010,20 @@ def _flow_gap_height_pt(raw_gap_pt: float) -> float:
     return min(6.0, max(0.6, (raw_gap_pt - 10.0) * 0.20))
 
 
-def _page_body_top(page: fitz.Page) -> float:
+def _page_body_top(
+    page: fitz.Page,
+    drawing_geometry: dict[str, Any] | None = None,
+) -> float:
     candidates: list[float] = []
-    for drawing in page.get_drawings():
-        for item in drawing.get("items", []):
-            if not item or item[0] != "l":
-                continue
-            p0, p1 = item[1], item[2]
-            x0, y0, x1, y1 = float(p0.x), float(p0.y), float(p1.x), float(p1.y)
-            if abs(y1 - y0) > 0.5:
-                continue
-            if abs(x1 - x0) < page.rect.width * 0.55:
-                continue
-            y = (y0 + y1) / 2.0
-            if 45 <= y <= page.rect.height * 0.35:
-                candidates.append(y)
+    geometry = drawing_geometry or _flow_drawing_geometry(page)
+    for x0, y0, x1, y1 in geometry["lines"]:
+        if abs(y1 - y0) > 0.5:
+            continue
+        if abs(x1 - x0) < page.rect.width * 0.55:
+            continue
+        y = (y0 + y1) / 2.0
+        if 45 <= y <= page.rect.height * 0.35:
+            candidates.append(y)
     if not candidates:
         return 0.0
     return max(candidates) + 4.0
@@ -2159,8 +2257,9 @@ def write_pdf_flow_hwpx(
     *,
     max_pages: int | None = None,
     boxed_passages: bool = True,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Write a Hancom-viewer-safe editable HWPX using regular paragraphs/tables."""
+    started_at = time.perf_counter()
     pdf_path = Path(pdf_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2187,6 +2286,10 @@ def write_pdf_flow_hwpx(
     line_count = 0
     boxed_count = 0
     image_count = 0
+    drawing_count = 0
+    axis_line_count = 0
+    dense_vector_pages = 0
+    page_times_ms: list[int] = []
 
     with fitz.open(pdf_path) as pdf_doc:
         if not pdf_doc:
@@ -2216,23 +2319,34 @@ def write_pdf_flow_hwpx(
 
         total_pages = len(pdf_doc) if max_pages is None else min(len(pdf_doc), max_pages)
         for page_index in range(total_pages):
+            page_started_at = time.perf_counter()
             page = pdf_doc[page_index]
-            body_top = _page_body_top(page)
+            drawing_geometry = _flow_drawing_geometry(page)
+            text_dict = page.get_text("dict")
+            text_lines = _iter_text_lines(page, text_dict)
+            drawing_count += int(drawing_geometry["drawing_count"])
+            axis_line_count += len(drawing_geometry["lines"])
+            dense_vector_pages += int(bool(drawing_geometry["dense"]))
+            body_top = _page_body_top(page, drawing_geometry)
             if body_top <= margin_top_pt:
                 body_top = margin_top_pt
-            table_image_items = _iter_flow_table_images(page)
+            table_image_items = _iter_flow_table_images(page, drawing_geometry, text_dict)
             table_regions = [_item_bbox(item) for item in table_image_items]
             native_image_items = [
                 item
-                for item in _iter_flow_images(page)
+                for item in _iter_flow_images(page, text_dict)
                 if not _inside_any_region(_item_bbox(item), table_regions)
             ]
             native_image_items = _merge_flow_images(native_image_items)
-            native_image_items, textual_image_regions = _convert_textual_image_regions(page, native_image_items)
+            native_image_items, textual_image_regions = _convert_textual_image_regions(
+                page,
+                native_image_items,
+                text_lines,
+            )
             excluded_text_regions = table_regions + textual_image_regions
             line_items = [
                 {"type": "line", "bbox": fitz.Rect(line["bbox"]), "spans": line["spans"]}
-                for line in _iter_text_lines(page)
+                for line in text_lines
                 if _line_text(line)
                 and not _is_flow_footer_line(page, line)
                 and not _inside_any_region(fitz.Rect(line["bbox"]), excluded_text_regions)
@@ -2299,7 +2413,7 @@ def write_pdf_flow_hwpx(
             _set_cell_margin(left_cell, left_mm=0.4, right_mm=2.3, top_mm=0.0, bottom_mm=0.0)
             _set_cell_margin(right_cell, left_mm=2.3, right_mm=0.4, top_mm=0.0, bottom_mm=0.0)
 
-            boxes = _flow_box_rects(page) if boxed_passages else []
+            boxes = _flow_box_rects(page, drawing_geometry) if boxed_passages else []
             columns = _flow_column_blocks(page, body_items, boxes)
             for column_index, blocks in enumerate(columns):
                 cell = body_cells[column_index]
@@ -2317,6 +2431,7 @@ def write_pdf_flow_hwpx(
                         image_border_fill_id_ref=no_border_fill,
                     )
             page_count += 1
+            page_times_ms.append(round((time.perf_counter() - page_started_at) * 1000))
 
     _prepare_hancom_compatibility(doc)
     doc.save(str(output_path))
@@ -2326,6 +2441,12 @@ def write_pdf_flow_hwpx(
         "flow_lines": line_count,
         "boxed_blocks": boxed_count,
         "images": image_count,
+        "vector_drawings": drawing_count,
+        "axis_lines": axis_line_count,
+        "dense_vector_pages": dense_vector_pages,
+        "page_times_ms": page_times_ms,
+        "slowest_page_ms": max(page_times_ms, default=0),
+        "elapsed_ms": round((time.perf_counter() - started_at) * 1000),
     }
 
 
