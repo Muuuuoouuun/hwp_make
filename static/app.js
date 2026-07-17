@@ -48,6 +48,12 @@ const els = {
   basketClearButton: document.querySelector("#basketClearButton"),
   basketList: document.querySelector("#basketList"),
   basketBadge: document.querySelector("#basketBadge"),
+  layoutToolbarTitle: document.querySelector("#layoutToolbarTitle"),
+  layoutToolbarHint: document.querySelector("#layoutToolbarHint"),
+  layoutSummary: document.querySelector("#layoutSummary"),
+  layoutWarnings: document.querySelector("#layoutWarnings"),
+  paperFlowHint: document.querySelector("#paperFlowHint"),
+  paperTemplateHint: document.querySelector("#paperTemplateHint"),
   historyList: document.querySelector("#historyList"),
   historyBadge: document.querySelector("#historyBadge"),
   previewButton: document.querySelector("#previewButton"),
@@ -492,6 +498,184 @@ async function handleImportedProblems(created, { quick = false } = {}) {
   }
 }
 
+function buildLayoutPlan() {
+  const template = currentExportTemplate() || { columns: 1, label: "기본 양식" };
+  const orderedProblems = state.basket.map((entry) => {
+    return state.problems.find((item) => item.id === entry.id) || {
+      id: entry.id,
+      title: entry.label,
+      stem: entry.label,
+      choices: [],
+      tables: [],
+      image_paths: [],
+    };
+  });
+  if (globalThis.HwpLayoutPlanner?.planLayout) {
+    return globalThis.HwpLayoutPlanner.planLayout(orderedProblems, template);
+  }
+  return {
+    columns: 1,
+    pageCount: orderedProblems.length ? 1 : 0,
+    warningCount: 0,
+    splitCount: 0,
+    placements: orderedProblems.map((problem, index) => ({
+      index,
+      id: problem.id,
+      estimatedHeight: 0,
+      fillPercent: 0,
+      start: { page: 1, column: 1 },
+      risk: "none",
+      label: "1쪽",
+    })),
+    pages: orderedProblems.length
+      ? [{ page: 1, columns: [{ column: 1, items: orderedProblems.map((_, index) => index) }] }]
+      : [],
+  };
+}
+
+function updateLayoutSummary(plan) {
+  const template = currentExportTemplate();
+  const columns = plan.columns || 1;
+  if (els.layoutToolbarTitle) els.layoutToolbarTitle.textContent = `${columns}단 시험지`;
+  if (els.layoutToolbarHint) els.layoutToolbarHint.textContent = "높이 기준 예상 · 드래그해서 순서 변경";
+  if (els.paperFlowHint) {
+    els.paperFlowHint.textContent =
+      columns > 1
+        ? "왼쪽 단을 채운 뒤 오른쪽 단으로 이어지는 예상 배치입니다."
+        : "위에서 아래로 이어지는 예상 페이지 배치입니다.";
+  }
+  if (els.paperTemplateHint) {
+    els.paperTemplateHint.textContent = `${template?.label || "선택 양식"} · ${columns}단`;
+  }
+  if (els.layoutSummary) {
+    els.layoutSummary.textContent = state.basket.length
+      ? `예상 ${plan.pageCount}쪽 · ${state.basket.length}문항 · 경계 주의 ${plan.warningCount}개`
+      : "문항을 담으면 예상 페이지와 단 경계를 계산합니다.";
+  }
+  if (!els.layoutWarnings) return;
+  const splitCount = Number(plan.splitCount || 0);
+  const tightCount = Math.max(0, Number(plan.warningCount || 0) - splitCount);
+  const messages = [];
+  if (splitCount) messages.push(`한 단보다 긴 문항 ${splitCount}개는 다음 단까지 자동으로 이어집니다.`);
+  if (tightCount) messages.push(`단 높이에 가까운 문항 ${tightCount}개는 미리보기 확인이 필요합니다.`);
+  els.layoutWarnings.textContent = messages.join(" ");
+  els.layoutWarnings.classList.toggle("hidden", !messages.length);
+}
+
+function createBasketRow(entry, index, problem, placement) {
+  const row = document.createElement("div");
+  row.className = `basket-row layout-risk-${placement.risk || "none"}`;
+  row.draggable = true;
+  row.dataset.index = index;
+  row.dataset.page = String(placement.start?.page || 1);
+  row.dataset.column = String(placement.start?.column || 1);
+  const visualHeight = Math.min(170, Math.max(86, 70 + Number(placement.fillPercent || 0) * 0.72));
+  row.style.setProperty("--layout-card-height", `${visualHeight}px`);
+
+  const handle = document.createElement("span");
+  handle.className = "basket-handle";
+  handle.append(icon("grip"));
+
+  const body = document.createElement("span");
+  body.className = "basket-body";
+
+  const label = document.createElement("span");
+  label.className = "basket-label";
+  label.textContent = `${index + 1}. ${entry.label}`;
+  label.title = entry.label;
+
+  const snippet = document.createElement("span");
+  snippet.className = "basket-snippet";
+  snippet.textContent = compactText(problem?.stem || entry.label);
+
+  const meta = document.createElement("span");
+  meta.className = "basket-layout-meta";
+  const position = document.createElement("span");
+  position.className = "basket-position";
+  const estimate = placement.estimatedHeight ? ` · 예상 높이 ${placement.estimatedHeight}%` : "";
+  position.textContent = `${placement.label || "배치 계산 중"}${estimate}`;
+  meta.append(position);
+  if (placement.risk && placement.risk !== "none") {
+    const risk = document.createElement("span");
+    risk.className = `basket-risk ${placement.risk}`;
+    risk.textContent = placement.risk === "split" ? "분할 예상" : "경계 주의";
+    meta.append(risk);
+  }
+
+  body.append(label, snippet, meta);
+  label.addEventListener("click", () => {
+    state.activeId = entry.id;
+    renderList();
+    renderEditor();
+  });
+
+  const up = document.createElement("button");
+  up.type = "button";
+  up.className = "basket-btn";
+  up.title = "위로 이동";
+  up.setAttribute("aria-label", "위로 이동");
+  up.append(icon("up"));
+  up.addEventListener("click", () => moveBasketItem(index, index - 1));
+
+  const down = document.createElement("button");
+  down.type = "button";
+  down.className = "basket-btn";
+  down.title = "아래로 이동";
+  down.setAttribute("aria-label", "아래로 이동");
+  down.append(icon("down"));
+  down.addEventListener("click", () => moveBasketItem(index, index + 1));
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "basket-btn danger";
+  remove.title = "목록에서 제거";
+  remove.setAttribute("aria-label", "목록에서 제거");
+  remove.append(icon("close"));
+  remove.addEventListener("click", () => {
+    removeFromBasket(entry.id);
+    renderList();
+    renderBasket();
+  });
+
+  row.addEventListener("dragstart", (event) => {
+    event.dataTransfer.setData("text/plain", String(index));
+    event.dataTransfer.setData("application/x-basket-index", String(index));
+    event.dataTransfer.effectAllowed = "move";
+    row.classList.add("dragging");
+  });
+  row.addEventListener("dragend", () => row.classList.remove("dragging"));
+  row.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    row.classList.add("drag-over");
+  });
+  row.addEventListener("dragleave", () => row.classList.remove("drag-over"));
+  row.addEventListener("drop", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    row.classList.remove("drag-over");
+    const problemId = Number(event.dataTransfer.getData("application/x-problem-id"));
+    if (!Number.isNaN(problemId) && problemId > 0) {
+      const dropped = state.problems.find((item) => item.id === problemId);
+      if (dropped) {
+        insertBasketProblemAt(dropped, index);
+        state.activeId = dropped.id;
+        renderList();
+        renderBasket();
+        renderEditor();
+      }
+      return;
+    }
+    const from = Number(
+      event.dataTransfer.getData("application/x-basket-index") || event.dataTransfer.getData("text/plain"),
+    );
+    if (!Number.isNaN(from) && from !== index) moveBasketItem(from, index);
+  });
+
+  row.append(handle, body, up, down, remove);
+  return row;
+}
+
 function renderBasket() {
   persistBasket();
   const count = state.basket.length;
@@ -504,6 +688,8 @@ function renderBasket() {
   if (els.previewButton) els.previewButton.disabled = !count;
   if (els.exportButton) els.exportButton.disabled = !count;
   els.basketList.innerHTML = "";
+  const plan = buildLayoutPlan();
+  updateLayoutSummary(plan);
   if (!state.basket.length) {
     const empty = document.createElement("div");
     empty.className = "basket-empty";
@@ -511,112 +697,50 @@ function renderBasket() {
     els.basketList.append(empty);
     return;
   }
+  els.basketList.classList.toggle("single-column-plan", plan.columns === 1);
 
-  const guide = document.createElement("div");
-  guide.className = "layout-guide";
-  guide.innerHTML = "<span>왼쪽 열</span><span>오른쪽 열</span>";
-  els.basketList.append(guide);
+  for (const page of plan.pages) {
+    const pageElement = document.createElement("section");
+    pageElement.className = "layout-page";
+    pageElement.setAttribute("aria-label", `예상 ${page.page}쪽`);
+    const pageHeader = document.createElement("div");
+    pageHeader.className = "layout-page-header";
+    pageHeader.innerHTML = `<strong>예상 ${page.page}쪽</strong><span>문항 높이 기반</span>`;
+    const columnsElement = document.createElement("div");
+    columnsElement.className = "layout-page-columns";
+    columnsElement.style.setProperty("--layout-columns", String(plan.columns));
 
-  state.basket.forEach((entry, index) => {
-    const problem = state.problems.find((item) => item.id === entry.id);
-    if (problem) entry.label = problemLabel(problem);
-
-    const row = document.createElement("div");
-    row.className = `basket-row ${index % 2 === 0 ? "left-slot" : "right-slot"}`;
-    row.draggable = true;
-    row.dataset.index = index;
-
-    const handle = document.createElement("span");
-    handle.className = "basket-handle";
-    handle.append(icon("grip"));
-
-    const body = document.createElement("span");
-    body.className = "basket-body";
-
-    const label = document.createElement("span");
-    label.className = "basket-label";
-    label.textContent = `${index + 1}. ${entry.label}`;
-    label.title = entry.label;
-
-    const snippet = document.createElement("span");
-    snippet.className = "basket-snippet";
-    snippet.textContent = compactText(problem?.stem || entry.label);
-
-    const position = document.createElement("span");
-    position.className = "basket-position";
-    position.textContent = `${Math.floor(index / 2) + 1}행 · ${index % 2 === 0 ? "왼쪽" : "오른쪽"}`;
-
-    body.append(label, snippet, position);
-    label.addEventListener("click", () => {
-      state.activeId = entry.id;
-      renderList();
-      renderEditor();
-    });
-
-    const up = document.createElement("button");
-    up.type = "button";
-    up.className = "basket-btn";
-    up.title = "위로 이동";
-    up.setAttribute("aria-label", "위로 이동");
-    up.append(icon("up"));
-    up.addEventListener("click", () => moveBasketItem(index, index - 1));
-
-    const down = document.createElement("button");
-    down.type = "button";
-    down.className = "basket-btn";
-    down.title = "아래로 이동";
-    down.setAttribute("aria-label", "아래로 이동");
-    down.append(icon("down"));
-    down.addEventListener("click", () => moveBasketItem(index, index + 1));
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "basket-btn danger";
-    remove.title = "목록에서 제거";
-    remove.setAttribute("aria-label", "목록에서 제거");
-    remove.append(icon("close"));
-    remove.addEventListener("click", () => {
-      removeFromBasket(entry.id);
-      renderList();
-      renderBasket();
-    });
-
-    row.addEventListener("dragstart", (event) => {
-      event.dataTransfer.setData("text/plain", String(index));
-      event.dataTransfer.setData("application/x-basket-index", String(index));
-      event.dataTransfer.effectAllowed = "move";
-      row.classList.add("dragging");
-    });
-    row.addEventListener("dragend", () => row.classList.remove("dragging"));
-    row.addEventListener("dragover", (event) => {
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "move";
-      row.classList.add("drag-over");
-    });
-    row.addEventListener("dragleave", () => row.classList.remove("drag-over"));
-    row.addEventListener("drop", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      row.classList.remove("drag-over");
-      const problemId = Number(event.dataTransfer.getData("application/x-problem-id"));
-      if (!Number.isNaN(problemId) && problemId > 0) {
-        const dropped = state.problems.find((item) => item.id === problemId);
-        if (dropped) {
-          insertBasketProblemAt(dropped, index);
-          state.activeId = dropped.id;
-          renderList();
-          renderBasket();
-          renderEditor();
-        }
-        return;
+    for (const column of page.columns) {
+      const columnElement = document.createElement("div");
+      columnElement.className = "layout-column";
+      const columnTitle = document.createElement("div");
+      columnTitle.className = "layout-column-title";
+      columnTitle.textContent = plan.columns > 1 ? `${column.column === 1 ? "왼쪽" : "오른쪽"} 단` : "본문";
+      columnElement.append(columnTitle);
+      for (const itemIndex of column.continuations || []) {
+        const continuedEntry = state.basket[itemIndex];
+        const continuation = document.createElement("div");
+        continuation.className = "layout-continuation";
+        continuation.textContent = `${itemIndex + 1}. ${continuedEntry?.label || "긴 문항"} 이어짐`;
+        columnElement.append(continuation);
       }
-      const from = Number(event.dataTransfer.getData("application/x-basket-index") || event.dataTransfer.getData("text/plain"));
-      if (!Number.isNaN(from) && from !== index) moveBasketItem(from, index);
-    });
-
-    row.append(handle, body, up, down, remove);
-    els.basketList.append(row);
-  });
+      if (!column.items.length && !(column.continuations || []).length) {
+        const empty = document.createElement("div");
+        empty.className = "layout-column-empty";
+        empty.textContent = "이어지는 문항 공간";
+        columnElement.append(empty);
+      }
+      for (const itemIndex of column.items) {
+        const entry = state.basket[itemIndex];
+        const problem = state.problems.find((item) => item.id === entry.id);
+        if (problem) entry.label = problemLabel(problem);
+        columnElement.append(createBasketRow(entry, itemIndex, problem, plan.placements[itemIndex]));
+      }
+      columnsElement.append(columnElement);
+    }
+    pageElement.append(pageHeader, columnsElement);
+    els.basketList.append(pageElement);
+  }
 }
 
 // --- 내보내기 기록 -----------------------------------------------------------
@@ -1333,6 +1457,7 @@ els.previewModal.addEventListener("click", (event) => {
 els.exportTemplate.addEventListener("change", () => {
   syncExportTitleToTemplate();
   syncExportOptions();
+  renderBasket();
 });
 els.exportTitle.addEventListener("input", syncPaperPreviewMeta);
 els.exportFormat.addEventListener("change", syncExportOptions);

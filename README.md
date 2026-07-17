@@ -13,6 +13,7 @@ HWP Make는 PDF, HWP/HWPX, DOCX, 이미지, 텍스트, CSV/SQLite 자료를 문�
 - `docs/full_subject_qa_2026_06.md`: 2026년 6월 고1 전과목 PDF와 사용자 제공 HWP의 과목별 경향 QA입니다.
 - `docs/subject_conversion_performance_2026_07.md`: 국어·영어·수학·사회·과학·한국사의 문항 인식/레이아웃 변환시간과 벡터 밀집 PDF 최적화 결과입니다.
 - `docs/subject_flow_layout_assessment_2026_07.md`: 전과목 원본 레이아웃의 여백·머리말·문단·표·수식 배치 편법을 점검하고 개선한 결과입니다.
+- `docs/ui_reorder_layout_assessment_2026_07.md`: UI 문항 이동·드래그 뒤 예상 페이지·단과 실제 HWPX 경계 안전성을 검증한 결과입니다.
 - `docs/reference_samples_manifest.md`: 로컬 레퍼런스 시험지 목록과 사용 목적만 기록합니다. 파일 자체는 커밋하지 않습니다.
 - `docs/hwp_open_probe_checklist.md`: 한글 GUI 광고/수정권한/보호보기 이슈를 구분하는 체크리스트입니다.
 
@@ -47,6 +48,7 @@ pip install -r requirements.txt
 - 출력은 평가원/교육청 시험지처럼 2단, 중간 분할선, 좁은 여백, 실제 본문 폰트와 줄간격을 맞추는 방향으로 검증합니다.
 - 좌우 본문 레일은 고정 여백이 아니라 PDF 텍스트 좌표에서 추정하고, 매 페이지 머리말은 3열 표, 본문은 별도의 2열 표로 구성합니다.
 - 인라인 수식은 편집 가능한 유니코드 텍스트로 복구하고, 분수·근호처럼 2차원 배치가 중요한 작은 영역만 원본 이미지로 보존합니다.
+- 시험지 구성 UI는 문항 높이·선지·표·이미지를 반영한 예상 페이지와 단을 표시하며, 긴 문항의 분할과 이어짐을 경고합니다.
 
 ### 3. HWPX/DOCX 내보내기
 
@@ -120,6 +122,8 @@ python scripts/run_all_verify.py
 - `python scripts/qa_hwp_math_samples.py`
 - `python scripts/verify_pdf_layout_export_api.py`
 - `python scripts/verify_pdf_flow_performance.py`
+- `node scripts/verify_frontend_layout.js`
+- `python scripts/verify_reorder_layout.py`
 - `python scripts/benchmark_subject_conversion.py --runs 3 --output-dir data/subject_conversion_benchmark/current`
 - `python scripts/pdf_layout_hwpx_probe.py "data/uploads/sample.pdf" "data/exports/sample_flow.hwpx" --flow --max-pages 1`
 - `python scripts/verify_pdf_layout_hwpx.py "data/exports/sample_flow.hwpx" --render`

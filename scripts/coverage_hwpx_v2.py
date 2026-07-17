@@ -72,6 +72,12 @@ def _normalized_stream(items: list[str]) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _layout_normalized_stream(items: list[str]) -> str:
+    """Compare text content while allowing writer-driven wrapping boundaries."""
+    text = "".join(items).replace("\u3000", " ")
+    return re.sub(r"\s+", "", text)
+
+
 def _validate(path: Path) -> str:
     try:
         from hwpx import validate_package
@@ -121,6 +127,8 @@ def main() -> int:
                 parity = f"MATCH ({len(t1)})"
             elif _normalized_stream(t1) == _normalized_stream(t2):
                 parity = f"MATCH normalized (v1={len(t1)} v2={len(t2)})"
+            elif _layout_normalized_stream(t1) == _layout_normalized_stream(t2):
+                parity = f"MATCH layout-normalized (v1={len(t1)} v2={len(t2)})"
             else:
                 parity = f"DIFF v1={len(t1)} v2={len(t2)}"
                 all_ok = False

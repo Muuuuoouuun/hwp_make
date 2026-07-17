@@ -87,13 +87,13 @@ def main() -> int:
     args = parser.parse_args()
 
     py_targets = discover_py()
-    node_target = SCRIPTS / "verify_frontend_math.js"
+    node_targets = sorted(SCRIPTS.glob("verify_frontend_*.js"))
     has_node = shutil.which("node") is not None
 
     if args.list:
         for path in py_targets:
             print(f"  py   {path.name}")
-        if node_target.exists():
+        for node_target in node_targets:
             print(f"  node {node_target.name} ({'node 있음' if has_node else 'node 없음→SKIP'})")
         return 0
 
@@ -104,7 +104,7 @@ def main() -> int:
         results.append((path.name, status, code, tail))
         print(f"  [{status:4}] {path.name} (exit {code}){('  · ' + tail) if tail else ''}")
 
-    if node_target.exists():
+    for node_target in node_targets:
         if has_node:
             status, code, tail = run_subprocess(["node", str(node_target)])
         else:

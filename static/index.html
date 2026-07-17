@@ -208,9 +208,11 @@
               <button id="basketClearButton" class="ghost mini-button">비우기</button>
             </div>
             <div class="layout-toolbar" aria-label="시험지 위치 기준">
-              <span>2단 시험지</span>
-              <span>드래그해서 순서·위치 변경</span>
+              <span id="layoutToolbarTitle">시험지 배치</span>
+              <span id="layoutToolbarHint">드래그해서 순서 변경</span>
             </div>
+            <div id="layoutSummary" class="layout-summary" role="status" aria-live="polite"></div>
+            <div id="layoutWarnings" class="layout-warnings hidden"></div>
             <div class="paper-stage" aria-label="시험지 페이지 배치 미리보기">
               <div class="paper-sheet">
                 <div class="paper-header">
@@ -225,8 +227,8 @@
                   </div>
                 </div>
                 <div class="paper-subhead">
-                  <span>홀수 문항은 왼쪽, 짝수 문항은 오른쪽 열에 배치됩니다.</span>
-                  <span>수능·평가원형 2단 기준</span>
+                  <span id="paperFlowHint">문항 높이를 반영한 예상 배치입니다.</span>
+                  <span id="paperTemplateHint">선택 양식 기준</span>
                 </div>
                 <div id="basketList" class="basket-list"></div>
               </div>
@@ -302,6 +304,7 @@
       </div>
     </div>
     <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
-    <script src="/static/app.js?v=12" type="module"></script>
+    <script src="/static/layout-planner.js?v=1"></script>
+    <script src="/static/app.js?v=13" type="module"></script>
   </body>
 </html>

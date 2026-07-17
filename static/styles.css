@@ -900,22 +900,12 @@ textarea:hover {
 
 .basket-list {
   position: relative;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px 12px;
-  max-height: 430px;
+  display: block;
+  max-height: 520px;
   min-height: 360px;
   overflow-y: auto;
   border-radius: 2px;
-  background:
-    linear-gradient(
-      90deg,
-      transparent calc(50% - 0.5px),
-      #bdb8ac calc(50% - 0.5px),
-      #bdb8ac calc(50% + 0.5px),
-      transparent calc(50% + 0.5px)
-    ),
-    var(--paper);
+  background: #e9e7df;
   padding: var(--s3);
   transition: outline-color 0.15s var(--ease), background-color 0.15s var(--ease);
 }
@@ -923,15 +913,110 @@ textarea:hover {
 .basket-list.board-drag-over {
   outline: 2px solid var(--accent);
   outline-offset: 4px;
-  background:
-    linear-gradient(
-      90deg,
-      transparent calc(50% - 0.5px),
-      var(--accent) calc(50% - 0.5px),
-      var(--accent) calc(50% + 0.5px),
-      transparent calc(50% + 0.5px)
-    ),
-    #fbfbf8;
+  background: #f4f2ea;
+}
+
+.layout-summary {
+  min-height: 28px;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line);
+  border-bottom: 0;
+  background: #f7f6f1;
+  color: var(--ink-soft);
+  font-size: var(--t-xs);
+  font-weight: 720;
+  line-height: 1.35;
+}
+
+.layout-warnings {
+  padding: var(--s2) var(--s3);
+  border: 1px solid #d9aa74;
+  border-bottom: 0;
+  background: #fff5e7;
+  color: #72420d;
+  font-size: var(--t-xs);
+  font-weight: 720;
+  line-height: 1.45;
+}
+
+.layout-page {
+  overflow: hidden;
+  margin-bottom: var(--s3);
+  border: 1px solid #cbc7bb;
+  background: var(--paper);
+  box-shadow: 0 2px 8px rgba(37, 34, 27, 0.08);
+}
+
+.layout-page:last-child {
+  margin-bottom: 0;
+}
+
+.layout-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  padding: 7px 10px;
+  border-bottom: 1px solid #d8d4c9;
+  background: #f6f4ee;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.layout-page-header strong {
+  color: var(--ink);
+  font-size: var(--t-xs);
+}
+
+.layout-page-columns {
+  display: grid;
+  grid-template-columns: repeat(var(--layout-columns, 2), minmax(0, 1fr));
+  min-height: 220px;
+}
+
+.layout-column {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px;
+  border-right: 1px solid #c8c3b6;
+}
+
+.layout-column:last-child {
+  border-right: 0;
+}
+
+.layout-column-title {
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 760;
+}
+
+.layout-column-empty {
+  display: grid;
+  min-height: 96px;
+  place-items: center;
+  border: 1px dashed #ddd8cb;
+  color: #999387;
+  font-size: 10px;
+  text-align: center;
+}
+
+.layout-continuation {
+  display: grid;
+  min-height: 76px;
+  place-items: center;
+  padding: var(--s2);
+  border: 1px dashed #c76855;
+  background: #fff6f2;
+  color: #8a2e1f;
+  font-size: 10px;
+  font-weight: 760;
+  line-height: 1.35;
+  text-align: center;
 }
 
 .layout-guide {
@@ -984,9 +1069,19 @@ textarea:hover {
   grid-template-columns: 17px minmax(0, 1fr) 24px 24px 24px;
   gap: var(--s1);
   align-items: start;
-  min-height: 104px;
+  min-height: var(--layout-card-height, 104px);
   padding: 10px 8px;
   cursor: grab;
+}
+
+.basket-row.layout-risk-tight {
+  border-color: #d9aa74;
+  background: #fffaf2;
+}
+
+.basket-row.layout-risk-split {
+  border-color: #c76855;
+  background: #fff6f2;
 }
 
 .basket-row:hover,
@@ -1069,6 +1164,34 @@ textarea:hover {
   color: var(--muted);
   font-size: var(--t-xs);
   line-height: 1.2;
+}
+
+.basket-layout-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.basket-risk {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.basket-risk.tight {
+  background: #f7e6c9;
+  color: #71430f;
+}
+
+.basket-risk.split {
+  background: #f7d9d1;
+  color: #8a2e1f;
 }
 
 .basket-label:hover {
@@ -1710,7 +1833,6 @@ textarea:hover {
     min-width: 104px;
   }
 
-  .basket-list,
   .layout-guide,
   .import-actions {
     grid-template-columns: 1fr;
@@ -1718,7 +1840,20 @@ textarea:hover {
 
   .basket-list {
     min-height: 300px;
-    background: var(--paper);
+    background: #e9e7df;
+  }
+
+  .layout-page-columns {
+    grid-template-columns: 1fr;
+  }
+
+  .layout-column {
+    border-right: 0;
+    border-bottom: 1px solid #c8c3b6;
+  }
+
+  .layout-column:last-child {
+    border-bottom: 0;
   }
 
   .paper-stage {

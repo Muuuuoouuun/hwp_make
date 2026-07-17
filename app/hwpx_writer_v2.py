@@ -122,6 +122,7 @@ _KICE_STYLE_LINE_HEIGHTS = {
 # taller than the lightweight Python estimator. 46000 keeps the real HWP math
 # samples compact while leaving enough bottom margin to avoid layout overflow.
 KICE_MATH_COLUMN_BODY_HEIGHT = 46000
+PROBLEM_LAYOUT_GUARD = 900
 
 
 def _local_name(tag: Any) -> str:
@@ -629,10 +630,10 @@ def write_hwpx(
     flow_y = 0
     pending_column_break = False
     column_body_height = KICE_MATH_COLUMN_BODY_HEIGHT
-    math_picture_max_height = (
+    picture_max_height = (
         int(column_body_height * 0.45)
         if native_math and template.key == "kice_math" and columns > 1
-        else None
+        else column_body_height - 1800 if columns > 1 else None
     )
 
     def add_single_para(
@@ -744,7 +745,7 @@ def write_hwpx(
             )
             return
         limits = {"heading": 44, "body": 48, "small": 56}
-        for wrapped in wrap_line_parts(line, limits.get(style, 48)):
+        for wrapped in wrap_line_parts(line, limits.get(style, 48)) or [line]:
             add_single_para(
                 wrapped,
                 style,
@@ -857,7 +858,7 @@ def write_hwpx(
                 flush_buffer()
             if emitted:
                 return
-        add_single_para(
+        add_wrapped_line(
             text,
             style,
             center=center,
@@ -920,7 +921,13 @@ def write_hwpx(
     ) -> int:
         value = str(text or "")
         if not (native_math and math_blocks):
-            return estimate_single_para_height(value, style)
+            return estimate_wrapped_line_height(
+                value,
+                style,
+                center=center,
+                right=right,
+                math_enabled=True,
+            )
 
         total = 0
         for raw_line in value.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
@@ -987,9 +994,29 @@ def write_hwpx(
             total += row_height
         return total + 800
 
+    def split_table_chunks(rows: list[list[str]]) -> list[list[list[str]]]:
+        if not rows:
+            return []
+        max_height = column_body_height - PROBLEM_LAYOUT_GUARD * 2
+        if columns <= 1 or len(rows) <= 1 or estimate_table_height(rows) <= max_height:
+            return [rows]
+        header_row = rows[0]
+        chunks: list[list[list[str]]] = []
+        current: list[list[str]] = [header_row]
+        for row in rows[1:]:
+            candidate = [*current, row]
+            if len(current) > 1 and estimate_table_height(candidate) > max_height:
+                chunks.append(current)
+                current = [header_row, row]
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
+        return chunks
+
     def estimate_picture_height(image_path: str) -> int:
         full_path = storage.DATA_DIR / image_path
-        size = _picture_size(full_path, content_width, math_picture_max_height)
+        size = _picture_size(full_path, content_width, picture_max_height)
         if size is None:
             return 0
         return size[1] + 600
@@ -1253,9 +1280,13 @@ def write_hwpx(
 
     # --- 문항 ---
     for index, problem in enumerate(problems, start=1):
-        if native_math and template.key == "kice_math" and columns > 1:
+        if columns > 1:
             estimated_height = estimate_problem_height(problem, index)
-            if flow_y > 0 and flow_y + estimated_height > column_body_height:
+            if (
+                flow_y > 0
+                and estimated_height <= column_body_height
+                and flow_y + estimated_height + PROBLEM_LAYOUT_GUARD > column_body_height
+            ):
                 pending_column_break = True
         label = problem.get("number") or str(index)
         subject = problem.get("subject") or ""
@@ -1274,7 +1305,7 @@ def write_hwpx(
                     doc,
                     image_path,
                     content_width,
-                    max_height=math_picture_max_height,
+                    max_height=picture_max_height,
                     paragraph_attrs=reserve_object_height(image_height),
                 )
             para("")
@@ -1312,20 +1343,21 @@ def write_hwpx(
                 para(line, "body", math_blocks=native_math and template.key == "kice_math")
 
         for rows in problem.get("tables") or []:
-            table_height = estimate_table_height(rows)
-            _add_table(
-                doc,
-                rows,
-                char_pr_id_ref=cp["body"],
-                math_char_pr_id_ref=math_cp["body"],
-                native_math=native_math,
-                equation_counter=equation_counter,
-                cell_para_pr_id_ref=pr_left,
-                min_line_height=style_line_heights["body"],
-                content_width=content_width,
-                height=table_height,
-                paragraph_attrs=reserve_object_height(table_height),
-            )
+            for table_rows in split_table_chunks(rows):
+                table_height = estimate_table_height(table_rows)
+                _add_table(
+                    doc,
+                    table_rows,
+                    char_pr_id_ref=cp["body"],
+                    math_char_pr_id_ref=math_cp["body"],
+                    native_math=native_math,
+                    equation_counter=equation_counter,
+                    cell_para_pr_id_ref=pr_left,
+                    min_line_height=style_line_heights["body"],
+                    content_width=content_width,
+                    height=table_height,
+                    paragraph_attrs=reserve_object_height(table_height),
+                )
         for line in table_tail_lines:
             para(line, "body", math_blocks=native_math and template.key == "kice_math")
 
@@ -1335,7 +1367,7 @@ def write_hwpx(
                 doc,
                 image_path,
                 content_width,
-                max_height=math_picture_max_height,
+                max_height=picture_max_height,
                 paragraph_attrs=reserve_object_height(image_height),
             )
 
