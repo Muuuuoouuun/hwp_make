@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import csv
 import io
 import re
@@ -37,6 +38,8 @@ except Exception:
 
 
 SAFE_NAME_RE = re.compile(r"[^0-9A-Za-z가-힣._ -]+")
+MAX_PDF_PAGES = 500
+MAX_IMAGE_PIXELS = 50_000_000
 QUESTION_START_RE = re.compile(
     r"(?m)(?=^\s*(?:문제\s*)?\d{1,3}\s*[\.\)]|\n\s*(?:문제\s*)?\d{1,3}\s*[\.\)])"
 )
@@ -109,9 +112,19 @@ def safe_filename(filename: str) -> str:
 
 
 def decode_base64(data: str) -> bytes:
+    """Decode a Base64 payload without accepting truncated or garbage input."""
+    if not isinstance(data, str) or not data.strip():
+        raise ValueError("Base64 데이터가 비어 있습니다.")
     if "," in data and data.split(",", 1)[0].startswith("data:"):
         data = data.split(",", 1)[1]
-    return base64.b64decode(data)
+    compact = re.sub(r"\s+", "", data)
+    try:
+        decoded = base64.b64decode(compact, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("올바른 Base64 데이터가 아닙니다.") from exc
+    if not decoded:
+        raise ValueError("디코딩된 파일이 비어 있습니다.")
+    return decoded
 
 
 def save_upload(filename: str, payload: bytes) -> str:
@@ -218,6 +231,14 @@ def import_pdf(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[
            일부 영역만 보존용 이미지 fallback을 붙인다.
     2순위: 스캔/텍스트레이어 없음 등 결정론적 인식이 불가능한 경우 pypdf+OCR 경로.
     """
+    if not payload.startswith(b"%PDF"):
+        raise ValueError("올바른 PDF 파일이 아닙니다.")
+    try:
+        page_count = len(PdfReader(io.BytesIO(payload)).pages)
+    except Exception as exc:
+        raise ValueError(f"PDF를 열 수 없습니다: {exc}") from exc
+    if page_count > MAX_PDF_PAGES:
+        raise ValueError(f"PDF는 {MAX_PDF_PAGES}쪽 이하만 처리할 수 있습니다.")
     recognized = _import_pdf_recognized(filename, payload, metadata)
     if recognized is not None:
         return recognized
@@ -299,10 +320,26 @@ def _import_pdf_recognized(
         if image_only_fallback:
             stem_text, choices = "", []
         else:
-            stem_text, choices = _split_stem_and_choices(prob.text)
             pdf_line_geometries = list(getattr(prob, "line_geometries", []) or [])
+            geometry_source = "\n".join(
+                str(line.get("text") or "")
+                for line in pdf_line_geometries
+                if isinstance(line, dict) and str(line.get("text") or "").strip()
+            )
+            repaired_geometry_source = _repair_pdf_stem_fractions_from_geometry(
+                geometry_source,
+                pdf_line_geometries,
+            )
+            source_text = str(prob.text or "")
+            if (
+                repaired_geometry_source
+                and _placeholder_count_in_fields(repaired_geometry_source, [])
+                < _placeholder_count_in_fields(source_text, [])
+            ):
+                source_text = repaired_geometry_source
+            stem_text, choices = _split_stem_and_choices(source_text)
             geometry_split = _split_stem_and_choices_from_pdf_geometry(
-                prob.text,
+                source_text,
                 pdf_line_geometries,
             )
             if geometry_split is not None:
@@ -354,23 +391,16 @@ def _import_pdf_recognized(
 
 
 def _legacy_import_pdf(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
-    rel_path = save_upload(filename, payload)
-    pdf_path = storage.DATA_DIR / rel_path
     sink = _Sink()
     notices: list[str] = []
     try:
-        reader = PdfReader(str(pdf_path))
+        reader = PdfReader(io.BytesIO(payload))
+        # Accessing ``pages`` forces pypdf to validate the page tree before the
+        # source is persisted or any DB row is created.
+        len(reader.pages)
     except Exception as exc:  # pragma: no cover - library-specific errors
-        problem = storage.create_problem(
-            {
-                **metadata,
-                "source_type": "pdf",
-                "source_name": filename,
-                "title": Path(filename).stem,
-                "stem": f"PDF를 열 수 없습니다: {exc}",
-            }
-        )
-        return {"created": [problem], "notices": ["PDF 분석에 실패해 빈 문제로 등록했습니다."]}
+        raise ValueError(f"PDF를 열 수 없습니다: {exc}") from exc
+    save_upload(filename, payload)
 
     sequence = 1
     total_pdf_images = 0
@@ -440,16 +470,19 @@ def _legacy_import_pdf(filename: str, payload: bytes, metadata: dict[str, Any]) 
 
 
 def import_image(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
-    rel_path = save_upload(filename, payload)
-    full_path = storage.DATA_DIR / rel_path
     notices: list[str] = []
     width = height = 0
     try:
-        with Image.open(full_path) as image:
+        with Image.open(io.BytesIO(payload)) as image:
             width, height = image.size
+            if width * height > MAX_IMAGE_PIXELS:
+                raise ValueError(f"이미지는 {MAX_IMAGE_PIXELS:,}픽셀 이하만 처리할 수 있습니다.")
             image.verify()
     except Exception as exc:
-        notices.append(f"이미지 확인 실패: {exc}")
+        raise ValueError(f"올바른 이미지 파일이 아닙니다: {exc}") from exc
+
+    rel_path = save_upload(filename, payload)
+    full_path = storage.DATA_DIR / rel_path
 
     stem = metadata.get("stem") or ""
     has_real_text = bool(stem)
@@ -988,7 +1021,10 @@ def _nearest_pdf_stem_fraction_part(
     return entry
 
 
-def _repair_pdf_stem_fractions_from_geometry(stem: str, line_geometries: list[dict[str, Any]]) -> str:
+def _repair_pdf_stem_fractions_from_geometry_legacy(
+    stem: str,
+    line_geometries: list[dict[str, Any]],
+) -> str:
     """Recover simple stacked fractions in stems from exact placeholder char geometry."""
     if not stem or not line_geometries:
         return str(stem or "")
@@ -1055,6 +1091,256 @@ def _repair_pdf_stem_fractions_from_geometry(stem: str, line_geometries: list[di
     if not changed:
         return str(stem or "")
     return _clean_text("\n".join(line for index, line in enumerate(output_lines) if index not in used_stem_indices))
+
+
+PDF_GEOMETRY_TOKEN_MARKS = frozenset("+-*/()[]{}.,π∞√×÷=<>|")
+
+
+def _pdf_geometry_char_rect(char: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    bbox = char.get("bbox")
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        return None
+    try:
+        left, top, right, bottom = [float(value) for value in bbox]
+    except (TypeError, ValueError):
+        return None
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
+def _pdf_geometry_token_char(value: Any) -> str:
+    normalized = normalize_recognized_math_text(str(value or "")).strip()
+    if not normalized or any(marker in normalized for marker in PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS):
+        return ""
+    if re.search(r"[\uac00-\ud7a3\u4e00-\u9fff]", normalized):
+        return ""
+    if all(char.isalnum() or char in PDF_GEOMETRY_TOKEN_MARKS for char in normalized):
+        return normalized
+    return ""
+
+
+def _pdf_geometry_has_rich_chars(line_geometries: list[dict[str, Any]]) -> bool:
+    for line in line_geometries:
+        if not isinstance(line, dict):
+            continue
+        for char in line.get("pdf_line_chars") or []:
+            if not isinstance(char, dict) or _pdf_geometry_char_rect(char) is None:
+                continue
+            if _pdf_geometry_token_char(char.get("c")):
+                return True
+    return False
+
+
+def _pdf_geometry_math_token(
+    line_geometries: list[dict[str, Any]],
+    *,
+    bar_rect: tuple[float, float, float, float],
+    above: bool,
+) -> dict[str, Any] | None:
+    left, top, right, bottom = bar_rect
+    bar_x = (left + right) / 2.0
+    bar_y = (top + bottom) / 2.0
+    bar_width = right - left
+    horizontal_margin = max(6.0, min(14.0, bar_width * 0.18))
+    grouped: dict[int, list[tuple[float, float, float, str]]] = {}
+
+    for line_index, line in enumerate(line_geometries):
+        if not isinstance(line, dict):
+            continue
+        for char in line.get("pdf_line_chars") or []:
+            if not isinstance(char, dict):
+                continue
+            value = _pdf_geometry_token_char(char.get("c"))
+            rect = _pdf_geometry_char_rect(char)
+            if not value or rect is None:
+                continue
+            char_left, char_top, char_right, char_bottom = rect
+            if char_right < left - horizontal_margin or char_left > right + horizontal_margin:
+                continue
+            center_x = (char_left + char_right) / 2.0
+            center_y = (char_top + char_bottom) / 2.0
+            vertical = bar_y - center_y if above else center_y - bar_y
+            if vertical <= 3.0 or vertical > 46.0:
+                continue
+            grouped.setdefault(line_index, []).append((center_x, center_y, vertical, value))
+
+    candidates: list[tuple[float, float, int, dict[str, Any]]] = []
+    for line_index, chars in grouped.items():
+        chars.sort(key=lambda item: item[0])
+        runs: list[list[tuple[float, float, float, str]]] = []
+        for char in chars:
+            if not runs or char[0] - runs[-1][-1][0] > max(15.0, bar_width * 0.42):
+                runs.append([char])
+            else:
+                runs[-1].append(char)
+        for run in runs:
+            token = "".join(item[3] for item in run)
+            if not token or not any(char.isalnum() for char in token):
+                continue
+            center_x = sum(item[0] for item in run) / len(run)
+            vertical = sum(item[2] for item in run) / len(run)
+            x_distance = abs(center_x - bar_x)
+            if x_distance > max(18.0, bar_width * 0.55):
+                continue
+            candidate = {
+                "line_index": line_index,
+                "text": token,
+                "center_x": center_x,
+                "vertical": vertical,
+            }
+            candidates.append((vertical, x_distance, -len(token), candidate))
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: item[:3])[0][3]
+
+
+def _pdf_geometry_near_mark(
+    line_geometries: list[dict[str, Any]],
+    *,
+    bar_rect: tuple[float, float, float, float],
+    marks: str,
+) -> bool:
+    left, top, right, bottom = bar_rect
+    bar_y = (top + bottom) / 2.0
+    for line in line_geometries:
+        if not isinstance(line, dict):
+            continue
+        for char in line.get("pdf_line_chars") or []:
+            if not isinstance(char, dict):
+                continue
+            normalized = normalize_recognized_math_text(str(char.get("c") or ""))
+            rect = _pdf_geometry_char_rect(char)
+            if not any(mark in normalized for mark in marks) or rect is None:
+                continue
+            char_left, char_top, char_right, char_bottom = rect
+            center_y = (char_top + char_bottom) / 2.0
+            if left - 36.0 <= char_right <= right + 8.0 and abs(center_y - bar_y) <= 28.0:
+                return True
+    return False
+
+
+def _pdf_geometry_bar_repair(
+    line_geometries: list[dict[str, Any]],
+    bar_rect: tuple[float, float, float, float],
+) -> tuple[str, list[tuple[int, str]], str | None] | None:
+    numerator = _pdf_geometry_math_token(line_geometries, bar_rect=bar_rect, above=True)
+    denominator = _pdf_geometry_math_token(line_geometries, bar_rect=bar_rect, above=False)
+    if numerator is not None and denominator is not None:
+        numerator_text = str(numerator["text"])
+        denominator_text = str(denominator["text"])
+        if abs(float(numerator["center_x"]) - float(denominator["center_x"])) > max(
+            16.0,
+            (bar_rect[2] - bar_rect[0]) * 0.48,
+        ):
+            return None
+        replacement = rf"\frac{{{numerator_text}}}{{{denominator_text}}}"
+        consumed = [
+            (int(numerator["line_index"]), numerator_text),
+            (int(denominator["line_index"]), denominator_text),
+        ]
+        return replacement, consumed, denominator_text
+
+    if denominator is None or numerator is not None:
+        return None
+    base = str(denominator["text"])
+    if not re.fullmatch(r"[A-Za-z]{1,4}", base):
+        return None
+    if _pdf_geometry_near_mark(line_geometries, bar_rect=bar_rect, marks="√"):
+        return None
+    command = "vec" if _pdf_geometry_near_mark(line_geometries, bar_rect=bar_rect, marks="⃗→←") else "overline"
+    return rf"\{command}{{{base}}}", [(int(denominator["line_index"]), base)], None
+
+
+def _replace_nth_placeholder(text: str, occurrence: int, replacement: str) -> str:
+    matches = list(re.finditer(r"[\u25a1\u25a2]", text))
+    if occurrence < 0 or occurrence >= len(matches):
+        return text
+    match = matches[occurrence]
+    return f"{text[:match.start()]}{replacement}{text[match.end():]}"
+
+
+def _repair_pdf_stem_fractions_from_geometry(stem: str, line_geometries: list[dict[str, Any]]) -> str:
+    """Recover stacked fractions and line accents using PDF character geometry.
+
+    Real exam PDFs encode a fraction bar, overline, vector accent, and an empty
+    worksheet box with the same private-use glyph.  Whole-line proximity can
+    therefore attach unrelated text to a bar.  This pass only converts a bar
+    when its individual character rectangle has aligned math glyphs above and
+    below (fraction), or a short Latin point name immediately below (accent).
+    """
+    source = str(stem or "")
+    if not source or not line_geometries:
+        return source
+    if not _pdf_geometry_has_rich_chars(line_geometries):
+        return _repair_pdf_stem_fractions_from_geometry_legacy(source, line_geometries)
+
+    source_lines = source.splitlines()
+    geometry_texts = [str(line.get("text") or "") if isinstance(line, dict) else "" for line in line_geometries]
+    if len(source_lines) != len(geometry_texts) or any(
+        source_line.strip() != geometry_text.strip()
+        for source_line, geometry_text in zip(source_lines, geometry_texts)
+    ):
+        return source
+
+    placeholder_repairs: dict[int, list[str]] = {}
+    fraction_overrides: dict[int, list[tuple[str, str]]] = {}
+    consumed: list[tuple[int, str]] = []
+    for line_index, line in enumerate(line_geometries):
+        if not isinstance(line, dict):
+            continue
+        bars: list[tuple[float, tuple[str, list[tuple[int, str]], str | None]]] = []
+        for char in line.get("pdf_line_chars") or []:
+            if not isinstance(char, dict):
+                continue
+            raw = str(char.get("c") or "")
+            if raw not in PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS:
+                continue
+            rect = _pdf_geometry_char_rect(char)
+            if rect is None:
+                continue
+            repair = _pdf_geometry_bar_repair(line_geometries, rect)
+            if repair is not None:
+                bars.append(((rect[0] + rect[2]) / 2.0, repair))
+        if not bars:
+            continue
+        bars.sort(key=lambda item: item[0])
+        square_count = len(re.findall(r"[\u25a1\u25a2]", source_lines[line_index]))
+        square_repairs = [repair for _, repair in bars if repair[2] is None or square_count > 0]
+        if square_count and len(square_repairs) <= square_count:
+            for replacement, used_parts, _ in square_repairs:
+                placeholder_repairs.setdefault(line_index, []).append(replacement)
+                consumed.extend(used_parts)
+            square_count -= len(square_repairs)
+
+        for _, (replacement, used_parts, denominator) in bars:
+            if denominator is None:
+                continue
+            synthetic = rf"\frac{{1}}{{{denominator}}}"
+            if synthetic not in source_lines[line_index]:
+                continue
+            fraction_overrides.setdefault(line_index, []).append((synthetic, replacement))
+            consumed.extend(used_parts)
+
+    if not placeholder_repairs and not fraction_overrides:
+        return source
+
+    output_lines = list(source_lines)
+    for line_index, token in consumed:
+        if not (0 <= line_index < len(output_lines)) or not token:
+            continue
+        output_lines[line_index] = output_lines[line_index].replace(token, "", 1)
+    for line_index, replacements in placeholder_repairs.items():
+        for occurrence, replacement in enumerate(replacements):
+            output_lines[line_index] = _replace_nth_placeholder(output_lines[line_index], occurrence, replacement)
+    for line_index, overrides in fraction_overrides.items():
+        for old, replacement in overrides:
+            output_lines[line_index] = output_lines[line_index].replace(old, replacement, 1)
+
+    repaired = _clean_text("\n".join(output_lines))
+    if _placeholder_count_in_fields(repaired, []) >= _placeholder_count_in_fields(source, []):
+        return source
+    return repaired
 
 
 def _pdf_choice_geometry_part(text: str) -> bool:
@@ -1405,6 +1691,8 @@ def _save_image_bytes(name: str, payload: bytes) -> str | None:
     """이미지 바이트를 업로드 폴더에 저장하고 상대 경로를 돌려준다. 유효하지 않으면 None."""
     try:
         with Image.open(io.BytesIO(payload)) as image:
+            if image.width * image.height > MAX_IMAGE_PIXELS:
+                return None
             image.verify()
     except Exception:
         return None

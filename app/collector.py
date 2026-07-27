@@ -5,7 +5,9 @@ URL을 받아 본문 텍스트와 이미지를 추출해 로컬 DB에 문제로 
 
 from __future__ import annotations
 
+import ipaddress
 import re
+import socket
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -21,6 +23,7 @@ SKIP_TAGS = {"script", "style", "noscript", "header", "footer", "nav", "aside", 
 BLOCK_TAGS = {"p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "td", "th", "pre", "blockquote", "section", "article"}
 MAX_IMAGES = 12
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_DOCUMENT_BYTES = 64 * 1024 * 1024
 
 
 def _validate_url(url: str) -> str:
@@ -28,15 +31,75 @@ def _validate_url(url: str) -> str:
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ValueError("http/https URL만 수집할 수 있습니다.")
+    if parsed.username or parsed.password:
+        raise ValueError("사용자 정보가 포함된 URL은 수집할 수 없습니다.")
+    _validate_public_host(parsed.hostname or "", parsed.port)
     return url
+
+
+def _validate_public_host(hostname: str, port: int | None = None) -> None:
+    """Block SSRF targets, including private addresses returned by DNS."""
+    if not hostname or hostname.rstrip(".").lower() == "localhost":
+        raise ValueError("로컬 또는 사설 네트워크 주소는 수집할 수 없습니다.")
+    try:
+        literal = ipaddress.ip_address(hostname)
+        addresses = [literal]
+    except ValueError:
+        try:
+            resolved = socket.getaddrinfo(hostname, port or 443, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            raise ValueError(f"호스트를 확인할 수 없습니다: {hostname}") from exc
+        addresses = []
+        for item in resolved:
+            try:
+                addresses.append(ipaddress.ip_address(item[4][0]))
+            except ValueError:
+                continue
+    if not addresses or any(not address.is_global for address in addresses):
+        raise ValueError("로컬 또는 사설 네트워크 주소는 수집할 수 없습니다.")
+
+
+def _validate_outgoing_request(request: httpx.Request) -> None:
+    # httpx invokes request hooks again for redirects, so a public URL cannot
+    # redirect into localhost, RFC1918, link-local, or cloud metadata ranges.
+    _validate_public_host(request.url.host or "", request.url.port)
 
 
 def _client() -> httpx.Client:
     return httpx.Client(
         follow_redirects=True,
+        max_redirects=5,
         timeout=20,
         headers={"User-Agent": USER_AGENT, "Accept-Language": "ko, en;q=0.8"},
+        event_hooks={"request": [_validate_outgoing_request]},
     )
+
+
+def _get_limited(client: httpx.Client, url: str, max_bytes: int) -> httpx.Response:
+    """Stream a response and stop before an unbounded body exhausts memory."""
+    with client.stream("GET", url) as response:
+        response.raise_for_status()
+        declared = response.headers.get("content-length")
+        if declared:
+            try:
+                if int(declared) > max_bytes:
+                    raise ValueError(f"응답이 허용 크기({max_bytes // (1024 * 1024)}MB)를 초과합니다.")
+            except ValueError as exc:
+                if "허용 크기" in str(exc):
+                    raise
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_bytes():
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError(f"응답이 허용 크기({max_bytes // (1024 * 1024)}MB)를 초과합니다.")
+            chunks.append(chunk)
+        return httpx.Response(
+            status_code=response.status_code,
+            headers=response.headers,
+            content=b"".join(chunks),
+            request=response.request,
+        )
 
 
 def _extract_paragraphs(tree: Any, base_url: str) -> list[tuple[str, list[str]]]:
@@ -92,11 +155,7 @@ def _download_images(client: httpx.Client, urls: list[str], notices: list[str]) 
     saved: dict[str, str] = {}
     for url in urls[:MAX_IMAGES]:
         try:
-            response = client.get(url)
-            response.raise_for_status()
-            if len(response.content) > MAX_IMAGE_BYTES:
-                notices.append(f"이미지가 너무 커서 건너뜀: {url}")
-                continue
+            response = _get_limited(client, _validate_url(url), MAX_IMAGE_BYTES)
             name = Path(urlparse(url).path).name or "image"
             rel_path = importers._save_image_bytes(name, response.content)
             if rel_path:
@@ -113,8 +172,7 @@ def collect_url(url: str, metadata: dict[str, Any]) -> dict[str, Any]:
     url = _validate_url(url)
     notices: list[str] = []
     with _client() as client:
-        response = client.get(url)
-        response.raise_for_status()
+        response = _get_limited(client, url, MAX_DOCUMENT_BYTES)
         content_type = response.headers.get("content-type", "")
         # HTML이 아니면 파일 임포터로 넘긴다 (PDF 링크 등)
         if "pdf" in content_type or url.lower().endswith(".pdf"):

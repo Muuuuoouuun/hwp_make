@@ -27,13 +27,16 @@ def ensure_dirs() -> None:
 
 def connect() -> sqlite3.Connection:
     ensure_dirs()
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 
 def init_db() -> None:
     with connect() as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS problems (
@@ -66,8 +69,12 @@ def init_db() -> None:
             conn.execute("ALTER TABLE problems ADD COLUMN layout_json TEXT NOT NULL DEFAULT '{}'")
         if "content_hash" not in columns:
             conn.execute("ALTER TABLE problems ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''")
+        # Backfill only legacy rows. Re-hashing every row (and reading every
+        # referenced image) on each process start made startup grow with the
+        # entire library size even though normal writes already maintain the hash.
         for row in conn.execute(
-            "SELECT id, stem, choices_json, answer, image_paths_json, tables_json, content_hash FROM problems"
+            """SELECT id, stem, choices_json, answer, image_paths_json, tables_json, content_hash
+               FROM problems WHERE content_hash = '' OR content_hash IS NULL"""
         ).fetchall():
             digest = _content_hash(
                 {
@@ -295,11 +302,59 @@ def create_problem_unique(
     if digest:
         if seen is not None and digest in seen:
             return None
-        if hash_exists(digest):
-            return None
-        if seen is not None:
-            seen.add(digest)
-    return create_problem(data)
+    stamp = now_iso()
+    values = {
+        "source_type": data.get("source_type") or "manual",
+        "source_name": data.get("source_name") or "",
+        "source_page": data.get("source_page"),
+        "number": data.get("number") or "",
+        "subject": data.get("subject") or "",
+        "unit": data.get("unit") or "",
+        "tags": data.get("tags") or "",
+        "title": data.get("title") or "",
+        "stem": data.get("stem") or "",
+        "choices_json": _json_list(data.get("choices")),
+        "answer": data.get("answer") or "",
+        "explanation": data.get("explanation") or "",
+        "image_paths_json": _json_list(data.get("image_paths")),
+        "tables_json": _json_list(data.get("tables")),
+        "layout_json": _json_object(data.get("layout")),
+        "content_hash": digest,
+        "created_at": stamp,
+        "updated_at": stamp,
+    }
+    # A separate ``hash_exists`` followed by ``create_problem`` races under
+    # concurrent imports. BEGIN IMMEDIATE serializes the check+insert pair
+    # across threads and processes without deleting any existing user rows.
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if digest:
+            row = conn.execute(
+                "SELECT 1 FROM problems WHERE content_hash = ? LIMIT 1", (digest,)
+            ).fetchone()
+            if row is not None:
+                conn.rollback()
+                return None
+        cursor = conn.execute(
+            """
+            INSERT INTO problems (
+                source_type, source_name, source_page, number, subject, unit, tags,
+                title, stem, choices_json, answer, explanation, image_paths_json,
+                tables_json, layout_json, content_hash, created_at, updated_at
+            )
+            VALUES (
+                :source_type, :source_name, :source_page, :number, :subject, :unit, :tags,
+                :title, :stem, :choices_json, :answer, :explanation, :image_paths_json,
+                :tables_json, :layout_json, :content_hash, :created_at, :updated_at
+            )
+            """,
+            values,
+        )
+        problem_id = int(cursor.lastrowid)
+        conn.commit()
+    if digest and seen is not None:
+        seen.add(digest)
+    return get_problem(problem_id)
 
 
 def get_problem(problem_id: int) -> dict[str, Any]:

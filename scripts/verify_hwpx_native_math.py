@@ -32,7 +32,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("HWP_MAKE_DATA_DIR", str(ROOT / "data"))
 
-from app import hwpx_writer, importers, math_text, storage  # noqa: E402
+from app import hwpx_writer, hwpx_writer_v2, importers, math_text, storage  # noqa: E402
+from hwpx.tools.package_validator import validate_package  # noqa: E402
+from scripts import qa_hwp_math_samples as layout_qa  # noqa: E402
 
 HP_NS = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 OUT_DIR = ROOT / "data" / "exports" / "native_math_qa"
@@ -448,13 +450,32 @@ def run(pdf_paths: list[Path]) -> int:
             failures.append(f"{label}: equation width {width} outside expected range {lower}..{upper}")
 
     hwpx_path = OUT_DIR / "native_math_corpus.hwpx"
-    hwpx_writer.write_hwpx(
+    # Exercise the same writer used by /api/export.  Keeping this QA on the
+    # legacy string-template writer allowed the production HWPX path to drift
+    # without this high-value native-equation/render gate noticing.
+    hwpx_writer_v2.write_hwpx(
         hwpx_path,
         "네이티브 수식 QA",
         [_problem_for_cases()],
         template_key="school_exam",
         native_math=True,
     )
+    package_report = validate_package(hwpx_path)
+    package_issues = [
+        {
+            "level": issue.level,
+            "part_name": issue.part_name,
+            "message": issue.message,
+        }
+        for issue in package_report.issues
+    ]
+    blocking_package_issues = [
+        issue
+        for issue in package_issues
+        if issue["level"] == "error" or "version part" in issue["message"]
+    ]
+    if blocking_package_issues:
+        failures.append(f"HWPX package validity issues: {blocking_package_issues[:8]}")
     scripts = _equation_scripts(hwpx_path)
     object_issues = _equation_object_issues(hwpx_path)
     if object_issues:
@@ -492,11 +513,24 @@ def run(pdf_paths: list[Path]) -> int:
         if weak_pages:
             failures.append(f"native equation render visibility is weak on pages: {weak_pages[:8]}")
 
+    # Render every page in a subprocess so rhwp's LAYOUT_OVERFLOW diagnostics
+    # are captured and promoted to a hard failure.  The former first-page
+    # smoke check printed those diagnostics but still returned success.
+    layout_render = layout_qa._render_hwpx(hwpx_path, OUT_DIR / "renders", 0)
+    if layout_render.get("error"):
+        failures.append(f"rhwp full-document render failed: {layout_render['error']}")
+    if layout_render.get("overflow_count"):
+        failures.append(
+            "rhwp full-document layout overflow count: "
+            f"{layout_render['overflow_count']} ({layout_render.get('overflow_lines', [])[:8]})"
+        )
+
     pdf_reports = [_pdf_math_candidates(path) for path in pdf_paths]
     report = {
         "ok": not failures,
         "hwpx_path": str(hwpx_path),
         "equation_count": len(scripts),
+        "package_issues": package_issues,
         "scripts": scripts,
         "equation_object_issue_count": len(object_issues),
         "equation_object_issues": object_issues[:20],
@@ -504,6 +538,13 @@ def run(pdf_paths: list[Path]) -> int:
         "width_cases": width_report,
         "roundtrip_equation_texts": imported_texts,
         "rhwp": _validate_with_rhwp(hwpx_path),
+        "layout_render": {
+            "page_count": layout_render.get("page_count"),
+            "overflow_count": layout_render.get("overflow_count"),
+            "overflow_lines": layout_render.get("overflow_lines") or [],
+            "render_bytes": layout_render.get("render_bytes") or [],
+            "error": layout_render.get("error"),
+        },
         "render_visibility": visibility,
         "pdfs": pdf_reports,
         "failures": failures,

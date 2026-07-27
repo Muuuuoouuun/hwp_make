@@ -122,6 +122,8 @@ _KICE_STYLE_LINE_HEIGHTS = {
 # taller than the lightweight Python estimator. 46000 keeps the real HWP math
 # samples compact while leaving enough bottom margin to avoid layout overflow.
 KICE_MATH_COLUMN_BODY_HEIGHT = 46000
+SINGLE_COLUMN_MATH_BODY_HEIGHT = 35000
+SINGLE_COLUMN_TEXT_BODY_HEIGHT = 60000
 PROBLEM_LAYOUT_GUARD = 900
 
 
@@ -607,6 +609,10 @@ def write_hwpx(
     )
 
     doc = HwpxDocument.new()
+    # The bundled Hancom skeleton contains version.xml but omits its OPF
+    # manifest entry.  Explicitly relate it so validators and alternate
+    # readers do not have to guess the package-level compatibility metadata.
+    doc.package.add_manifest_item("version", "version.xml", "application/xml")
     header = doc.headers[0]
     if _is_kice_template(template):
         _ensure_kice_font_faces(header)
@@ -629,7 +635,11 @@ def write_hwpx(
     equation_counter = [0]
     flow_y = 0
     pending_column_break = False
-    column_body_height = KICE_MATH_COLUMN_BODY_HEIGHT
+    column_body_height = (
+        KICE_MATH_COLUMN_BODY_HEIGHT
+        if columns > 1
+        else SINGLE_COLUMN_MATH_BODY_HEIGHT if native_math else SINGLE_COLUMN_TEXT_BODY_HEIGHT
+    )
     picture_max_height = (
         int(column_body_height * 0.45)
         if native_math and template.key == "kice_math" and columns > 1
@@ -659,13 +669,13 @@ def write_hwpx(
             pending_column_break = True
             return
         if pending_column_break and allow_column_break:
-            attrs.setdefault("columnBreak", "1")
+            attrs.setdefault("columnBreak" if columns > 1 else "pageBreak", "1")
             pending_column_break = False
             flow_y = 0
         elif pending_column_break:
             pending_column_break = False
-        elif columns > 1 and allow_column_break and flow_y > 0 and flow_y + para_height > column_body_height:
-            attrs.setdefault("columnBreak", "1")
+        elif allow_column_break and flow_y > 0 and flow_y + para_height > column_body_height:
+            attrs.setdefault("columnBreak" if columns > 1 else "pageBreak", "1")
             flow_y = 0
         if attrs.get("pageBreak") == "1" or attrs.get("columnBreak") == "1":
             flow_y = 0
@@ -1024,8 +1034,8 @@ def write_hwpx(
     def reserve_object_height(height: int) -> dict[str, str]:
         nonlocal flow_y
         attrs: dict[str, str] = {}
-        if columns > 1 and height > 0 and flow_y > 0 and flow_y + height > column_body_height:
-            attrs["columnBreak"] = "1"
+        if height > 0 and flow_y > 0 and flow_y + height > column_body_height:
+            attrs["columnBreak" if columns > 1 else "pageBreak"] = "1"
             flow_y = 0
         flow_y += height
         return attrs
@@ -1256,7 +1266,10 @@ def write_hwpx(
                 separator_width="0.12 mm",
                 separator_color="#000000",
             )
-        flow_y = 0
+        # set_columns changes the section definition; it does not consume a
+        # page/column break.  Keep the masthead height already accumulated on
+        # the first page so the first problem is not budgeted into space that
+        # the title, metadata, and directions already occupy.
         pending_column_break = False
 
     # --- 머리말 ---
@@ -1280,14 +1293,13 @@ def write_hwpx(
 
     # --- 문항 ---
     for index, problem in enumerate(problems, start=1):
-        if columns > 1:
-            estimated_height = estimate_problem_height(problem, index)
-            if (
-                flow_y > 0
-                and estimated_height <= column_body_height
-                and flow_y + estimated_height + PROBLEM_LAYOUT_GUARD > column_body_height
-            ):
-                pending_column_break = True
+        estimated_height = estimate_problem_height(problem, index)
+        if (
+            flow_y > 0
+            and estimated_height <= column_body_height
+            and flow_y + estimated_height + PROBLEM_LAYOUT_GUARD > column_body_height
+        ):
+            pending_column_break = True
         label = problem.get("number") or str(index)
         subject = problem.get("subject") or ""
         unit = problem.get("unit") or ""

@@ -77,9 +77,9 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--s2);
-  min-height: 36px;
-  padding: 0 var(--s3);
+  gap: var(--s1);
+  min-height: 32px;
+  padding: 0 10px;
   border: 1px solid var(--line-strong);
   border-radius: var(--r-sm);
   background: var(--panel);
@@ -155,7 +155,7 @@ textarea {
   border-radius: var(--r-sm);
   background: var(--panel);
   color: var(--ink);
-  padding: 8px 10px;
+  padding: 6px 8px;
   letter-spacing: 0;
   outline: none;
   transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease),
@@ -185,9 +185,9 @@ textarea:hover {
 .app-shell {
   display: flex;
   flex-direction: column;
-  width: min(1720px, calc(100% - 28px));
-  height: calc(100vh - 28px);
-  margin: 14px auto;
+  width: min(1720px, calc(100% - 16px));
+  height: calc(100vh - 16px);
+  margin: 8px auto;
   overflow: hidden;
   border: 1px solid var(--line-strong);
   border-radius: 14px;
@@ -200,8 +200,8 @@ textarea:hover {
   align-items: center;
   justify-content: space-between;
   flex: 0 0 auto;
-  min-height: 54px;
-  padding: 0 var(--s4);
+  min-height: 46px;
+  padding: 0 var(--s3);
   border-bottom: 1px solid var(--line);
   background: var(--panel);
 }
@@ -220,18 +220,18 @@ textarea:hover {
 .topbar h1::before {
   content: "";
   display: inline-block;
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
   background:
-    linear-gradient(#ffffff, #ffffff) 8px 8px / 10px 1.5px no-repeat,
-    linear-gradient(#ffffff, #ffffff) 8px 13px / 10px 1.5px no-repeat,
-    linear-gradient(#ffffff, #ffffff) 8px 18px / 7px 1.5px no-repeat,
+    linear-gradient(#ffffff, #ffffff) 6px 6px / 10px 1.5px no-repeat,
+    linear-gradient(#ffffff, #ffffff) 6px 11px / 10px 1.5px no-repeat,
+    linear-gradient(#ffffff, #ffffff) 6px 16px / 7px 1.5px no-repeat,
     var(--ink);
 }
 
 .topbar p {
-  margin: 4px 0 0 34px;
+  margin: 2px 0 0 30px;
   color: var(--muted);
   font-size: var(--t-sm);
 }
@@ -239,9 +239,9 @@ textarea:hover {
 .workflow-strip {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--s2);
+  gap: 6px;
   flex: 0 0 auto;
-  padding: var(--s2) var(--s4);
+  padding: 6px var(--s3);
   border-bottom: 1px solid var(--line);
   background: var(--surface);
 }
@@ -249,13 +249,13 @@ textarea:hover {
 .workflow-step {
   display: flex;
   align-items: center;
-  gap: var(--s3);
+  gap: var(--s2);
   min-width: 0;
-  min-height: 42px;
+  min-height: 36px;
   border: 1px solid var(--line);
   border-radius: var(--r);
   background: transparent;
-  padding: var(--s2) var(--s3);
+  padding: var(--s1) var(--s2);
 }
 
 .workflow-step.active {
@@ -267,9 +267,9 @@ textarea:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 28px;
-  width: 28px;
-  height: 28px;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
   border-radius: var(--r-sm);
   background: var(--accent);
   color: #ffffff;
@@ -285,7 +285,7 @@ textarea:hover {
 
 .workflow-step b {
   overflow: hidden;
-  font-size: var(--t-md);
+  font-size: var(--t-base);
   font-weight: 780;
   line-height: 1.2;
   text-overflow: ellipsis;
@@ -295,7 +295,7 @@ textarea:hover {
 .workflow-step span:last-child {
   overflow: hidden;
   color: var(--muted);
-  font-size: var(--t-sm);
+  font-size: var(--t-xs);
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -303,12 +303,12 @@ textarea:hover {
 
 .export-box {
   display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
-  gap: var(--s2);
+  grid-template-columns: minmax(150px, 1fr) minmax(140px, 180px) 78px repeat(4, max-content);
+  gap: 6px;
   align-items: center;
   width: 100%;
   min-width: 0;
-  padding: var(--s2);
+  padding: 6px;
   border: 1px solid var(--line);
   border-radius: var(--r);
   background: var(--paper);
@@ -316,20 +316,21 @@ textarea:hover {
 
 .export-box .primary,
 .export-box #previewButton {
-  min-height: 40px;
+  min-height: 32px;
+  white-space: nowrap;
 }
 
 .check-label {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--s2);
-  min-height: 36px;
-  padding: 0 var(--s2);
+  gap: var(--s1);
+  min-height: 32px;
+  padding: 0 7px;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
   color: var(--ink-soft);
-  font-size: var(--t-base);
+  font-size: var(--t-sm);
   white-space: nowrap;
   cursor: pointer;
   user-select: none;
@@ -374,11 +375,11 @@ textarea:hover {
   border-right: 1px solid var(--line);
   border-radius: 0;
   background: var(--panel);
-  padding: var(--s4);
+  padding: var(--s3);
 }
 
 .editor-panel {
-  gap: var(--s4);
+  gap: var(--s3);
   overflow-y: auto;
   border-right: 0;
   background: var(--surface);
@@ -453,7 +454,7 @@ textarea:hover {
 
 .side-switch-button {
   min-width: 0;
-  min-height: 38px;
+  min-height: 32px;
   border-color: transparent;
   background: transparent;
   color: var(--muted);
@@ -598,7 +599,7 @@ textarea:hover {
 
 .mode-tab {
   min-width: 0;
-  min-height: 36px;
+  min-height: 32px;
   border-color: transparent;
   background: transparent;
   color: var(--muted);
@@ -636,7 +637,7 @@ textarea:hover {
   border: 1px solid var(--line);
   border-radius: var(--r);
   background: #f7f6f1;
-  padding: var(--s3);
+  padding: var(--s2);
 }
 
 .history-details {
@@ -649,7 +650,7 @@ textarea:hover {
   align-items: center;
   justify-content: space-between;
   gap: var(--s2);
-  min-height: 34px;
+  min-height: 30px;
   color: var(--ink-soft);
   font-weight: 760;
   cursor: pointer;
@@ -682,7 +683,7 @@ textarea:hover {
   display: grid;
   place-items: center;
   gap: var(--s1);
-  min-height: 96px;
+  min-height: 76px;
   border: 1px dashed var(--line-strong);
   border-radius: var(--r);
   background:
@@ -725,8 +726,8 @@ textarea:hover {
 }
 
 .mini-button {
-  min-height: 32px;
-  padding: 0 var(--s3);
+  min-height: 28px;
+  padding: 0 var(--s2);
   justify-self: start;
   font-size: var(--t-sm);
 }
@@ -759,7 +760,7 @@ textarea:hover {
 }
 
 .bulk-row button {
-  min-height: 34px;
+  min-height: 30px;
   padding: 0 var(--s2);
   font-size: var(--t-base);
 }
@@ -1274,20 +1275,20 @@ textarea:hover {
 
 .problem-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 108px;
+  grid-template-columns: minmax(0, 1fr) 88px;
   gap: var(--s2);
-  min-height: 72px;
+  min-height: 64px;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
   background: var(--paper);
-  padding: var(--s3);
+  padding: var(--s2);
   cursor: pointer;
   transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
 }
 
 .side-workbench .problem-row {
-  grid-template-columns: minmax(0, 1fr) 96px;
-  min-height: 92px;
+  grid-template-columns: minmax(0, 1fr) 82px;
+  min-height: 76px;
 }
 
 .problem-row:hover {
@@ -1323,12 +1324,12 @@ textarea:hover {
 .problem-action {
   display: grid;
   align-content: start;
-  gap: var(--s2);
+  gap: var(--s1);
 }
 
 .problem-status {
   justify-self: end;
-  min-width: 62px;
+  min-width: 54px;
   border: 1px solid var(--line);
   border-radius: var(--r-pill);
   background: var(--surface);
@@ -1336,7 +1337,7 @@ textarea:hover {
   font-size: var(--t-xs);
   font-weight: 800;
   line-height: 1.2;
-  padding: 4px 8px;
+  padding: 3px 6px;
   text-align: center;
 }
 
@@ -1348,7 +1349,7 @@ textarea:hover {
 
 .problem-merge-btn {
   align-self: start;
-  min-height: 32px;
+  min-height: 28px;
   padding: 0 var(--s2);
   border-color: var(--accent);
   color: var(--accent);
@@ -1357,7 +1358,9 @@ textarea:hover {
 }
 
 .side-workbench .problem-merge-btn {
-  width: 100%;
+  width: auto;
+  min-width: 70px;
+  justify-self: end;
 }
 
 .problem-merge-btn.active {
@@ -1468,9 +1471,9 @@ textarea:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 38px;
-  min-width: 38px;
-  height: 30px;
+  width: 32px;
+  min-width: 32px;
+  height: 28px;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
   background: var(--surface);
@@ -1726,15 +1729,23 @@ textarea:hover {
   }
 }
 
+@media (max-width: 1360px) and (min-width: 1001px) {
+  .export-box {
+    grid-template-columns: minmax(150px, 1fr) minmax(140px, 1fr) 78px max-content max-content;
+  }
+
+  .export-box #previewButton,
+  .export-box #exportButton {
+    width: auto;
+    justify-self: start;
+  }
+}
+
 @media (max-width: 1180px) {
   .app-shell {
     height: auto;
     min-height: calc(100vh - 24px);
     margin: 12px auto;
-  }
-
-  .export-box {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .workspace {
@@ -1760,6 +1771,12 @@ textarea:hover {
 
   .empty-editor {
     min-height: 360px;
+  }
+}
+
+@media (max-width: 1000px) {
+  .export-box {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -1798,12 +1815,41 @@ textarea:hover {
 }
 
 @media (max-width: 620px) {
-  .export-box,
   .filters,
   .two-col,
   .bulk-row,
   .selection-bridge {
     grid-template-columns: 1fr;
+  }
+
+  .workflow-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--s1);
+    padding: var(--s1);
+  }
+
+  .workflow-step {
+    gap: var(--s1);
+    min-height: 36px;
+    padding: var(--s1);
+  }
+
+  .workflow-step b {
+    font-size: var(--t-xs);
+  }
+
+  .workflow-step span:last-child {
+    display: none;
+  }
+
+  .export-box {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .export-box #exportTitle,
+  .export-box #exportTemplate,
+  .export-box #exportButton {
+    grid-column: 1 / -1;
   }
 
   .selection-bridge > span {

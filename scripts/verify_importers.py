@@ -604,6 +604,113 @@ stem_hyperbola_repaired = importers._repair_pdf_stem_fractions_from_geometry(
 )
 if stem_hyperbola_repaired != "\n".join([r"\frac{x2}{9}", r"-\frac{y2}{16}", "=-1"]):
     failures.append(f"PDF stem geometry repair: hyperbola fraction failed {stem_hyperbola_repaired!r}")
+
+
+def _pdf_char(c: str, left: float, top: float, right: float, bottom: float) -> dict[str, object]:
+    return {"c": c, "bbox": [left, top, right, bottom]}
+
+
+rich_accent_fraction_lines = [
+    {
+        **_pdf_line("14. □", 0, 0, 80, 35),
+        "pdf_line_chars": [_pdf_char("\ue06d", 20, 10, 50, 30)],
+    },
+    {
+        **_pdf_line("AB=3, □", 20, 10, 130, 35),
+        "pdf_line_chars": [
+            _pdf_char("A", 20, 23, 34, 39),
+            _pdf_char("B", 34, 23, 48, 39),
+            _pdf_char("\ue06d", 100, 10, 128, 30),
+        ],
+    },
+    {
+        **_pdf_line("π triangle", 200, 0, 100, 25),
+        "pdf_line_chars": [_pdf_char("π", 204, 10, 218, 24)],
+    },
+    {
+        **_pdf_line(r"BC=4, angle=\frac{1}{2}", 100, 20, 150, 35),
+        "pdf_line_chars": [
+            _pdf_char("B", 100, 23, 114, 39),
+            _pdf_char("C", 114, 23, 128, 39),
+            _pdf_char("\ue06d", 200, 25, 224, 45),
+            _pdf_char("2", 205, 36, 217, 50),
+        ],
+    },
+]
+rich_accent_fraction_repaired = importers._repair_pdf_stem_fractions_from_geometry(
+    "\n".join(str(line["text"]) for line in rich_accent_fraction_lines),
+    rich_accent_fraction_lines,
+)
+if (
+    r"\overline{AB}" not in rich_accent_fraction_repaired
+    or r"\overline{BC}" not in rich_accent_fraction_repaired
+    or r"\frac{π}{2}" not in rich_accent_fraction_repaired
+    or "ABC" in rich_accent_fraction_repaired
+    or "□" in rich_accent_fraction_repaired
+):
+    failures.append(
+        "PDF stem character geometry repair: accent/fraction pairing failed "
+        f"{rich_accent_fraction_repaired!r}"
+    )
+
+rich_two_fraction_lines = [
+    {
+        **_pdf_line("a4+□", 100, 100, 100, 35),
+        "pdf_line_chars": [
+            _pdf_char("a", 100, 92, 112, 108),
+            _pdf_char("4", 112, 96, 122, 108),
+            _pdf_char("\ue06d", 160, 100, 188, 124),
+        ],
+    },
+    {
+        **_pdf_line("a2=30", 160, 82, 80, 25),
+        "pdf_line_chars": [_pdf_char("a", 162, 83, 174, 99), _pdf_char("2", 174, 87, 184, 99)],
+    },
+    {
+        **_pdf_line("□", 95, 100, 30, 24),
+        "pdf_line_chars": [_pdf_char("\ue06d", 96, 100, 124, 124)],
+    },
+    {
+        **_pdf_line("a2", 95, 116, 30, 24),
+        "pdf_line_chars": [_pdf_char("a", 98, 116, 110, 132), _pdf_char("2", 110, 120, 120, 132)],
+    },
+    {
+        **_pdf_line("a1", 160, 116, 30, 24),
+        "pdf_line_chars": [_pdf_char("a", 162, 116, 174, 132), _pdf_char("1", 174, 120, 184, 132)],
+    },
+]
+rich_two_fraction_repaired = importers._repair_pdf_stem_fractions_from_geometry(
+    "\n".join(str(line["text"]) for line in rich_two_fraction_lines),
+    rich_two_fraction_lines,
+)
+if (
+    r"\frac{a4}{a2}" not in rich_two_fraction_repaired
+    or r"\frac{a2}{a1}" not in rich_two_fraction_repaired
+    or "□" in rich_two_fraction_repaired
+):
+    failures.append(
+        "PDF stem character geometry repair: adjacent fractions crossed "
+        f"{rich_two_fraction_repaired!r}"
+    )
+
+intentional_blank_lines = [
+    {
+        **_pdf_line("(가) □", 0, 0, 120, 35),
+        "pdf_line_chars": [
+            _pdf_char("가", 0, 10, 18, 30),
+            _pdf_char("\ue06d", 60, 5, 105, 35),
+        ],
+    }
+]
+intentional_blank_repaired = importers._repair_pdf_stem_fractions_from_geometry(
+    "(가) □",
+    intentional_blank_lines,
+)
+if intentional_blank_repaired != "(가) □":
+    failures.append(
+        "PDF stem character geometry repair: intentional worksheet blank changed "
+        f"{intentional_blank_repaired!r}"
+    )
 p_over_q_placeholder = math_text.normalize_recognized_math_layout_text(
     "\ud655\ub960\uc740 \ue06dp\np+q\uc758 \uac12\uc744 \uad6c\ud558\uc2dc\uc624. (\ub2e8, p\uc640 q\ub294 \uc11c\ub85c\uc18c)"
 )
