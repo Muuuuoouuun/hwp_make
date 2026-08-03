@@ -24,6 +24,8 @@ def main() -> None:
     parser.add_argument("--no-boxes", action="store_true")
     parser.add_argument("--dpi", type=int, default=150)
     parser.add_argument("--text-mode", choices=("line", "span"), default="line")
+    parser.add_argument("--math-ai", action="store_true", help="Use Gemini math crop recognition when available.")
+    parser.add_argument("--math-ai-model", default=None, help="Gemini model id for math crop recognition.")
     args = parser.parse_args()
 
     if args.raster:
@@ -38,6 +40,8 @@ def main() -> None:
             include_images=not args.no_images,
             include_lines=not args.no_lines,
             text_mode=args.text_mode,
+            math_ai_recognition=True if args.math_ai else None,
+            math_ai_model=args.math_ai_model,
         )
     print(json.dumps({"output": str(args.output), **stats}, ensure_ascii=False, indent=2))
 

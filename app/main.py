@@ -3,19 +3,32 @@ from __future__ import annotations
 import io
 import json
 import re
+import shutil
 import threading
 import zipfile
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import collector, docx_writer, exam_templates, hwpx_writer_v2, importers, pdf_layout_writer, preview, storage
+from . import (
+    ai_api,
+    collector,
+    docx_writer,
+    exam_templates,
+    hwpx_writer_v2,
+    importers,
+    pdf_layout_fidelity,
+    pdf_layout_writer,
+    preview,
+    storage,
+)
 
 
 STATIC_DIR = storage.PROJECT_ROOT / "static"
@@ -44,6 +57,8 @@ class NoCacheStaticFiles(StaticFiles):
 
 app = FastAPI(title="HWP Make", version="0.1.0")
 storage.init_db()
+ai_api.initialize_ai_runtime()
+app.include_router(ai_api.router)
 
 
 @app.middleware("http")
@@ -96,6 +111,10 @@ class PdfLayoutExportPayload(BaseModel):
     data_base64: str = Field(min_length=1, max_length=MAX_BASE64_CHARS)
     max_pages: int | None = Field(default=None, ge=1, le=200)
     boxed_passages: bool = True
+    layout_mode: Literal["structured", "coordinate"] = "structured"
+    native_math: bool = True
+    math_ai_recognition: bool | None = None
+    math_ai_model: str | None = None
 
 
 class TextInputPayload(BaseModel):
@@ -198,6 +217,11 @@ def _safe_export_name(title: str, extension: str) -> str:
     return f"{stamp}_{name}.{extension}"
 
 
+def _safe_path_name(value: str, fallback: str = "output") -> str:
+    name = re.sub(r"[^0-9A-Za-z가-힣._ -]+", "_", value or fallback).strip(" ._")
+    return name[:80] or fallback
+
+
 def _unique_export_path(filename: str) -> Path:
     """같은 초에 같은 제목으로 두 번 내보내도 덮어쓰지 않도록 충돌 시 접미사를 붙인다."""
     path = storage.EXPORT_DIR / filename
@@ -210,13 +234,441 @@ def _unique_export_path(filename: str) -> Path:
     return path
 
 
+def _unique_export_dir(parent: Path, dirname: str) -> Path:
+    path = parent / dirname
+    if not path.exists():
+        return path
+    for counter in range(2, 1000):
+        candidate = parent / f"{dirname}_{counter}"
+        if not candidate.exists():
+            return candidate
+    return path
+
+
+def _unique_path_in_dir(directory: Path, filename: str) -> Path:
+    path = directory / filename
+    if not path.exists():
+        return path
+    for counter in range(2, 1000):
+        candidate = directory / f"{path.stem}_{counter}{path.suffix}"
+        if not candidate.exists():
+            return candidate
+    return path
+
+
 def _export_file_item(path: Path) -> dict[str, Any]:
     stat = path.stat()
+    rel_path = path.resolve().relative_to(storage.EXPORT_DIR.resolve()).as_posix()
     return {
-        "name": path.name,
+        "name": rel_path,
+        "display_name": path.name,
         "size": stat.st_size,
         "format": path.suffix.lstrip(".").lower(),
-        "url": f"/files/exports/{path.name}",
+        "url": f"/files/exports/{quote(rel_path, safe='/')}",
+    }
+
+
+def _attach_fidelity_artifact_refs(fidelity: dict[str, Any], render_dir: Path) -> None:
+    if not isinstance(fidelity, dict) or not fidelity.get("pages"):
+        return
+    try:
+        artifact_dir = render_dir.resolve().relative_to(storage.EXPORT_DIR.resolve()).as_posix()
+    except ValueError:
+        return
+    fidelity["artifact_dir"] = artifact_dir
+    for page in fidelity.get("pages") or []:
+        if not isinstance(page, dict):
+            continue
+        for key in ("source_png", "output_png", "diff_png"):
+            name = str(page.get(key) or "")
+            if not name:
+                continue
+            artifact_path = render_dir / name
+            if not artifact_path.is_file():
+                continue
+            page[f"{key}_url"] = _export_file_item(artifact_path)["url"]
+
+
+def _clamp_score(value: Any) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        score = 0.0
+    return round(max(0.0, min(100.0, score)), 2)
+
+
+def _ratio_score(value: Any) -> float:
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError):
+        ratio = 0.0
+    return _clamp_score(ratio * 100.0)
+
+
+def _inspect_hwpx_open_safety(path: Path) -> dict[str, Any]:
+    try:
+        from hwpx.tools.package_validator import validate_editor_open_safety
+    except Exception as exc:  # pragma: no cover - vendored validator should be available.
+        return {"ok": False, "summary": f"validator unavailable: {exc}", "error": str(exc)}
+    try:
+        return validate_editor_open_safety(path).to_dict()
+    except Exception as exc:  # noqa: BLE001 - recorded as quality evidence.
+        return {"ok": False, "summary": f"editor-open safety validation failed: {exc}", "error": str(exc)}
+
+
+def _pdf_layout_objective_score(
+    *,
+    stats: dict[str, Any],
+    fidelity: dict[str, Any],
+    style_profile: dict[str, Any],
+    open_safety: dict[str, Any],
+) -> dict[str, Any]:
+    if stats.get("layout_mode") == "structured":
+        return _pdf_structured_objective_score(
+            stats=stats,
+            style_profile=style_profile,
+            open_safety=open_safety,
+        )
+    target = 96.0
+    fidelity_available = bool(fidelity.get("available")) and not bool(fidelity.get("skipped"))
+    style_available = bool(style_profile.get("available"))
+    score_available = fidelity_available and style_available
+
+    font_score = 0.0
+    if style_available:
+        font_score += 20.0 if style_profile.get("has_required_font_faces") else 0.0
+        font_score += 15.0 if style_profile.get("font_face_type_ok") else 0.0
+        font_score += 25.0 if style_profile.get("char_metric_ok") else 0.0
+        font_score += 20.0 if style_profile.get("font_size_bucket_ok") else 0.0
+        font_score += 20.0 if style_profile.get("uses_165_line_spacing") else 0.0
+
+    source_math_segments = int(stats.get("source_math_segments") or 0)
+    native_equations = int(stats.get("native_equations") or 0)
+    structured_equations = int(style_profile.get("native_equations") or 0)
+    native_math_enabled = bool(stats.get("native_math_enabled"))
+    math_coverage = float(stats.get("native_math_coverage_ratio") or (1.0 if source_math_segments == 0 else 0.0))
+
+    strict_alignment_score = _ratio_score(fidelity.get("min_strict_alignment_ratio"))
+    try:
+        overlap_ratio = float(fidelity.get("min_foreground_overlap_ratio") or 0.0)
+        overlap_threshold = float(fidelity.get("foreground_overlap_review_threshold") or 0.10)
+    except (TypeError, ValueError):
+        overlap_ratio = 0.0
+        overlap_threshold = 0.10
+    overlap_score = _clamp_score((overlap_ratio / max(0.01, overlap_threshold)) * 100.0)
+    balance_score = round((strict_alignment_score * 0.7) + (overlap_score * 0.3), 2)
+    if fidelity.get("review_flags"):
+        balance_score = min(balance_score, 75.0)
+    content_visual_score = _ratio_score(fidelity.get("overall_sync_ratio"))
+    math_visual_score = round((content_visual_score * 0.75) + (strict_alignment_score * 0.25), 2)
+    if source_math_segments == 0:
+        math_score = 100.0
+    elif native_math_enabled:
+        math_score = _ratio_score(math_coverage)
+        if structured_equations < native_equations:
+            math_score = min(math_score, 80.0)
+    else:
+        math_score = math_visual_score
+
+    paging_score = 100.0
+    if fidelity.get("page_count_mismatch"):
+        paging_score -= 60.0
+    if fidelity.get("truncated_by_max_pages") or fidelity.get("limited_by_max_pages"):
+        paging_score -= 15.0
+    if fidelity.get("aspect_ratio_mismatch_pages"):
+        paging_score -= 20.0
+    if stats.get("full_page_raster_fallback"):
+        paging_score -= 45.0
+    if style_available and style_profile.get("page_ratio_ok") is False:
+        paging_score -= 20.0
+    if style_available and style_profile.get("page_standard_ok") is False:
+        paging_score -= 20.0
+    if style_available and style_profile.get("page_portrait_ok") is False:
+        paging_score -= 20.0
+    if style_available and style_profile.get("page_orientation_ok") is False:
+        paging_score -= 20.0
+    paging_score = _clamp_score(paging_score)
+
+    open_safety_score = 100.0 if open_safety.get("ok") else 0.0
+    editable_score = _ratio_score(stats.get("editable_text_coverage_ratio"))
+    layout_score = _ratio_score(fidelity.get("overall_layout_view_sync_ratio"))
+
+    components = {
+        "layout": {
+            "score": layout_score,
+            "weight": 0.30,
+            "layout_view_sync_ratio": fidelity.get("overall_layout_view_sync_ratio"),
+            "target_sync_ratio": fidelity.get("target_sync_ratio"),
+        },
+        "font": {
+            "score": _clamp_score(font_score),
+            "weight": 0.20,
+            "required_font_faces": style_profile.get("required_font_faces") or [],
+            "missing_required_font_faces": style_profile.get("missing_required_font_faces") or [],
+            "invalid_required_font_types": style_profile.get("invalid_required_font_types") or [],
+            "font_face_type_ok": bool(style_profile.get("font_face_type_ok")),
+            "char_metric_ok": bool(style_profile.get("char_metric_ok")),
+            "font_size_bucket_ok": bool(style_profile.get("font_size_bucket_ok")),
+            "uses_165_line_spacing": bool(style_profile.get("uses_165_line_spacing")),
+        },
+        "math": {
+            "score": _clamp_score(math_score),
+            "weight": 0.20,
+            "source_math_segments": source_math_segments,
+            "native_math_enabled": native_math_enabled,
+            "native_equations": native_equations,
+            "structured_equations": structured_equations,
+            "native_math_coverage_ratio": round(math_coverage, 4),
+            "math_visual_score": _clamp_score(math_visual_score),
+            "content_visual_sync_ratio": fidelity.get("overall_sync_ratio"),
+            "visual_first": not native_math_enabled,
+            "not_applicable": source_math_segments == 0,
+        },
+        "balance": {
+            "score": _clamp_score(balance_score),
+            "weight": 0.10,
+            "min_strict_alignment_ratio": fidelity.get("min_strict_alignment_ratio"),
+            "min_foreground_overlap_ratio": fidelity.get("min_foreground_overlap_ratio"),
+            "review_flags": fidelity.get("review_flags") or [],
+        },
+        "paging": {
+            "score": paging_score,
+            "weight": 0.10,
+            "pdf_page_count": fidelity.get("pdf_page_count"),
+            "hwpx_page_count": fidelity.get("hwpx_page_count"),
+            "page_count_mismatch": bool(fidelity.get("page_count_mismatch")),
+            "limited_by_max_pages": bool(fidelity.get("limited_by_max_pages")),
+            "full_page_raster_fallback": bool(stats.get("full_page_raster_fallback")),
+            "page_ratio_ok": style_profile.get("page_ratio_ok"),
+            "page_standard_ok": style_profile.get("page_standard_ok"),
+            "page_portrait_ok": style_profile.get("page_portrait_ok"),
+            "page_orientation_ok": style_profile.get("page_orientation_ok"),
+            "page_physical_size_ok": style_profile.get("page_physical_size_ok"),
+            "page_standard_names": style_profile.get("page_standard_names") or [],
+            "page_print_paper_names": style_profile.get("page_print_paper_names") or [],
+            "page_print_scale_values": style_profile.get("page_print_scale_values") or [],
+            "page_sizes": style_profile.get("page_sizes") or [],
+        },
+        "editable_text": {
+            "score": editable_score,
+            "weight": 0.05,
+            "editable_text_coverage_ratio": stats.get("editable_text_coverage_ratio"),
+        },
+        "open_safety": {
+            "score": open_safety_score,
+            "weight": 0.05,
+            "ok": bool(open_safety.get("ok")),
+            "summary": open_safety.get("summary"),
+        },
+    }
+    objective_score = None
+    if score_available:
+        objective_score = round(
+            sum(float(component["score"]) * float(component["weight"]) for component in components.values()),
+            2,
+        )
+
+    return {
+        "objective_score_target": target,
+        "objective_score_available": score_available,
+        "objective_score": objective_score,
+        "meets_objective_score_target": (objective_score >= target if objective_score is not None else None),
+        "score_components": components,
+        "meets_font_template_target": components["font"]["score"] >= 95.0,
+        "meets_native_math_target": (
+            source_math_segments == 0 or math_coverage >= 0.95 if native_math_enabled else None
+        ),
+        "meets_math_visual_sync_target": True if source_math_segments == 0 else math_visual_score >= 95.0,
+        "meets_paging_target": components["paging"]["score"] >= 95.0,
+        "meets_page_standard_target": (
+            bool(style_profile.get("page_physical_size_ok")) if style_available else None
+        ),
+        "meets_open_safety_target": bool(open_safety.get("ok")),
+    }
+
+
+def _pdf_structured_objective_score(
+    *,
+    stats: dict[str, Any],
+    style_profile: dict[str, Any],
+    open_safety: dict[str, Any],
+) -> dict[str, Any]:
+    target = 98.0
+    style_available = bool(style_profile.get("available"))
+    draw_text_boxes = int(stats.get("draw_text_boxes") or 0)
+    paragraph_count = int(stats.get("paragraphs") or 0)
+    source_problems = int(stats.get("source_problem_count") or 0)
+    output_problems = int(stats.get("output_problem_count") or 0)
+    duplicate_count = int(stats.get("duplicate_problem_count") or 0)
+    unreliable_count = int(stats.get("unreliable_text_problems") or 0)
+    unresolved_math = int(stats.get("unresolved_math_placeholders") or 0)
+    source_math_segments = int(stats.get("source_math_segments") or 0)
+    native_equations = int(stats.get("native_equations") or 0)
+    structured_equations = int(style_profile.get("native_equations") or 0)
+    math_coverage = float(stats.get("native_math_coverage_ratio") or 0.0)
+    source_layout_coverage = float(stats.get("source_layout_coverage_ratio") or 0.0)
+    editable_text_coverage = float(stats.get("editable_text_coverage_ratio") or 0.0)
+    source_text_preservation = float(stats.get("source_text_preservation_ratio") or 0.0)
+    expected_page_breaks = int(stats.get("expected_page_breaks") or 0)
+    expected_column_breaks = int(stats.get("expected_column_breaks") or 0)
+    actual_page_breaks = int(stats.get("page_breaks") or 0)
+    actual_column_breaks = int(stats.get("column_breaks") or 0)
+    two_column_page_tables = int(stats.get("two_column_page_tables") or 0)
+    output_page_count = int(stats.get("output_page_count_target") or stats.get("pages") or 0)
+    page_breaks_match = actual_page_breaks == expected_page_breaks
+    allowed_natural_column_breaks = max(1, int(stats.get("output_page_count_target") or 0))
+    explicit_column_breaks_match = (
+        expected_column_breaks <= actual_column_breaks <= expected_column_breaks + allowed_natural_column_breaks
+    )
+    page_table_columns_match = (
+        expected_column_breaks > 0
+        and output_page_count > 0
+        and two_column_page_tables == output_page_count
+    )
+    column_breaks_match = explicit_column_breaks_match or page_table_columns_match
+
+    structure_score = 0.0
+    structure_score += 25.0 if draw_text_boxes == 0 else 0.0
+    structure_score += 15.0 if paragraph_count > 0 else 0.0
+    structure_score += 20.0 if source_layout_coverage >= 0.99 else _clamp_score(source_layout_coverage * 20.0)
+    structure_score += 20.0 if page_breaks_match else 0.0
+    structure_score += 20.0 if column_breaks_match else 0.0
+
+    font_score = 0.0
+    if style_available:
+        font_score += 25.0 if style_profile.get("has_required_font_faces") else 0.0
+        font_score += 20.0 if style_profile.get("font_face_type_ok") else 0.0
+        font_score += 20.0 if style_profile.get("char_metric_ok") else 0.0
+        font_score += 15.0 if style_profile.get("font_size_bucket_ok") else 0.0
+        font_score += 20.0 if style_profile.get("uses_exam_line_spacing") else 0.0
+
+    if source_math_segments == 0:
+        math_score = 100.0
+    else:
+        math_score = _ratio_score(math_coverage)
+        if structured_equations < native_equations:
+            math_score = min(math_score, 80.0)
+    if unresolved_math:
+        math_score = max(0.0, math_score - min(60.0, unresolved_math * 10.0))
+
+    completeness_score = 0.0
+    completeness_score += 50.0 if source_problems > 0 and output_problems == source_problems else 0.0
+    completeness_score += 25.0 if duplicate_count == 0 else 0.0
+    completeness_score += 25.0 if unreliable_count == 0 else 0.0
+
+    paging_score = 0.0
+    if style_available:
+        paging_score += 20.0 if style_profile.get("page_ratio_ok") else 0.0
+        paging_score += 15.0 if style_profile.get("page_standard_ok") else 0.0
+        paging_score += 15.0 if style_profile.get("page_portrait_ok") else 0.0
+        paging_score += 15.0 if style_profile.get("page_orientation_ok") else 0.0
+        paging_score += 20.0 if style_profile.get("page_margin_profile_ok") else 0.0
+        paging_score += 15.0 if (
+            style_profile.get("column_gap_profile_ok")
+            or style_profile.get("table_column_layout_ok")
+        ) else 0.0
+    if stats.get("full_page_raster_fallback"):
+        paging_score = max(0.0, paging_score - 50.0)
+
+    editable_score = _ratio_score(min(editable_text_coverage, source_text_preservation))
+    open_safety_score = 100.0 if open_safety.get("ok") else 0.0
+    components = {
+        "layout": {
+            "score": _clamp_score(structure_score),
+            "weight": 0.25,
+            "mode": "structured",
+            "draw_text_boxes": draw_text_boxes,
+            "paragraphs": paragraph_count,
+            "source_layout_coverage_ratio": round(source_layout_coverage, 4),
+            "expected_page_breaks": expected_page_breaks,
+            "actual_page_breaks": actual_page_breaks,
+            "page_breaks_match": page_breaks_match,
+            "expected_column_breaks": expected_column_breaks,
+            "actual_column_breaks": actual_column_breaks,
+            "column_breaks_match": column_breaks_match,
+            "explicit_column_breaks_match": explicit_column_breaks_match,
+            "page_table_columns_match": page_table_columns_match,
+            "two_column_page_tables": two_column_page_tables,
+            "natural_column_breaks": max(0, actual_column_breaks - expected_column_breaks),
+        },
+        "font": {
+            "score": _clamp_score(font_score),
+            "weight": 0.15,
+            "required_font_faces": style_profile.get("required_font_faces") or [],
+            "missing_required_font_faces": style_profile.get("missing_required_font_faces") or [],
+            "font_face_type_ok": bool(style_profile.get("font_face_type_ok")),
+            "char_metric_ok": bool(style_profile.get("char_metric_ok")),
+            "font_size_bucket_ok": bool(style_profile.get("font_size_bucket_ok")),
+            "uses_exam_line_spacing": bool(style_profile.get("uses_exam_line_spacing")),
+            "line_spacing_values": style_profile.get("line_spacing_values") or [],
+        },
+        "math": {
+            "score": _clamp_score(math_score),
+            "weight": 0.20,
+            "source_math_segments": source_math_segments,
+            "native_math_enabled": bool(stats.get("native_math_enabled")),
+            "native_equations": native_equations,
+            "structured_equations": structured_equations,
+            "native_math_coverage_ratio": round(math_coverage, 4),
+            "unresolved_math_placeholders": unresolved_math,
+            "visual_first": False,
+            "not_applicable": source_math_segments == 0,
+        },
+        "balance": {
+            "score": _clamp_score(completeness_score),
+            "weight": 0.15,
+            "source_problem_count": source_problems,
+            "output_problem_count": output_problems,
+            "duplicate_problem_count": duplicate_count,
+            "unreliable_text_problems": unreliable_count,
+        },
+        "paging": {
+            "score": _clamp_score(paging_score),
+            "weight": 0.15,
+            "page_ratio_ok": style_profile.get("page_ratio_ok"),
+            "page_standard_ok": style_profile.get("page_standard_ok"),
+            "page_portrait_ok": style_profile.get("page_portrait_ok"),
+            "page_orientation_ok": style_profile.get("page_orientation_ok"),
+            "page_physical_size_ok": style_profile.get("page_physical_size_ok"),
+            "page_margin_profile_ok": style_profile.get("page_margin_profile_ok"),
+            "page_margins": style_profile.get("page_margins") or [],
+            "column_gap_profile_ok": style_profile.get("column_gap_profile_ok"),
+            "table_column_layout_ok": style_profile.get("table_column_layout_ok"),
+            "two_column_page_table_count": style_profile.get("two_column_page_table_count"),
+            "column_gaps_mm": style_profile.get("column_gaps_mm") or [],
+            "full_page_raster_fallback": bool(stats.get("full_page_raster_fallback")),
+        },
+        "editable_text": {
+            "score": editable_score,
+            "weight": 0.05,
+            "editable_text_coverage_ratio": round(editable_text_coverage, 4),
+            "source_text_preservation_ratio": round(source_text_preservation, 4),
+        },
+        "open_safety": {
+            "score": open_safety_score,
+            "weight": 0.05,
+            "ok": bool(open_safety.get("ok")),
+            "summary": open_safety.get("summary"),
+        },
+    }
+    objective_score = None
+    if style_available:
+        objective_score = round(
+            sum(float(component["score"]) * float(component["weight"]) for component in components.values()),
+            2,
+        )
+    return {
+        "objective_score_target": target,
+        "objective_score_available": style_available,
+        "objective_score": objective_score,
+        "meets_objective_score_target": (objective_score >= target if objective_score is not None else None),
+        "score_components": components,
+        "meets_font_template_target": components["font"]["score"] >= 98.0,
+        "meets_native_math_target": source_math_segments == 0 or (math_coverage >= 0.95 and unresolved_math == 0),
+        "meets_math_visual_sync_target": True,
+        "meets_paging_target": components["paging"]["score"] >= 98.0,
+        "meets_page_standard_target": bool(style_profile.get("page_physical_size_ok")) if style_available else None,
+        "meets_open_safety_target": bool(open_safety.get("ok")),
     }
 
 
@@ -240,7 +692,7 @@ def list_exports() -> dict[str, Any]:
     return {"items": storage.list_exports()}
 
 
-@app.delete("/api/exports/{name}")
+@app.delete("/api/exports/{name:path}")
 def delete_export(name: str) -> dict[str, Any]:
     if not storage.delete_export(name):
         raise HTTPException(status_code=404, detail="Export not found")
@@ -349,36 +801,167 @@ def export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
     storage.ensure_dirs()
     rel_path = importers.save_upload(payload.filename, data)
     source_path = (storage.DATA_DIR / rel_path).resolve()
-    title = f"{Path(payload.filename).stem or 'PDF'}_원본_레이아웃"
     output_path: Path | None = None
+    run_dir: Path | None = None
+
+    def _cleanup_failed_run() -> None:
+        # 실패한 변환의 부분 산출물(run_dir 전체)을 exports/에 남기지 않는다.
+        if output_path is not None:
+            output_path.unlink(missing_ok=True)
+        if run_dir is None:
+            return
+        shutil.rmtree(run_dir, ignore_errors=True)
+        parent = run_dir.parent
+        if parent != storage.EXPORT_DIR:
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
+
     try:
         with _EXPORT_LOCK:
-            output_path = _unique_export_path(_safe_export_name(title, "hwpx"))
+            source_stem = _safe_path_name(Path(payload.filename).stem or "PDF", "pdf")
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_dir = _unique_export_dir(storage.EXPORT_DIR / "pdf_layout", f"{stamp}_{source_stem}")
+            run_dir.mkdir(parents=True, exist_ok=True)
+            source_copy = _unique_path_in_dir(run_dir, f"{source_stem}.pdf")
+            source_copy.write_bytes(data)
+            output_suffix = "structured_native" if payload.layout_mode == "structured" else "original_layout"
+            output_path = _unique_path_in_dir(run_dir, f"{source_stem}_{output_suffix}.hwpx")
             with _conversion_slot():
-                stats = pdf_layout_writer.write_pdf_flow_hwpx(
-                    source_path,
-                    output_path,
-                    max_pages=payload.max_pages,
-                    boxed_passages=payload.boxed_passages,
-                )
+                if payload.layout_mode == "structured":
+                    stats = pdf_layout_writer.write_pdf_structured_hwpx(
+                        source_path,
+                        output_path,
+                        max_pages=payload.max_pages,
+                        native_math=payload.native_math,
+                    )
+                else:
+                    stats = pdf_layout_writer.write_pdf_layout_hwpx(
+                        source_path,
+                        output_path,
+                        max_pages=payload.max_pages,
+                        include_images=True,
+                        include_lines=True,
+                        text_mode="line",
+                        native_math=payload.native_math,
+                        math_ai_recognition=payload.math_ai_recognition,
+                        math_ai_model=payload.math_ai_model,
+                    )
     except ValueError as exc:
-        if output_path is not None:
-            output_path.unlink(missing_ok=True)
+        _cleanup_failed_run()
         raise HTTPException(status_code=400, detail=f"PDF 레이아웃 변환 실패: {exc}") from exc
     except Exception as exc:  # noqa: BLE001 - PDF/HWPX 변환 오류를 API 오류로 감싼다.
-        if output_path is not None:
-            output_path.unlink(missing_ok=True)
+        _cleanup_failed_run()
         raise HTTPException(status_code=500, detail=f"PDF 레이아웃 HWPX 생성 중 오류가 발생했습니다: {exc}") from exc
 
     assert output_path is not None
 
-    return {
-        "ok": True,
-        "mode": "pdf_flow_hwpx",
-        "source": {"name": payload.filename, "path": rel_path},
+    render_dir = run_dir / "fidelity_renders"
+    structured_visual_math = stats.get("layout_mode") == "structured_math_visual_overlay"
+    if payload.layout_mode == "structured" and not structured_visual_math:
+        fidelity = {
+            "available": False,
+            "skipped": True,
+            "reason": "structured reflow is scored by editable structure and native-math coverage",
+            "pdf_page_count": int(stats.get("source_pages") or stats.get("pages") or 0),
+            "hwpx_page_count": None,
+            "review_flags": [],
+        }
+    else:
+        fidelity = pdf_layout_fidelity.analyze_pdf_hwpx_fidelity(
+            source_copy,
+            output_path,
+            render_dir,
+            max_pages=int(stats.get("pages") or 1),
+            target_sync_ratio=0.94,
+            allow_truncated_by_max_pages=payload.max_pages is not None,
+            artifact_mode="failures",
+        )
+        _attach_fidelity_artifact_refs(fidelity, render_dir)
+    style_profile = pdf_layout_writer.inspect_layout_template_profile(output_path)
+    open_safety = _inspect_hwpx_open_safety(output_path)
+    visual_sync_ratio = fidelity.get("overall_sync_ratio")
+    whole_page_visual_sync_ratio = fidelity.get("overall_whole_page_sync_ratio")
+    layout_view_sync_ratio = fidelity.get("overall_layout_view_sync_ratio")
+    meets_visual_target = (
+        bool(fidelity.get("meets_visual_similarity_target")) if fidelity.get("available") else None
+    )
+    meets_whole_page_visual_target = (
+        bool(fidelity.get("meets_whole_page_sync_target")) if fidelity.get("available") else None
+    )
+    meets_layout_view_target = (
+        bool(fidelity.get("meets_layout_view_sync_target")) if fidelity.get("available") else None
+    )
+    full_page_raster_fallback = bool(stats.get("full_page_raster_fallback"))
+    quality = {
+        "target_sync_ratio": 0.94,
+        "editable_text_coverage_ratio": stats.get("editable_text_coverage_ratio"),
+        "meets_editable_text_target": float(stats.get("editable_text_coverage_ratio") or 0.0) >= 0.9,
+        "visual_sync_ratio": visual_sync_ratio,
+        "whole_page_visual_sync_ratio": whole_page_visual_sync_ratio,
+        "layout_view_sync_ratio": layout_view_sync_ratio,
+        "meets_visual_sync_target": meets_visual_target,
+        "meets_whole_page_sync_target": meets_whole_page_visual_target,
+        "meets_layout_view_sync_target": meets_layout_view_target,
+        "visual_review_flags": fidelity.get("review_flags") or [],
+        "limited_by_max_pages": bool(fidelity.get("limited_by_max_pages")),
+        "full_page_raster_fallback": full_page_raster_fallback,
+        "full_page_images": int(stats.get("full_page_images") or 0),
+        "visual_sync_requires_human_review": (
+            payload.layout_mode == "coordinate" or structured_visual_math
+        ),
+    }
+    quality.update(
+        _pdf_layout_objective_score(
+            stats=stats,
+            fidelity=fidelity,
+            style_profile=style_profile,
+            open_safety=open_safety,
+        )
+    )
+    report_path = _unique_path_in_dir(run_dir, "layout_report.json")
+    report = {
+        "mode": f"pdf_{payload.layout_mode}_hwpx",
+        "source": {"name": payload.filename, "upload_path": rel_path},
         "export": _export_file_item(output_path),
         "stats": stats,
-        "notices": ["텍스트는 편집 가능한 문단/표로 넣고, 표·그림 영역만 지역 이미지로 보존했습니다."],
+        "quality": quality,
+        "fidelity": fidelity,
+        "style_profile": style_profile,
+        "open_safety": open_safety,
+        "notes": [
+            "editable_text_coverage_ratio tracks text-line preservation, not pixel-perfect visual similarity.",
+            "layout_view_sync_ratio is the primary 94-point whole-page margin/spacing/scale signal.",
+            "objective_score_target is 98 and combines source page/column fidelity, exam margins and spacing, editable structure, native math coverage, completeness, paging, and editor-open safety.",
+            "page_physical_size_ok requires a portrait KICE-style physical page setup; A3-like KICE math sheets are emitted as B4_114 for B4 114% print output.",
+            "whole_page_visual_sync_ratio compares raw full-page luminance and remains a strict renderer-difference diagnostic.",
+            "visual_sync_ratio compares rendered PDF and HWPX content crops; foreground_overlap_ratio is a stricter text-position diagnostic.",
+            "Use rendered HWPX review or Hancom open check for final acceptance.",
+            "API render artifacts are saved for pages below the target; full audit runs may use artifact_mode='all'.",
+        ],
+    }
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return {
+        "ok": True,
+        "mode": f"pdf_{payload.layout_mode}_hwpx",
+        "source": {"name": payload.filename, "path": rel_path, "copy": _export_file_item(source_copy)},
+        "export": _export_file_item(output_path),
+        "run": {
+            "folder": run_dir.resolve().relative_to(storage.EXPORT_DIR.resolve()).as_posix(),
+            "report": _export_file_item(report_path),
+        },
+        "stats": stats,
+        "quality": quality,
+        "fidelity": fidelity,
+        "style_profile": style_profile,
+        "open_safety": open_safety,
+        "notices": [
+            "텍스트는 편집 가능한 문단/표로 넣고 수식은 한글 네이티브 수식 개체로 생성했습니다."
+            if payload.layout_mode == "structured"
+            else "텍스트는 원본 좌표를 따르는 편집 가능한 개체로 넣었습니다."
+        ],
     }
 
 

@@ -4,6 +4,35 @@ Updated: 2026-07-09
 
 Goal: produce KICE/school-exam HWPX output that preserves question sync, native math equations, typography, and layout without overlaps. Direct `.hwp` output remains a Hancom/COM conversion concern after HWPX quality is stable.
 
+## 2026-07-13 Priority Execution Result
+
+1. P0 - Preserve print fidelity while reducing image dependence.
+   - High-fidelity output keeps editable coordinate text and regional overlays only; full-page images remain forbidden.
+   - Native PDF vector lines are emitted after visual clips on the general layout route, preventing thin boxes from being erased by overlapping white clip backgrounds.
+   - Adaptive grayscale PNG encoding reduces monochrome overlay storage while preserving color clips as RGB.
+
+2. P0 - Add safe semantic math editing.
+   - High-fidelity math now adds editable equations inside absolutely positioned, borderless one-cell tables underneath the visual layer.
+   - Equations are no longer embedded inside `drawText`, and the editor-open and structure validators require the safe positioned form.
+   - The March high-1 full-paper probe produced 106 positioned equations with 100% extractable-span coverage while retaining a 99.43 harsh-layout average and 99.12 minimum.
+
+3. P1 - Provide true paragraph reflow without weakening the print file.
+   - Every exam set now has a separate `outputs_native_edit` companion.
+   - Korean/English companions use native reflow paragraphs, first-line indents, boxes, and tables.
+   - Math companions use page tables and native equation objects without full-page images.
+   - The 12-set companion report is `data/external_exam_qa/native_edit_companion_report.json`.
+
+4. P1 - Generalize beyond the KICE two-column template.
+   - `scripts/verify_pdf_layout_stress_suite.py` covers portrait, landscape, three-column, rotated text, color, sparse pages, long rules, thin gray boxes, and tables.
+   - The stress gate requires editable text, no full-page images, editor-open safety, structure safety, average 95+, minimum 95+, and bounded color error.
+
+5. P2 - Keep size and performance measurable.
+   - Monochrome overlays are stored as grayscale PNG only when channel spread proves the clip is grayscale; colored content remains RGB.
+   - QA reports record output bytes and reject files above 1 MB per converted page.
+   - `scripts/verify_conversion_speed_invariants.py` remains the algorithmic speed gate; whole-exam reports retain wall-clock conversion totals.
+   - Final 12-file benchmark: 168 pages in 243.099 seconds (1.447 seconds/page), 48,540,647 bytes total (0.289 MB/page), with zero structure or editor-open failures.
+   - Final high-fidelity QA: first pass 98.29/96.53 and unseen second pass 98.23/96.72; combined 98.26 average and 96.53 global minimum.
+
 Canonical references:
 
 - `README.md` for app usage, data policy, verification commands, and HWP open guidance.

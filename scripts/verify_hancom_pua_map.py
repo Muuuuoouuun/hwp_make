@@ -51,7 +51,8 @@ def main() -> int:
     check("그리스 α,π,θ,Δ", all(m.get(chr(c)) == s for c, s in [(0xE09D, "α"), (0xE0AC, "π"), (0xE0A4, "θ"), (0xE088, "Δ")]))
     # 폰트 스코프
     check("폰트 스코프 HyhwpEQ=참, Arial=거짓", is_hancom_eq_font("ABCDEE+HyhwpEQ") and not is_hancom_eq_font("Arial"))
-    check("recover_pua_char 미매핑→None", recover_pua_char("") is None and recover_pua_char("A") is None)
+    check("구조 placeholder E06D→□", recover_pua_char(chr(0xE06D)) == "□")
+    check("recover_pua_char 미매핑→None", recover_pua_char(chr(0xE123)) is None and recover_pua_char("A") is None)
     check("케이스 하단 구조조각 E07A 제거", recover_pua_char(chr(0xE07A)) == "")
     check("표 크기(문자52+숫자10+기타)", len(m) >= 71, f"len={len(m)}")
 

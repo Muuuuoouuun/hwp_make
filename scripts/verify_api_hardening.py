@@ -220,14 +220,18 @@ def failed_export_cleanup_check(client: TestClient) -> None:
     check(response.status_code == 500, f"failing export returned {response.status_code}, expected 500")
     check(not any(storage.EXPORT_DIR.iterdir()), "failed export left a partial file in exports/")
 
-    original_pdf_writer = main.pdf_layout_writer.write_pdf_flow_hwpx
+    # /api/pdf-layout-export 는 layout_mode 에 따라 structured/coordinate writer 를 쓴다.
+    # 어느 모드든 writer 실패는 500 + 부분 산출물 정리를 보장해야 하므로 둘 다 패치한다.
+    original_pdf_writer = main.pdf_layout_writer.write_pdf_layout_hwpx
+    original_structured_writer = main.pdf_layout_writer.write_pdf_structured_hwpx
 
     def failing_pdf_writer(_source: str | Path, output: str | Path, **_kwargs: Any) -> dict[str, Any]:
         Path(output).write_bytes(b"partial PDF-layout export")
         raise RuntimeError("intentional PDF-layout writer failure")
 
     try:
-        main.pdf_layout_writer.write_pdf_flow_hwpx = failing_pdf_writer
+        main.pdf_layout_writer.write_pdf_layout_hwpx = failing_pdf_writer
+        main.pdf_layout_writer.write_pdf_structured_hwpx = failing_pdf_writer
         pdf_response = client.post(
             "/api/pdf-layout-export",
             json={
@@ -237,7 +241,8 @@ def failed_export_cleanup_check(client: TestClient) -> None:
             },
         )
     finally:
-        main.pdf_layout_writer.write_pdf_flow_hwpx = original_pdf_writer
+        main.pdf_layout_writer.write_pdf_layout_hwpx = original_pdf_writer
+        main.pdf_layout_writer.write_pdf_structured_hwpx = original_structured_writer
 
     check(
         pdf_response.status_code == 500,

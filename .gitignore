@@ -4,5 +4,8 @@ __pycache__/
 .venv/
 venv/
 .claude/
-data/
+# 루트 데이터 디렉터리만 제외 (app/_vendor/hwpx/data/ 같은 소스 자산은 추적해야 함)
+/data/
 *.log
+tmp/
+assets/fonts/shinmyeong-jungmyeongjo/

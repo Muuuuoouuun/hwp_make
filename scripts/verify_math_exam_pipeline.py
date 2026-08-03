@@ -55,6 +55,14 @@ class CheckResult:
     crlf_warnings: int
 
 
+def _status_for_returncode(returncode: int) -> str:
+    if returncode == 0:
+        return "PASS"
+    if returncode == 2:
+        return "SKIP"
+    return "FAIL"
+
+
 def _decode_output(data: bytes) -> str:
     if not data:
         return ""
@@ -587,8 +595,11 @@ def _run_check(check: Check, *, show_known_warnings: bool) -> CheckResult:
     _print_filtered_output("stdout", stdout)
     _print_filtered_output("stderr", stderr)
     elapsed = time.monotonic() - started
-    if completed.returncode == 0:
+    status = _status_for_returncode(int(completed.returncode))
+    if status == "PASS":
         print(f"PASS {check.name} ({elapsed:.1f}s)", flush=True)
+    elif status == "SKIP":
+        print(f"SKIP {check.name} ({elapsed:.1f}s, exit {completed.returncode})", flush=True)
     else:
         print(f"FAIL {check.name} ({elapsed:.1f}s, exit {completed.returncode})", file=sys.stderr, flush=True)
     return CheckResult(
@@ -696,9 +707,13 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     results: list[CheckResult] = []
     failures: list[CheckResult] = []
+    skipped: list[CheckResult] = []
     for check in _checks(args):
         result = _run_check(check, show_known_warnings=args.show_known_warnings)
         results.append(result)
+        if result.returncode == 2:
+            skipped.append(result)
+            continue
         if result.returncode != 0:
             failures.append(result)
             break
@@ -717,6 +732,7 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "name": result.name,
                 "command": result.command,
+                "status": _status_for_returncode(result.returncode),
                 "returncode": result.returncode,
                 "elapsed_seconds": result.elapsed_seconds,
                 "manifest_fallback_warnings": result.manifest_fallback_warnings,
@@ -734,6 +750,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print("\n=== Summary ===", flush=True)
     print(f"Report: {report_path}", flush=True)
+    for result in skipped:
+        print(f"SKIP {result.name}: exit {result.returncode}", flush=True)
     if failures:
         for result in failures:
             print(f"FAIL {result.name}: exit {result.returncode}", flush=True)

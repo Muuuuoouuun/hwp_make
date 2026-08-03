@@ -30,7 +30,9 @@ _OPERATORS: dict[int, str] = {
     0xE049: "[", 0xE04A: "]", 0xE04B: "{", 0xE04C: "}", 0xE04D: "|",
     0xE04F: ":", 0xE052: ",", 0xE053: ".", 0xE054: "/", 0xE055: "<",
     0xE056: ">", 0xE05B: "∫", 0xE05C: "√", 0xE067: "∑",
+    0xE06D: "□",  # Structure placeholder/fraction rule glyph used by layout repair passes.
     0xE06E: "⃗",
+    0xE03E: "",  # Structural spacer before script-sized glyphs; rendering it as □ breaks formulas.
     0xE078: "(", 0xE079: "{", 0xE07A: "", 0xE07B: "|", 0xE101: "|",
 }
 

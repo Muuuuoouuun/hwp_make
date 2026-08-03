@@ -57,13 +57,9 @@ const oneColumn = planner.planLayout([problem(6, 10), problem(7, 10)], { key: "b
 assert(oneColumn.columns === 1, "single-column template was not respected");
 assert(oneColumn.placements.every((item) => item.start.column === 1), "single-column plan emitted a second column");
 
-const indexHtml = fs.readFileSync(path.join(root, "static", "index.html"), "utf8");
-const appJs = fs.readFileSync(path.join(root, "static", "app.js"), "utf8");
-for (const snippet of ["layout-planner.js", "layoutSummary", "layoutWarnings", "paperFlowHint"]) {
-  assert(indexHtml.includes(snippet), `missing layout UI hook: ${snippet}`);
-}
-for (const snippet of ["buildLayoutPlan", "updateLayoutSummary", "layout-risk-", "renderBasket();"]) {
-  assert(appJs.includes(snippet), `missing layout behavior: ${snippet}`);
-}
+// NOTE(2026-08-03 병합): layout-planner는 현재 워크벤치 UI에 배선되지 않은 독립 라이브러리다.
+// (ai_0.1 워크벤치 UI 채택으로 구 UI 배선이 제거됨. 높이 기반 예상 페이지/분할 경고의
+// 워크벤치 재통합은 후속 작업 — 재통합 시 여기에 배선 어설션을 복원할 것.)
+// 위의 planLayout 단위 검증만 회귀핀으로 유지한다.
 
 console.log("Frontend layout planning OK");

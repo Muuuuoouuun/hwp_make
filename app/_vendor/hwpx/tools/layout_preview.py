@@ -176,11 +176,17 @@ def _parse_xml(parts: Mapping[str, bytes], name: str, warnings: list[str]) -> ET
 
 
 def _section_names(parts: Mapping[str, bytes]) -> list[str]:
-    return sorted(
+    names = [
         name
         for name in parts
         if name.startswith("Contents/section") and name.endswith(".xml")
-    )
+    ]
+
+    def section_index(name: str) -> tuple[int, str]:
+        suffix = Path(name).stem.removeprefix("section")
+        return (int(suffix), name) if suffix.isdigit() else (2**31 - 1, name)
+
+    return sorted(names, key=section_index)
 
 
 def _find_text_in_run(run: ET.Element) -> str:

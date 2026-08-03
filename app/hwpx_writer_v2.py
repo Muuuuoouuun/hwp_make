@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image
+from lxml import etree
 
 # vendored python-hwpx (app/_vendor/hwpx). 내부적으로 `import hwpx` 절대경로를
 # 쓰므로 _vendor 디렉터리를 sys.path에 얹어 top-level 패키지로 노출한다.
@@ -96,16 +97,16 @@ _KICE_FONT_FACES = (
 )
 
 _KICE_STYLE_SPECS = {
-    "title": {"size": 16.0, "bold": True, "font": "돋움"},
-    "meta": {"size": 11.0, "font": "돋움"},
-    "heading": {"size": 11.0, "bold": True, "font": "돋움"},
-    "body": {"size": 11.0, "font": "신명 중명조"},
-    "small": {"size": 9.5, "font": "돋움"},
+    "title": {"size": 16.0, "bold": True, "font": "HY신명조"},
+    "meta": {"size": 11.0, "font": "HY신명조"},
+    "heading": {"size": 11.0, "bold": True, "font": "HY신명조"},
+    "body": {"size": 11.0, "font": "HY신명조"},
+    "small": {"size": 9.5, "font": "HY신명조"},
 }
 
 _KICE_ENGLISH_STYLE_SPECS = {
     **_KICE_STYLE_SPECS,
-    "body": {"size": 11.0, "font": "Times New Roman"},
+    "body": {"size": 11.0, "font": "HY신명조"},
 }
 
 _KICE_STYLE_LINE_HEIGHTS = {
@@ -116,14 +117,48 @@ _KICE_STYLE_LINE_HEIGHTS = {
     "small": int(9.5 * 165),
 }
 
+# PDF 시험지의 A3 원고를 A4로 70.7% 축소한 구조형 변환 프로필.
+_KICE_SOURCE_STYLE_SPECS = {
+    "title": {"size": 20.0, "bold": True, "font": "HY신명조"},
+    "meta": {"size": 9.5, "font": "HY신명조"},
+    "heading": {"size": 8.3, "bold": True, "font": "HY신명조"},
+    "body": {"size": 7.9, "font": "HY신명조"},
+    "small": {"size": 7.2, "font": "HY신명조"},
+}
+_KICE_SOURCE_LINE_SPACING = 165
+_KICE_SOURCE_LINE_SPACING_BY_TEMPLATE = {
+    "kice_korean": 155,
+    "kice_english": 110,
+}
+_KICE_SOURCE_STYLE_LINE_HEIGHTS = {
+    name: int(float(spec["size"]) * _KICE_SOURCE_LINE_SPACING)
+    for name, spec in _KICE_SOURCE_STYLE_SPECS.items()
+}
+_KICE_SOURCE_MARGIN_LEFT_MM = 20.0
+_KICE_SOURCE_MARGIN_RIGHT_MM = 20.0
+_KICE_SOURCE_MARGIN_TOP_MM = 20.0
+_KICE_SOURCE_MARGIN_BOTTOM_MM = 18.0
+_KICE_SOURCE_COLUMN_GAP_MM = 8.0
+_A4_WIDTH_HWP = 59528
+_A4_HEIGHT_HWP = 84188
+
+
+def _mm_to_hwp(value_mm: float) -> int:
+    return round(float(value_mm) * 7200.0 / 25.4)
+
 # rhwp-verified flow budget for native-math two-column KICE exports.
 #
 # The physical A4 body is about 65762 HWPUNIT, but equations and tables render
-# taller than the lightweight Python estimator. 46000 keeps the real HWP math
+# taller than the lightweight Python estimator. 43500 keeps the real HWP math
 # samples compact while leaving enough bottom margin to avoid layout overflow.
-KICE_MATH_COLUMN_BODY_HEIGHT = 46000
+KICE_MATH_COLUMN_BODY_HEIGHT = 43500
+# Single-column exports have no column to spill into, so the flow budget is the
+# usable page body instead of a column.  Native-math pages need more slack for
+# the taller equation runs than plain text pages do.
 SINGLE_COLUMN_MATH_BODY_HEIGHT = 35000
 SINGLE_COLUMN_TEXT_BODY_HEIGHT = 60000
+# Slack kept at the bottom of a column so a problem that *just* fits is moved
+# instead of being clipped by the renderer's own rounding.
 PROBLEM_LAYOUT_GUARD = 900
 
 
@@ -135,7 +170,13 @@ def _is_kice_template(template: ExamTemplate) -> bool:
     return str(template.key or "").startswith("kice_")
 
 
-def _style_specs_for_template(template: ExamTemplate) -> dict[str, dict[str, Any]]:
+def _style_specs_for_template(
+    template: ExamTemplate,
+    *,
+    preserve_source_layout: bool = False,
+) -> dict[str, dict[str, Any]]:
+    if preserve_source_layout and _is_kice_template(template):
+        return _KICE_SOURCE_STYLE_SPECS
     if not _is_kice_template(template):
         return _STYLE_SPECS
     if template.key == "kice_english":
@@ -143,7 +184,20 @@ def _style_specs_for_template(template: ExamTemplate) -> dict[str, dict[str, Any
     return _KICE_STYLE_SPECS
 
 
-def _style_line_heights_for_template(template: ExamTemplate) -> dict[str, int]:
+def _style_line_heights_for_template(
+    template: ExamTemplate,
+    *,
+    preserve_source_layout: bool = False,
+) -> dict[str, int]:
+    if preserve_source_layout and _is_kice_template(template):
+        line_spacing = _KICE_SOURCE_LINE_SPACING_BY_TEMPLATE.get(
+            template.key,
+            _KICE_SOURCE_LINE_SPACING,
+        )
+        return {
+            name: int(float(spec["size"]) * line_spacing)
+            for name, spec in _KICE_SOURCE_STYLE_SPECS.items()
+        }
     return _KICE_STYLE_LINE_HEIGHTS if _is_kice_template(template) else _STYLE_LINE_HEIGHTS
 
 
@@ -224,8 +278,13 @@ def _math_style_spec(spec: dict[str, Any]) -> dict[str, Any]:
     return math_spec
 
 
-def _set_paragraph_lineseg(paragraph: Any, height: int) -> None:
-    element = paragraph.element
+def _set_paragraph_element_lineseg(
+    element: Any,
+    height: int,
+    *,
+    width: int = MAX_IMAGE_WIDTH,
+    spacing_ratio: float = 0.15,
+) -> None:
     for child in list(element):
         if _local_name(child.tag).lower() == "linesegarray":
             element.remove(child)
@@ -239,9 +298,9 @@ def _set_paragraph_lineseg(paragraph: Any, height: int) -> None:
                 "vertsize": str(height),
                 "textheight": str(height),
                 "baseline": str(int(height * 0.85)),
-                "spacing": str(int(height * 0.6)),
+                "spacing": str(int(height * max(0.0, spacing_ratio))),
                 "horzpos": "0",
-                "horzsize": str(MAX_IMAGE_WIDTH),
+                "horzsize": str(width),
                 "flags": "393216",
             },
         )
@@ -249,11 +308,15 @@ def _set_paragraph_lineseg(paragraph: Any, height: int) -> None:
     element.append(line_seg_array)
 
 
+def _set_paragraph_lineseg(paragraph: Any, height: int) -> None:
+    _set_paragraph_element_lineseg(paragraph.element, height)
+
+
 def _lineseg_xml(height: int) -> str:
     return (
         '<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" '
         f'vertsize="{height}" textheight="{height}" baseline="{int(height * 0.85)}" '
-        f'spacing="{int(height * 0.6)}" horzpos="0" horzsize="{MAX_IMAGE_WIDTH}" '
+        f'spacing="{int(height * 0.15)}" horzpos="0" horzsize="{MAX_IMAGE_WIDTH}" '
         'flags="393216"/></hp:linesegarray>'
     )
 
@@ -311,6 +374,143 @@ def _patch_hwpx_native_math_linesegs(path: Path) -> int:
             pass
         raise
     return total
+
+
+def _patch_hwpx_exam_flow_linesegs(path: Path) -> int:
+    """Restore compact text and inline-object heights after package serialization.
+
+    The vendored serializer clears layout caches and the Hancom compatibility
+    pass fills missing line segments with a fixed 1000 HWPUNIT height. That
+    flattens 8 pt exam text and, more importantly, makes picture paragraphs
+    occupy only one text line so following choices overlap the picture.
+    """
+    with zipfile.ZipFile(path, "r") as archive:
+        infos = archive.infolist()
+        payloads = {info.filename: archive.read(info.filename) for info in infos}
+    header_payload = payloads.get("Contents/header.xml")
+    if not header_payload:
+        return 0
+    header_root = etree.fromstring(header_payload)
+    char_heights = {
+        str(char_pr.get("id") or ""): int(char_pr.get("height") or "1000")
+        for char_pr in header_root.findall(f".//{_HH}charPr")
+        if str(char_pr.get("id") or "")
+    }
+    para_line_spacings: dict[str, int] = {}
+    for para_pr in header_root.findall(f".//{_HH}paraPr"):
+        para_id = str(para_pr.get("id") or "")
+        line_spacing = para_pr.find(f"{_HH}lineSpacing")
+        if not para_id or line_spacing is None:
+            continue
+        try:
+            para_line_spacings[para_id] = int(line_spacing.get("value") or "160")
+        except ValueError:
+            continue
+    total = 0
+    updates: dict[str, bytes] = {}
+    for name, payload in payloads.items():
+        if not _SECTION_PART_RE.fullmatch(name):
+            continue
+        root = etree.fromstring(payload)
+        changed = False
+        for paragraph in root.findall(f".//{_HP}p"):
+            if paragraph.findall(f".//{_HP}equation") or paragraph.findall(f".//{_HP}tbl"):
+                continue
+            pictures = paragraph.findall(f".//{_HP}pic")
+            if pictures:
+                picture_heights: list[int] = []
+                for picture in pictures:
+                    size = picture.find(f"{_HP}sz")
+                    if size is None:
+                        continue
+                    try:
+                        picture_heights.append(int(size.get("height") or "0"))
+                    except ValueError:
+                        continue
+                target_height = max(picture_heights, default=1000) + 300
+            else:
+                run_heights = [
+                    char_heights.get(str(run.get("charPrIDRef") or ""), 1000)
+                    for run in paragraph.findall(f"{_HP}run")
+                ]
+                char_height = max(run_heights, default=1000)
+                line_spacing_percent = para_line_spacings.get(
+                    str(paragraph.get("paraPrIDRef") or ""),
+                    _KICE_SOURCE_LINE_SPACING,
+                )
+                target_height = max(
+                    700,
+                    round(char_height * line_spacing_percent / 115.0),
+                )
+            current = paragraph.find(f"{_HP}linesegarray")
+            if current is not None:
+                paragraph.remove(current)
+            _set_paragraph_element_lineseg(
+                paragraph,
+                target_height,
+                spacing_ratio=0.0 if pictures else 0.15,
+            )
+            changed = True
+            total += 1
+        if changed:
+            updates[name] = etree.tostring(
+                root,
+                encoding="utf-8",
+                xml_declaration=True,
+                standalone=True,
+            )
+    if not updates:
+        return 0
+
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=path.suffix + ".tmp")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        with zipfile.ZipFile(tmp_path, "w") as out:
+            for info in infos:
+                out.writestr(info, updates.get(info.filename, payloads[info.filename]))
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+    return total
+
+
+def _save_hwpx_with_hancom_compat(doc: Any, path: Path, *, native_math: bool) -> None:
+    """Save a python-hwpx document after applying Hancom 2024 safety sidecars."""
+
+    from hwpx.tools.package_validator import validate_editor_open_safety
+
+    from .pdf_layout_writer import _patch_hancom_compatibility
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), suffix=target.suffix + ".tmp")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        tmp_path.write_bytes(doc._to_bytes_for_validation())
+        _patch_hancom_compatibility(tmp_path)
+        _patch_hwpx_exam_flow_linesegs(tmp_path)
+        if native_math:
+            _patch_hwpx_native_math_linesegs(tmp_path)
+
+        report = validate_editor_open_safety(tmp_path)
+        if not report.ok:
+            raise ValueError("Generated HWPX package failed open-safety validation: " + report.summary)
+        os.replace(tmp_path, target)
+        mark_clean = getattr(doc, "_mark_save_clean", None)
+        if callable(mark_clean):
+            mark_clean()
+    except BaseException:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _is_passage_label(label: Any) -> bool:
@@ -438,6 +638,8 @@ def _append_equation_run(
     script: str,
     char_pr_id_ref: str,
     equation_index: int,
+    *,
+    compact_placeholder: bool = False,
 ) -> None:
     run = paragraph.add_run("", char_pr_id_ref=char_pr_id_ref).element
     for child in list(run):
@@ -504,7 +706,11 @@ def _append_equation_run(
     equation.append(script_node)
     run.append(equation)
     placeholder = run.makeelement(f"{_HP}t", {"{http://www.w3.org/XML/1998/namespace}space": "preserve"})
-    placeholder.text = _equation_placeholder(script)
+    if compact_placeholder:
+        width, _height = _equation_size(script)
+        placeholder.text = " " * max(1, min(12, width // 900))
+    else:
+        placeholder.text = _equation_placeholder(script)
     run.append(placeholder)
 
 
@@ -517,6 +723,7 @@ def _replace_paragraph_runs(
     native_math: bool,
     equation_counter: list[int],
     min_line_height: int = 1000,
+    compact_math_placeholder: bool = False,
 ) -> None:
     for child in list(paragraph.element):
         if str(child.tag).endswith("}run") or child.tag == "run":
@@ -528,7 +735,13 @@ def _replace_paragraph_runs(
             script = _hancom_eqn_script(segment)
             if script:
                 equation_counter[0] += 1
-                _append_equation_run(paragraph, script, char_pr_id_ref, equation_counter[0])
+                _append_equation_run(
+                    paragraph,
+                    script,
+                    char_pr_id_ref,
+                    equation_counter[0],
+                    compact_placeholder=compact_math_placeholder,
+                )
                 wrote = True
                 continue
         paragraph.add_run(
@@ -597,15 +810,25 @@ def write_hwpx(
     template_key: str = "basic",
     include_answer_sheet: bool = False,
     native_math: bool = False,
+    preserve_source_layout: bool = False,
 ) -> None:
     template = get_template(template_key)
     title = resolve_export_title(title, template)
     recognized_columns = layout_model.recognized_column_count(problems)
     columns = recognized_columns or max(1, min(template.columns, 2))
+    page_body_width = MAX_IMAGE_WIDTH
+    column_gap = COLUMN_GAP
+    if preserve_source_layout and _is_kice_template(template):
+        page_body_width = (
+            _A4_WIDTH_HWP
+            - _mm_to_hwp(_KICE_SOURCE_MARGIN_LEFT_MM)
+            - _mm_to_hwp(_KICE_SOURCE_MARGIN_RIGHT_MM)
+        )
+        column_gap = _mm_to_hwp(_KICE_SOURCE_COLUMN_GAP_MM)
     content_width = (
-        (MAX_IMAGE_WIDTH - COLUMN_GAP * (columns - 1)) // columns
+        (page_body_width - column_gap * (columns - 1)) // columns
         if columns > 1
-        else MAX_IMAGE_WIDTH
+        else page_body_width
     )
 
     doc = HwpxDocument.new()
@@ -613,38 +836,181 @@ def write_hwpx(
     # manifest entry.  Explicitly relate it so validators and alternate
     # readers do not have to guess the package-level compatibility metadata.
     doc.package.add_manifest_item("version", "version.xml", "application/xml")
+    # Hancom interprets WIDELY as portrait when width < height in HWPX pagePr.
+    doc.set_page_size(width=_A4_WIDTH_HWP, height=_A4_HEIGHT_HWP, orientation="WIDELY")
+    if preserve_source_layout and _is_kice_template(template):
+        doc.set_page_margins(
+            left=_mm_to_hwp(_KICE_SOURCE_MARGIN_LEFT_MM),
+            right=_mm_to_hwp(_KICE_SOURCE_MARGIN_RIGHT_MM),
+            top=_mm_to_hwp(_KICE_SOURCE_MARGIN_TOP_MM),
+            bottom=_mm_to_hwp(_KICE_SOURCE_MARGIN_BOTTOM_MM),
+            header=0,
+            footer=0,
+            gutter=0,
+        )
     header = doc.headers[0]
     if _is_kice_template(template):
         _ensure_kice_font_faces(header)
-    style_specs = _style_specs_for_template(template)
-    style_line_heights = _style_line_heights_for_template(template)
+    style_specs = _style_specs_for_template(
+        template,
+        preserve_source_layout=preserve_source_layout,
+    )
+    style_line_heights = _style_line_heights_for_template(
+        template,
+        preserve_source_layout=preserve_source_layout,
+    )
 
     # paraPr(정렬) / charPr(크기) 참조를 한 번씩만 만들어 재사용한다.
     if _is_kice_template(template):
-        pr_left = header.ensure_paragraph_format(alignment="LEFT", line_spacing_percent=165)
-        pr_center = header.ensure_paragraph_format(alignment="CENTER", line_spacing_percent=165)
-        pr_right = header.ensure_paragraph_format(alignment="RIGHT", line_spacing_percent=165)
+        default_line_spacing_percent = (
+            _KICE_SOURCE_LINE_SPACING_BY_TEMPLATE.get(
+                template.key,
+                _KICE_SOURCE_LINE_SPACING,
+            )
+            if preserve_source_layout
+            else 165
+        )
+        pr_left = header.ensure_paragraph_format(
+            alignment="LEFT",
+            line_spacing_percent=default_line_spacing_percent,
+        )
+        pr_center = header.ensure_paragraph_format(
+            alignment="CENTER",
+            line_spacing_percent=default_line_spacing_percent,
+        )
+        pr_right = header.ensure_paragraph_format(
+            alignment="RIGHT",
+            line_spacing_percent=default_line_spacing_percent,
+        )
     else:
+        default_line_spacing_percent = 160
         pr_left = header.ensure_paragraph_alignment("LEFT")
         pr_center = header.ensure_paragraph_alignment("CENTER")
         pr_right = header.ensure_paragraph_alignment("RIGHT")
     cp = {name: doc.ensure_run_style(**spec) for name, spec in style_specs.items()}
     math_cp = {name: doc.ensure_run_style(**_math_style_spec(spec)) for name, spec in style_specs.items()}
     if _is_kice_template(template):
-        _apply_char_metrics(header, list(cp.values()), ratio=95, spacing=-5)
+        char_ratio = (
+            90
+            if preserve_source_layout and template.key == "kice_english"
+            else 95
+        )
+        _apply_char_metrics(header, list(cp.values()), ratio=char_ratio, spacing=-5)
     equation_counter = [0]
     flow_y = 0
     pending_column_break = False
-    column_body_height = (
-        KICE_MATH_COLUMN_BODY_HEIGHT
+    pending_page_break = False
+    current_flow_column = 1
+    next_source_anchor_top_hwp: int | None = None
+    dynamic_para_formats: dict[tuple[str, int, int, int], str] = {}
+    source_layout_flow = bool(
+        preserve_source_layout
+        and columns > 1
+        and any(int(problem.get("source_page") or 0) > 0 for problem in problems)
+    )
+    source_text_document = any(
+        isinstance(problem.get("layout"), dict)
+        and bool(problem["layout"].get("source_text_flow"))
+        for problem in problems
+    )
+    if source_layout_flow:
+        column_body_height = (
+            _A4_HEIGHT_HWP
+            - _mm_to_hwp(_KICE_SOURCE_MARGIN_TOP_MM)
+            - _mm_to_hwp(_KICE_SOURCE_MARGIN_BOTTOM_MM)
+        )
+    elif columns > 1:
+        column_body_height = KICE_MATH_COLUMN_BODY_HEIGHT
+    else:
+        column_body_height = (
+            SINGLE_COLUMN_MATH_BODY_HEIGHT if native_math else SINGLE_COLUMN_TEXT_BODY_HEIGHT
+        )
+    picture_height_ratio = 0.20 if source_text_document else 0.25
+    math_picture_max_height = (
+        int(column_body_height * picture_height_ratio)
         if columns > 1
-        else SINGLE_COLUMN_MATH_BODY_HEIGHT if native_math else SINGLE_COLUMN_TEXT_BODY_HEIGHT
+        else None
     )
-    picture_max_height = (
-        int(column_body_height * 0.45)
-        if native_math and template.key == "kice_math" and columns > 1
-        else column_body_height - 1800 if columns > 1 else None
-    )
+
+    def source_target_top_hwp(layout: dict[str, Any], top_px: float | None = None) -> int | None:
+        page = layout.get("page") if isinstance(layout.get("page"), dict) else {}
+        bbox = layout.get("bbox_px") or []
+        if top_px is None:
+            if len(bbox) != 4:
+                return None
+            top_px = float(bbox[1])
+        page_height_px = float(page.get("height_px") or 0.0)
+        if page_height_px <= 0:
+            return None
+        absolute = int(round(_A4_HEIGHT_HWP * float(top_px) / page_height_px))
+        target = absolute - _mm_to_hwp(_KICE_SOURCE_MARGIN_TOP_MM)
+        source_page = int(layout.get("source_page") or page.get("number") or 0)
+        if source_page == 1:
+            first_page_origins = {
+                "kice_korean": 10200,
+                "kice_english": 5000,
+                "kice_math": 9150,
+            }
+            target -= first_page_origins.get(template.key, 0)
+        return max(0, target)
+
+    def source_left_margin_hwp(layout: dict[str, Any], left_px: float) -> int:
+        page = layout.get("page") if isinstance(layout.get("page"), dict) else {}
+        page_width_px = float(page.get("width_px") or 0.0)
+        if page_width_px <= 0:
+            return 0
+        absolute = int(round(_A4_WIDTH_HWP * float(left_px) / page_width_px))
+        column_index = max(1, min(columns, int(layout.get("column_index") or 1)))
+        column_left = _mm_to_hwp(_KICE_SOURCE_MARGIN_LEFT_MM)
+        if column_index > 1:
+            column_left += (content_width + column_gap) * (column_index - 1)
+        return max(0, min(content_width - 100, absolute - column_left))
+
+    def source_line_spacing_percent(
+        layout: dict[str, Any],
+        current: dict[str, Any],
+        following: dict[str, Any] | None,
+        style: str,
+    ) -> int:
+        typical_spacing = {
+            "kice_korean": 165,
+            "kice_english": 150,
+            "kice_math": 165,
+        }.get(template.key, default_line_spacing_percent)
+        if following is None:
+            return typical_spacing
+        page = layout.get("page") if isinstance(layout.get("page"), dict) else {}
+        page_height_px = float(page.get("height_px") or 0.0)
+        delta_px = float(following.get("top_px") or 0.0) - float(current.get("top_px") or 0.0)
+        if page_height_px <= 0 or delta_px <= 1.0:
+            return typical_spacing
+        desired_height = _A4_HEIGHT_HWP * delta_px / page_height_px
+        char_height = max(100, int(round(float(style_specs.get(style, style_specs["body"])["size"]) * 100.0)))
+        if desired_height > char_height * 2.4:
+            return typical_spacing
+        percent = int(round(desired_height * 100.0 / char_height))
+        return max(90, min(300, percent))
+
+    def dynamic_para_pr(
+        *,
+        alignment: str,
+        line_spacing_percent: int,
+        left_margin_hwp: int,
+        previous_margin_hwp: int,
+    ) -> str:
+        safe_spacing = max(80, min(300, int(line_spacing_percent)))
+        safe_left = max(0, int(round(left_margin_hwp / 10.0) * 10))
+        safe_previous = max(0, int(round(previous_margin_hwp / 10.0) * 10))
+        key = (alignment.upper(), safe_spacing, safe_left, safe_previous)
+        para_pr = dynamic_para_formats.get(key)
+        if para_pr is None:
+            para_pr = header.ensure_paragraph_format(
+                alignment=alignment,
+                line_spacing_percent=safe_spacing,
+                margins={"left": safe_left, "prev": safe_previous, "next": 0},
+            )
+            dynamic_para_formats[key] = para_pr
+        return para_pr
 
     def add_single_para(
         text: str,
@@ -654,32 +1020,79 @@ def write_hwpx(
         *,
         math_enabled: bool = True,
         allow_column_break: bool = True,
+        target_top_hwp: int | None = None,
+        left_margin_hwp: int = 0,
+        line_spacing_percent: int | None = None,
+        compact_math_placeholder: bool = False,
         **attrs: str,
-    ) -> None:
-        nonlocal flow_y, pending_column_break
-        para_height = style_line_heights.get(style, 1000)
+    ) -> int:
+        nonlocal flow_y, pending_column_break, pending_page_break, current_flow_column
+        nonlocal next_source_anchor_top_hwp
+        effective_spacing = int(line_spacing_percent or default_line_spacing_percent)
+        if source_layout_flow and _is_kice_template(template):
+            char_height = max(
+                100,
+                int(round(float(style_specs.get(style, style_specs["body"])["size"]) * 100.0)),
+            )
+            para_height = max(700, round(char_height * effective_spacing / 115.0))
+        else:
+            para_height = style_line_heights.get(style, 1000)
         if native_math and math_enabled:
             para_height = max(para_height, _native_math_height(str(text or "")))
         if (
+            not source_layout_flow
+            and
             columns > 1
             and not str(text or "").strip()
             and not attrs
             and flow_y > column_body_height - 2500
         ):
             pending_column_break = True
-            return
-        if pending_column_break and allow_column_break:
+            return 0
+        if pending_page_break:
+            attrs.setdefault("pageBreak", "1")
+            pending_page_break = False
+            pending_column_break = False
+            flow_y = 0
+            current_flow_column = 1
+        elif pending_column_break and allow_column_break:
+            # A columnBreak is meaningless in a single-column section; spill to
+            # the next page instead so the deferred break is not silently lost.
             attrs.setdefault("columnBreak" if columns > 1 else "pageBreak", "1")
             pending_column_break = False
             flow_y = 0
+            current_flow_column = min(columns, current_flow_column + 1)
         elif pending_column_break:
             pending_column_break = False
-        elif allow_column_break and flow_y > 0 and flow_y + para_height > column_body_height:
+        elif (
+            allow_column_break
+            and not source_layout_flow
+            and flow_y > 0
+            and flow_y + para_height > column_body_height
+        ):
             attrs.setdefault("columnBreak" if columns > 1 else "pageBreak", "1")
             flow_y = 0
+            current_flow_column = min(columns, current_flow_column + 1)
         if attrs.get("pageBreak") == "1" or attrs.get("columnBreak") == "1":
             flow_y = 0
-        para_pr = pr_right if right else pr_center if center else pr_left
+        if target_top_hwp is None and next_source_anchor_top_hwp is not None:
+            target_top_hwp = next_source_anchor_top_hwp
+            next_source_anchor_top_hwp = None
+        previous_margin_hwp = (
+            max(0, int(target_top_hwp) - flow_y)
+            if target_top_hwp is not None
+            else 0
+        )
+        if left_margin_hwp or previous_margin_hwp or line_spacing_percent is not None:
+            alignment = "RIGHT" if right else "CENTER" if center else "LEFT"
+            para_pr = dynamic_para_pr(
+                alignment=alignment,
+                line_spacing_percent=effective_spacing,
+                left_margin_hwp=left_margin_hwp,
+                previous_margin_hwp=previous_margin_hwp,
+            )
+        else:
+            para_pr = pr_right if right else pr_center if center else pr_left
         paragraph = doc.add_paragraph(
             "",
             para_pr_id_ref=para_pr,
@@ -696,8 +1109,10 @@ def write_hwpx(
             native_math=native_math and math_enabled,
             equation_counter=equation_counter,
             min_line_height=style_line_heights.get(style, 1000),
+            compact_math_placeholder=compact_math_placeholder,
         )
-        flow_y += para_height
+        flow_y += previous_margin_hwp + para_height
+        return previous_margin_hwp + para_height
 
     def visual_units(text: str) -> int:
         return _visual_units(text)
@@ -708,7 +1123,7 @@ def write_hwpx(
     def wrap_line_parts(line: str, limit: int) -> list[str]:
         return _wrap_math_line_parts(line, limit)
 
-    def wrapped_choice_lines(choices: list[str], limit: int = 48) -> list[str]:
+    def wrapped_choice_lines(choices: list[str], limit: int = 68) -> list[str]:
         gap = "\u3000\u3000"
         gap_units = visual_units(gap)
         lines: list[str] = []
@@ -754,8 +1169,10 @@ def write_hwpx(
                 **attrs,
             )
             return
-        limits = {"heading": 44, "body": 48, "small": 56}
-        for wrapped in wrap_line_parts(line, limits.get(style, 48)) or [line]:
+        limits = {"heading": 62, "body": 68, "small": 76}
+        # `or [line]` keeps the original line when the wrapper yields nothing,
+        # so content is never silently dropped.
+        for wrapped in wrap_line_parts(line, limits.get(style, 68)) or [line]:
             add_single_para(
                 wrapped,
                 style,
@@ -774,6 +1191,7 @@ def write_hwpx(
         *,
         math_blocks: bool = False,
         block_complex_math: bool = True,
+        preserve_inline_math: bool = False,
         allow_column_break: bool = True,
         **attrs: str,
     ) -> None:
@@ -799,6 +1217,20 @@ def write_hwpx(
                         right=right,
                         math_enabled=False,
                         allow_column_break=allow_column_break,
+                        **attrs,
+                    )
+                    emitted = True
+                    continue
+
+                if preserve_inline_math:
+                    add_single_para(
+                        line,
+                        style,
+                        center=center,
+                        right=right,
+                        math_enabled=True,
+                        allow_column_break=allow_column_break,
+                        compact_math_placeholder=True,
                         **attrs,
                     )
                     emitted = True
@@ -914,8 +1346,8 @@ def write_hwpx(
     ) -> int:
         if not (columns > 1 and not center and not right and style in {"heading", "body", "small"}):
             return estimate_single_para_height(line, style, math_enabled=math_enabled)
-        limits = {"heading": 44, "body": 48, "small": 56}
-        parts = wrap_line_parts(line, limits.get(style, 48))
+        limits = {"heading": 62, "body": 68, "small": 76}
+        parts = wrap_line_parts(line, limits.get(style, 68))
         if not parts:
             return 0
         return sum(estimate_single_para_height(part, style, math_enabled=math_enabled) for part in parts)
@@ -1025,18 +1457,37 @@ def write_hwpx(
         return chunks
 
     def estimate_picture_height(image_path: str) -> int:
-        full_path = storage.DATA_DIR / image_path
-        size = _picture_size(full_path, content_width, picture_max_height)
+        full_path = storage.resolve_data_image_path(image_path)
+        if full_path is None:
+            return 0
+        size = _picture_size(full_path, content_width, math_picture_max_height)
         if size is None:
             return 0
         return size[1] + 600
 
     def reserve_object_height(height: int) -> dict[str, str]:
-        nonlocal flow_y
+        nonlocal flow_y, pending_column_break, pending_page_break, current_flow_column
         attrs: dict[str, str] = {}
-        if height > 0 and flow_y > 0 and flow_y + height > column_body_height:
+        if pending_page_break:
+            attrs["pageBreak"] = "1"
+            pending_page_break = False
+            pending_column_break = False
+            flow_y = 0
+            current_flow_column = 1
+        elif pending_column_break:
+            attrs["columnBreak" if columns > 1 else "pageBreak"] = "1"
+            pending_column_break = False
+            flow_y = 0
+            current_flow_column = min(columns, current_flow_column + 1)
+        elif (
+            not source_layout_flow
+            and height > 0
+            and flow_y > 0
+            and flow_y + height > column_body_height
+        ):
             attrs["columnBreak" if columns > 1 else "pageBreak"] = "1"
             flow_y = 0
+            current_flow_column = min(columns, current_flow_column + 1)
         flow_y += height
         return attrs
 
@@ -1056,13 +1507,16 @@ def write_hwpx(
         )
 
     def choice_grid_columns(choices: list[str]) -> int:
+        if source_layout_flow and len(choices) <= 5:
+            return max(1, len(choices))
         max_units = max((choice_visual_units(choice) for choice in choices), default=0)
         return 2 if max_units > 14 else 3
 
     def estimate_choice_grid_height(choices: list[str]) -> int:
         col_count = choice_grid_columns(choices)
         row_count = max(1, (len(choices) + col_count - 1) // col_count)
-        return row_count * 2200 + 200
+        row_height = 1400 if source_layout_flow else 2200
+        return row_count * row_height + 200
 
     def add_choice_grid(choices: list[str]) -> None:
         if not choices:
@@ -1105,6 +1559,24 @@ def write_hwpx(
                 )
 
     def estimate_problem_height(problem: dict[str, Any], index: int) -> int:
+        layout = problem.get("layout") or {}
+        if isinstance(layout, dict) and (
+            layout.get("continuation") or layout.get("source_text_flow")
+        ):
+            lines = (problem.get("stem") or "").splitlines()
+            line_styles = layout.get("line_styles") or []
+            total = sum(
+                estimate_para_height(
+                    line,
+                    str(line_styles[line_index]) if line_index < len(line_styles) else "body",
+                    math_blocks=native_math and template.key == "kice_math",
+                )
+                for line_index, line in enumerate(lines)
+            )
+            if layout.get("continuation"):
+                total += estimate_para_height("", "body")
+            return total
+
         label = problem.get("number") or str(index)
         subject = problem.get("subject") or ""
         unit = problem.get("unit") or ""
@@ -1226,6 +1698,28 @@ def write_hwpx(
             return stem_lines[:-1], [stem_lines[-1]]
         return stem_lines, []
 
+    def merge_source_math_stem_lines(stem_lines: list[str]) -> list[str]:
+        if not (source_layout_flow and template.key == "kice_math"):
+            return stem_lines
+        merged: list[str] = []
+        for raw_line in stem_lines:
+            line = str(raw_line or "").strip()
+            if not line:
+                continue
+            operator_continuation = bool(re.match(r"^\$\s*[+\-=/]", line))
+            question_continuation = bool(
+                merged
+                and "$" in merged[-1]
+                and re.match(r"^(?:의\s*값|의\s*개수|일\s*때|이면|에서)", line)
+                and len(re.sub(r"\s+", "", merged[-1] + line)) <= 110
+            )
+            if merged and (operator_continuation or question_continuation):
+                separator = "" if operator_continuation else " "
+                merged[-1] = merged[-1].rstrip() + separator + line
+            else:
+                merged.append(line)
+        return merged
+
     def render_stem_lines(
         label: str,
         problem: dict[str, Any],
@@ -1243,34 +1737,55 @@ def write_hwpx(
                 f"{label}. {first_line or problem.get('title') or '문제'}",
                 "heading",
                 math_blocks=native_math and template.key == "kice_math",
+                preserve_inline_math=source_layout_flow and template.key == "kice_math",
             )
             for line in stem_lines[1:]:
-                para(line, "body", math_blocks=native_math and template.key == "kice_math")
+                para(
+                    line,
+                    "body",
+                    math_blocks=native_math and template.key == "kice_math",
+                    preserve_inline_math=source_layout_flow and template.key == "kice_math",
+                )
             if meta:
                 para(f"[{meta}]", "small")
         else:
             heading = f"{label}. {problem.get('title') or '문제'}"
             if meta:
                 heading += f" [{meta}]"
-            para(heading, "heading", math_blocks=native_math and template.key == "kice_math")
+            para(
+                heading,
+                "heading",
+                math_blocks=native_math and template.key == "kice_math",
+                preserve_inline_math=source_layout_flow and template.key == "kice_math",
+            )
             for line in stem_lines or [""]:
-                para(line, "body", math_blocks=native_math and template.key == "kice_math")
+                para(
+                    line,
+                    "body",
+                    math_blocks=native_math and template.key == "kice_math",
+                    preserve_inline_math=source_layout_flow and template.key == "kice_math",
+                )
 
     def apply_columns() -> None:
-        nonlocal flow_y, pending_column_break
+        nonlocal flow_y, pending_column_break, pending_page_break, current_flow_column
         if columns > 1:
             doc.set_columns(
                 columns,
-                same_gap=COLUMN_GAP,
+                same_gap=column_gap,
                 separator_type="SOLID",
                 separator_width="0.12 mm",
                 separator_color="#000000",
             )
-        # set_columns changes the section definition; it does not consume a
-        # page/column break.  Keep the masthead height already accumulated on
-        # the first page so the first problem is not budgeted into space that
-        # the title, metadata, and directions already occupy.
+        # The masthead is emitted before ``set_columns`` and is budgeted
+        # separately from the problem flow: ``column_body_height`` (e.g.
+        # ``KICE_MATH_COLUMN_BODY_HEIGHT``) is calibrated against a column that
+        # starts empty at the first problem.  Carrying the masthead height into
+        # that budget makes the estimator break a column/page one item early on
+        # every template and spills a nearly empty tail page.
+        flow_y = 0
         pending_column_break = False
+        pending_page_break = False
+        current_flow_column = 1
 
     # --- 머리말 ---
     if template.key == "basic":
@@ -1292,20 +1807,98 @@ def write_hwpx(
     apply_columns()
 
     # --- 문항 ---
+    previous_problem: dict[str, Any] | None = None
     for index, problem in enumerate(problems, start=1):
-        estimated_height = estimate_problem_height(problem, index)
-        if (
-            flow_y > 0
-            and estimated_height <= column_body_height
-            and flow_y + estimated_height + PROBLEM_LAYOUT_GUARD > column_body_height
-        ):
-            pending_column_break = True
+        if source_layout_flow:
+            # Source-faithful flow is driven by the recognised page/column of the
+            # original exam, not by the height estimator.
+            if previous_problem is not None:
+                previous_page = int(previous_problem.get("source_page") or 0)
+                current_page = int(problem.get("source_page") or 0)
+                if current_page > 0 and previous_page > 0 and current_page != previous_page:
+                    pending_page_break = True
+                    pending_column_break = False
+                elif layout_model.column_break_before(previous_problem, problem):
+                    current_layout = problem.get("layout") or {}
+                    target_column = (
+                        int(current_layout.get("column_index") or 0)
+                        if isinstance(current_layout, dict)
+                        else 0
+                    )
+                    if target_column <= 0 or current_flow_column < target_column:
+                        pending_column_break = True
+        else:
+            estimated_height = estimate_problem_height(problem, index)
+            # Problems taller than a whole column can never fit; breaking for
+            # them would only leave an empty column behind.  No extra guard band
+            # is added here: ``column_body_height`` is already budgeted below the
+            # physical column so the estimator's optimism is absorbed there.
+            if (
+                flow_y > 0
+                and estimated_height <= column_body_height
+                and flow_y + estimated_height > column_body_height
+            ):
+                pending_column_break = True
         label = problem.get("number") or str(index)
         subject = problem.get("subject") or ""
         unit = problem.get("unit") or ""
         source_marker = unit if SOURCE_MARKER_RE.match(str(unit)) else ""
         meta_unit = "" if source_marker else unit
         meta = " / ".join(p for p in [subject, meta_unit] if p)
+
+        layout = problem.get("layout") or {}
+        if (
+            source_layout_flow
+            and not source_text_document
+            and isinstance(layout, dict)
+        ):
+            next_source_anchor_top_hwp = source_target_top_hwp(layout)
+        if isinstance(layout, dict) and (
+            layout.get("continuation") or layout.get("source_text_flow")
+        ):
+            line_styles = layout.get("line_styles") or []
+            source_lines = layout.get("source_lines") or []
+            stem_lines = (problem.get("stem") or "").splitlines()
+            for line_index, line in enumerate(stem_lines):
+                style = str(line_styles[line_index]) if line_index < len(line_styles) else "body"
+                source_line = (
+                    source_lines[line_index]
+                    if line_index < len(source_lines) and isinstance(source_lines[line_index], dict)
+                    else None
+                )
+                following = (
+                    source_lines[line_index + 1]
+                    if line_index + 1 < len(source_lines)
+                    and isinstance(source_lines[line_index + 1], dict)
+                    else None
+                )
+                target_top = (
+                    source_target_top_hwp(layout, float(source_line.get("top_px") or 0.0))
+                    if source_line is not None
+                    else None
+                )
+                left_margin = (
+                    source_left_margin_hwp(layout, float(source_line.get("left_px") or 0.0))
+                    if source_line is not None
+                    else 0
+                )
+                source_spacing = (
+                    source_line_spacing_percent(layout, source_line, following, style)
+                    if source_line is not None
+                    else None
+                )
+                add_single_para(
+                    line,
+                    style,
+                    math_enabled=False,
+                    target_top_hwp=target_top,
+                    left_margin_hwp=left_margin,
+                    line_spacing_percent=source_spacing,
+                )
+            if layout.get("continuation"):
+                para("")
+            previous_problem = problem
+            continue
 
         # 이미지-only 문항(인식 이미지-폴백): stem/선지가 비고 이미지만 있으면 번호/텍스트
         # heading 없이 이미지만 렌더한다. crop 이미지가 번호·본문·선지를 이미 담고 있어
@@ -1317,13 +1910,14 @@ def write_hwpx(
                     doc,
                     image_path,
                     content_width,
-                    max_height=picture_max_height,
+                    max_height=math_picture_max_height,
                     paragraph_attrs=reserve_object_height(image_height),
                 )
             para("")
+            previous_problem = problem
             continue
 
-        stem_lines = (problem.get("stem") or "").splitlines()
+        stem_lines = merge_source_math_stem_lines((problem.get("stem") or "").splitlines())
         is_passage_block = _is_passage_label(label) and not problem.get("choices")
         table_tail_lines: list[str] = []
         if not is_passage_block:
@@ -1341,18 +1935,34 @@ def write_hwpx(
                 f"{label}. {first_line or problem.get('title') or '문제'}",
                 "heading",
                 math_blocks=native_math and template.key == "kice_math",
+                preserve_inline_math=source_layout_flow and template.key == "kice_math",
             )
             for line in stem_lines[1:]:
-                para(line, "body", math_blocks=native_math and template.key == "kice_math")
+                para(
+                    line,
+                    "body",
+                    math_blocks=native_math and template.key == "kice_math",
+                    preserve_inline_math=source_layout_flow and template.key == "kice_math",
+                )
             if meta:
                 para(f"[{meta}]", "small")
         else:
             heading = f"{label}. {problem.get('title') or '문제'}"
             if meta:
                 heading += f" [{meta}]"
-            para(heading, "heading", math_blocks=native_math and template.key == "kice_math")
+            para(
+                heading,
+                "heading",
+                math_blocks=native_math and template.key == "kice_math",
+                preserve_inline_math=source_layout_flow and template.key == "kice_math",
+            )
             for line in stem_lines or [""]:
-                para(line, "body", math_blocks=native_math and template.key == "kice_math")
+                para(
+                    line,
+                    "body",
+                    math_blocks=native_math and template.key == "kice_math",
+                    preserve_inline_math=source_layout_flow and template.key == "kice_math",
+                )
 
         for rows in problem.get("tables") or []:
             for table_rows in split_table_chunks(rows):
@@ -1371,7 +1981,12 @@ def write_hwpx(
                     paragraph_attrs=reserve_object_height(table_height),
                 )
         for line in table_tail_lines:
-            para(line, "body", math_blocks=native_math and template.key == "kice_math")
+            para(
+                line,
+                "body",
+                math_blocks=native_math and template.key == "kice_math",
+                preserve_inline_math=source_layout_flow and template.key == "kice_math",
+            )
 
         for image_path in problem.get("image_paths") or []:
             image_height = estimate_picture_height(image_path)
@@ -1379,7 +1994,7 @@ def write_hwpx(
                 doc,
                 image_path,
                 content_width,
-                max_height=picture_max_height,
+                max_height=math_picture_max_height,
                 paragraph_attrs=reserve_object_height(image_height),
             )
 
@@ -1421,6 +2036,7 @@ def write_hwpx(
         if template.include_explanations and problem.get("explanation"):
             para(f"해설: {problem['explanation']}", "body")
         para("")
+        previous_problem = problem
 
     # --- 정답지 ---
     if include_answer_sheet:
@@ -1439,9 +2055,7 @@ def write_hwpx(
                     para(line, "body")
                 para("")
 
-    doc.save_to_path(str(path))
-    if native_math:
-        _patch_hwpx_native_math_linesegs(Path(path))
+    _save_hwpx_with_hancom_compat(doc, Path(path), native_math=native_math)
 
 
 def _add_table(
@@ -1523,18 +2137,28 @@ def _add_picture(
     max_height: int | None = None,
     paragraph_attrs: dict[str, str] | None = None,
 ) -> None:
-    full_path = storage.DATA_DIR / image_path
-    if not full_path.exists():
+    full_path = storage.resolve_data_image_path(image_path)
+    if full_path is None:
         return
     size = _picture_size(full_path, content_width, max_height)
     if size is None:
         return
     width, height = size
     fmt = _IMG_FORMATS.get(full_path.suffix.lower(), "png")
-    doc.add_picture(
+    picture = doc.add_picture(
         full_path.read_bytes(),
         fmt,
         width=width,
         height=height,
         **(paragraph_attrs or {}),
     )
+    paragraph_element = picture.element
+    while paragraph_element is not None and _local_name(paragraph_element.tag).lower() != "p":
+        paragraph_element = paragraph_element.getparent()
+    if paragraph_element is not None:
+        _set_paragraph_element_lineseg(
+            paragraph_element,
+            max(1000, height + 300),
+            width=content_width,
+            spacing_ratio=0.0,
+        )

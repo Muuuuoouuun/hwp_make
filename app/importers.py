@@ -20,7 +20,8 @@ from PIL import Image
 from pypdf import PdfReader
 
 from . import storage
-from .math_text import normalize_recognized_math_text
+from .math_text import normalize_recognized_math_layout_text, normalize_recognized_math_text
+from .pdf_math_geometry import repair_problem_math_layout
 
 try:  # OCR은 선택 사항: pytesseract + tesseract 실행 파일이 있을 때만 사용
     import pytesseract
@@ -303,6 +304,7 @@ def _import_pdf_recognized(
 
     for prob in result.problems:
         image_paths: list[str] = []
+        math_geometry_repairs: dict[str, int] = {}
         image_only_fallback = bool(prob.problem_image_png) and (
             not prob.text_reliable or not str(prob.text or "").strip()
         )
@@ -320,6 +322,8 @@ def _import_pdf_recognized(
         if image_only_fallback:
             stem_text, choices = "", []
         else:
+            source_choice_labels = re.findall(r"[①②③④⑤]", str(prob.text or ""))
+            source_choice_order_noncanonical = source_choice_labels[:5] != sorted(source_choice_labels[:5])
             pdf_line_geometries = list(getattr(prob, "line_geometries", []) or [])
             geometry_source = "\n".join(
                 str(line.get("text") or "")
@@ -344,15 +348,40 @@ def _import_pdf_recognized(
             )
             if geometry_split is not None:
                 geometry_stem, geometry_choices = geometry_split
+                geometry_placeholder_count = _placeholder_count_in_fields(geometry_stem, geometry_choices)
+                text_placeholder_count = _placeholder_count_in_fields(stem_text, choices)
+                geometry_nonempty = sum(1 for choice in geometry_choices if str(choice or "").strip())
+                text_nonempty = sum(1 for choice in choices if str(choice or "").strip())
                 if (
-                    len(geometry_choices) >= len(choices)
-                    and _placeholder_count_in_fields(geometry_stem, geometry_choices)
-                    < _placeholder_count_in_fields(stem_text, choices)
+                    (
+                        len(geometry_choices) >= len(choices)
+                        and geometry_placeholder_count < text_placeholder_count
+                    )
+                    or (
+                        len(geometry_choices) > len(choices)
+                        and geometry_placeholder_count <= text_placeholder_count
+                        and geometry_nonempty >= max(text_nonempty, min(4, len(geometry_choices)))
+                    )
+                    or (
+                        len(geometry_choices) == len(choices)
+                        and len(geometry_choices) >= 4
+                        and geometry_placeholder_count <= text_placeholder_count
+                        and geometry_nonempty >= 4
+                        and geometry_choices != choices
+                        and source_choice_order_noncanonical
+                    )
                 ):
                     stem_text, choices = geometry_stem, geometry_choices
+            stem_text = normalize_recognized_math_layout_text(stem_text)
+            choices = [normalize_recognized_math_layout_text(choice) for choice in choices]
             geometry_stem = _repair_pdf_stem_fractions_from_geometry(stem_text, pdf_line_geometries)
             if _placeholder_count_in_fields(geometry_stem, choices) < _placeholder_count_in_fields(stem_text, choices):
                 stem_text = geometry_stem
+            stem_text, choices, math_geometry_repairs = repair_problem_math_layout(
+                stem_text,
+                choices,
+                pdf_line_geometries,
+            )
             shared_passage_text = str(getattr(prob, "shared_passage_text", "") or "").strip()
             if shared_passage_text:
                 stem_text = f"{shared_passage_text}\n{stem_text}".strip()
@@ -378,7 +407,10 @@ def _import_pdf_recognized(
                 "choices": choices,
                 "image_paths": image_paths,
                 "tables": [],
-                "layout": layout_payload(prob),
+                "layout": {
+                    **layout_payload(prob),
+                    "math_geometry_repairs": math_geometry_repairs,
+                },
             }
         )
 
@@ -1320,7 +1352,11 @@ def _repair_pdf_stem_fractions_from_geometry(stem: str, line_geometries: list[di
             if synthetic not in source_lines[line_index]:
                 continue
             fraction_overrides.setdefault(line_index, []).append((synthetic, replacement))
-            consumed.extend(used_parts)
+            # ``synthetic`` already carries the denominator text, and the whole token is
+            # swapped for ``replacement`` later.  Consuming that denominator separately
+            # would strip the digit out of ``\frac{1}{den}`` before the swap runs, so the
+            # override could no longer match and the numerator would be lost.
+            consumed.extend(part for part in used_parts if part != (line_index, denominator))
 
     if not placeholder_repairs and not fraction_overrides:
         return source
@@ -1380,7 +1416,7 @@ def _nearest_pdf_choice_part(
         if x_distance > 90:
             continue
         vertical = label_top - top if above else top - label_top
-        if vertical <= 0 or vertical > 90:
+        if vertical <= 0 or vertical > 60:
             continue
         candidates.append((vertical, x_distance, index, text))
     if not candidates:
@@ -1395,10 +1431,27 @@ def _pdf_choice_from_geometry_body(
     denominator: str | None,
 ) -> str:
     text = str(body or "").strip()
+    sample_label = PDF_CHOICE_FRACTION_LABELS[0]
+
+    def fraction(num: str, den: str, sign: str = "") -> str:
+        return f"{sign}\\frac{{{num.strip()}}}{{{den.strip()}}}"
+
     if not any(char in text for char in PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS):
+        body_denominator = text
+        sign = ""
+        if body_denominator.startswith(("-", "\u2212")):
+            sign = "-"
+            body_denominator = body_denominator[1:].strip()
+        if numerator and body_denominator and _pdf_choice_fraction_part(body_denominator):
+            return fraction(numerator, body_denominator, sign)
+        if numerator and denominator and (not text or text in {"-", "\u2212", "+"}):
+            return fraction(numerator, denominator, "-" if text in {"-", "\u2212"} else "")
+        if numerator and denominator and not text:
+            return fraction(numerator, denominator)
         return _normalize_pdf_choice_body(text)
-    exponent_match = PDF_CHOICE_EXPONENT_FRACTION_RE.match(f"①{text}")
-    fraction_match = PDF_CHOICE_FRACTION_RE.match(f"①{text}")
+
+    exponent_match = PDF_CHOICE_EXPONENT_FRACTION_RE.match(f"{sample_label}{text}")
+    fraction_match = PDF_CHOICE_FRACTION_RE.match(f"{sample_label}{text}")
     if exponent_match and numerator and denominator and _pdf_choice_exponent_base(exponent_match.group("base")):
         return f"{exponent_match.group('base')}^{{\\frac{{{numerator}}}{{{denominator}}}}}"
     if fraction_match:
@@ -1454,7 +1507,17 @@ def _split_stem_and_choices_from_pdf_geometry(
         body = str(entry["body"])
         numerator: str | None = None
         denominator: str | None = None
-        if any(char in body for char in PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS):
+        body_text = body.strip()
+        has_placeholder = any(char in body_text for char in PDF_CHOICE_FRACTION_PLACEHOLDER_CHARS)
+        body_is_sign = body_text in {"-", "\u2212", "+"}
+        body_can_be_denominator = bool(
+            body_text
+            and not body_is_sign
+            and _pdf_choice_fraction_part(body_text.lstrip("-\u2212+"))
+        )
+        needs_above_part = has_placeholder or not body_text or body_is_sign or body_can_be_denominator
+        needs_below_part = has_placeholder or not body_text or body_is_sign
+        if needs_above_part:
             numerator_item = _nearest_pdf_choice_part(
                 indexed_lines,
                 label_index=int(entry["index"]),
@@ -1466,6 +1529,7 @@ def _split_stem_and_choices_from_pdf_geometry(
             if numerator_item is not None:
                 used.add(numerator_item[0])
                 numerator = numerator_item[1]
+        if needs_below_part:
             denominator_item = _nearest_pdf_choice_part(
                 indexed_lines,
                 label_index=int(entry["index"]),
@@ -1645,6 +1709,10 @@ def _sqlite_tables(conn: sqlite3.Connection) -> list[str]:
     return [row[0] for row in rows]
 
 
+def _sqlite_identifier(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
 def import_sqlite(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
     rel_path = save_upload(filename, payload)
     src = storage.DATA_DIR / rel_path
@@ -1656,13 +1724,14 @@ def import_sqlite(filename: str, payload: bytes, metadata: dict[str, Any]) -> di
         conn = sqlite3.connect(temp)
         conn.row_factory = sqlite3.Row
         for table in _sqlite_tables(conn):
-            columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+            table_identifier = _sqlite_identifier(table)
+            columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table_identifier})")]
             lower_columns = {column.lower() for column in columns}
             has_text = any(alias.lower() in lower_columns for alias in FIELD_ALIASES["stem"])
             has_title = any(alias.lower() in lower_columns for alias in FIELD_ALIASES["title"])
             if not has_text and not has_title:
                 continue
-            rows = conn.execute(f"SELECT * FROM {table} LIMIT 1000").fetchall()
+            rows = conn.execute(f"SELECT * FROM {table_identifier} LIMIT 1000").fetchall()
             for row in rows:
                 problem_data = _problem_from_row(dict(row), "sqlite", f"{filename}:{table}")
                 if problem_data:

@@ -19,6 +19,7 @@ This repository does not commit real KICE, school-exam, or private HWP/PDF refer
 | Edited math HWP references | `C:/Users/aaaha/Downloads` | Template, typography, equation, question sync, and HWP import comparison | No |
 | Uploaded PDF references | `data/uploads` | Real PDF math/subject QA, PDF text/geometry extraction, HWPX render regression | No |
 | Uploaded HWP/HWPX references | `data/uploads` | HWP import parser, image extraction, layout metadata, duplicate/order regression | No |
+| Class materials reference bundle | `data/reference_samples/class_materials_20260709` | Local comparison set for PDF layout fidelity, HWP template/typography matching, import smoke tests, and image OCR fallback checks | No |
 | Generated exports/reports | `data/exports`, `data/real_pdf_math_qa` | Local render QA, placeholder reports, review pages | No by default |
 | Synthetic fixtures | `scripts/verify_*.py` inline data or tiny generated temp files | CI-safe regression coverage | Yes |
 
@@ -45,6 +46,12 @@ Additional local form/template references currently visible in Downloads:
 - `2026학년도 6월 고1 국어.hwp`
 - `[고1]_2026년_06월_수학.hwp` — 개인 편집본이므로 문구 오타보다 문항 경계, 수식, 표·그림, 레이아웃 경향 검증에 사용
 
+Additional local form/template references extracted from the class materials bundle:
+
+- `학교 기출 시험지 양식.hwp`
+- `2024-06-고3-모평(평가원)언어와 매체.hwp`
+- `2024-06-고3-모평(평가원)화법과 작문.hwp`
+
 ## Named PDF References
 
 Representative real PDFs currently visible under `data/uploads`:
@@ -69,6 +76,16 @@ Representative real PDFs currently visible under `data/uploads`:
 - `2026-06-고1-통합과학-문제.pdf`
 
 위 PDF는 `https://horaeng.com/460`의 과목별 `문제` 링크만 사용했다. 해설과 영어 듣기대본은 내려받지 않았다. 상세 결과는 `docs/full_subject_qa_2026_06.md`에 기록한다.
+
+Additional local PDF references extracted from the class materials bundle include:
+
+- 2025 and 2026 KICE-style Korean, math, English, science, and Korean-history PDFs.
+- 2025/2026 science subject PDFs for physics, chemistry, life science, and earth science.
+- Middle-school math summary/problem-image samples.
+- Gachon University natural-science essay exam problem/solution PDFs.
+
+The bundle inventory is stored locally at `data/reference_samples/class_materials_20260709/inventory.json`.
+The metadata-only smoke report is stored locally at `data/reference_samples/class_materials_20260709/smoke_report.json`.
 
 ## Current Verification Use
 

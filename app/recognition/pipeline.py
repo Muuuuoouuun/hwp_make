@@ -53,6 +53,7 @@ class RecognizedProblem:
     shared_passage_range: tuple[int, int] | None = None
     shared_passage_page_number: int = 0
     shared_passage_line_geometries: list[dict[str, Any]] = field(default_factory=list)
+    figure_boxes: list[Box] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -161,6 +162,27 @@ def _figures_from_metadata(page: PageModel) -> list[Box]:
     return out
 
 
+def _text_light_figures(page: PageModel, figures: list[Box]) -> list[Box]:
+    """Return image candidates while excluding bordered editable-text blocks."""
+    raw_counts = page.metadata.get("figure_text_char_counts") or []
+    counts: list[int] = []
+    for value in raw_counts:
+        try:
+            counts.append(int(value))
+        except (TypeError, ValueError):
+            counts.append(0)
+    if len(counts) < len(figures):
+        counts.extend([0] * (len(figures) - len(counts)))
+    return [
+        figure
+        for index, figure in enumerate(figures)
+        if figure.area >= _MIN_FIGURE_AREA_PX
+        and figure.width >= 60.0
+        and figure.height >= 60.0
+        and counts[index] < 24
+    ]
+
+
 # 그림 언급 키워드(본문에 있으면 도형/그래프/표가 딸린 문항으로 본다).
 _VISUAL_CUE = ("그림", "그래프", "도형", "좌표평면", "자료", "표는", "곡선", "직선", "삼각형", "사각형", "지도", "회로", "장치")
 # 문항 내부 그림으로 인정할 최소 면적(px²). 150dpi 기준 ~2.5×2.5cm.
@@ -173,6 +195,16 @@ def _box_center_in(box: Box, outer: Box) -> bool:
     return outer.left <= cx <= outer.right and outer.top <= cy <= outer.bottom
 
 
+def _box_intersection_area(a: Box, b: Box) -> float:
+    left = max(a.left, b.left)
+    top = max(a.top, b.top)
+    right = min(a.right, b.right)
+    bottom = min(a.bottom, b.bottom)
+    if right <= left or bottom <= top:
+        return 0.0
+    return (right - left) * (bottom - top)
+
+
 def _problem_has_figure(box: Box | None, figures: list[Box], text: str) -> bool:
     """문항에 도형/그래프/표 등 그림이 딸려 있는지."""
     if box is not None:
@@ -180,6 +212,34 @@ def _problem_has_figure(box: Box | None, figures: list[Box], text: str) -> bool:
             if fig.area >= _MIN_FIGURE_AREA_PX and _box_center_in(fig, box):
                 return True
     return any(cue in text for cue in _VISUAL_CUE)
+
+
+def _page_needs_raster(page: PageModel, *, any_problems: bool) -> bool:
+    """Decide whether a segmented page needs the expensive raster pass."""
+    if not page.problems:
+        return any_problems
+
+    blocks_by_id = {block.block_id: block for block in page.blocks}
+    figures = _figures_from_metadata(page)
+    text_light_figures = _text_light_figures(page, figures)
+    for unit in page.problems:
+        title_block = blocks_by_id.get(unit.metadata.get("title_block_id", ""))
+        box = title_block.bbox if title_block else None
+        if box is None:
+            continue
+        block_ids = list(unit.stem_block_ids) + list(unit.choice_block_ids)
+        raw_text = _problem_text(page, blocks_by_id, block_ids)
+        if _pua_ratio(raw_text) >= _PUA_UNRELIABLE_RATIO:
+            return True
+        if not text_light_figures:
+            continue
+        text = _clean_pua(raw_text)
+        if _problem_has_figure(box, figures, text) and any(
+            _box_intersection_area(figure, box) >= figure.area * 0.6
+            for figure in text_light_figures
+        ):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -339,13 +399,22 @@ def recognize_pdf(
     any_problems = any(page.problems for page in pages)
     pending_passages: list[dict[str, Any]] = []
 
-    page_images: list[Any] = []
+    page_images: dict[int, Any] = {}
     if any_problems:
         try:
-            page_images = cutout.render_page_images(pdf_bytes, dpi=dpi)
+            raster_page_indexes = {
+                page_index
+                for page_index, page in enumerate(pages)
+                if _page_needs_raster(page, any_problems=any_problems)
+            }
+            page_images = cutout.render_selected_page_images(
+                pdf_bytes,
+                raster_page_indexes,
+                dpi=dpi,
+            )
         except Exception as exc:
             result.notices.append(f"페이지 렌더 실패({type(exc).__name__}) — 그림 없이 텍스트만 가져옵니다.")
-            page_images = []
+            page_images = {}
 
     for page_index, page in enumerate(pages):
         marker_count = int(page.metadata.get("marker_count") or 0)
@@ -364,7 +433,7 @@ def recognize_pdf(
                 pending_passages.append(passage)
                 continue
             if any_problems:
-                page_img = page_images[page_index] if page_index < len(page_images) else None
+                page_img = page_images.get(page_index)
                 fallback = _page_fallback_problem(page, page_index + 1, page_img)
                 if fallback is not None:
                     result.problems.append(fallback)
@@ -372,7 +441,8 @@ def recognize_pdf(
 
         blocks_by_id = {b.block_id: b for b in page.blocks}
         figures = _figures_from_metadata(page)
-        page_img = page_images[page_index] if page_index < len(page_images) else None
+        text_light_figures = _text_light_figures(page, figures)
+        page_img = page_images.get(page_index)
 
         for unit in page.problems:
             block_ids = list(unit.stem_block_ids) + list(unit.choice_block_ids)
@@ -391,6 +461,7 @@ def recognize_pdf(
             # 문항 전체 crop은 텍스트가 신뢰 불가인 경우의 보존 장치다. 그림/도표는 가능하면
             # 지역 crop으로 분리하고, 텍스트/좌표는 후속 native equation 복원용으로 유지한다.
             figure_pngs: list[bytes] = []
+            figure_boxes: list[Box] = []
             problem_image_png: bytes | None = None
             if page_img is not None and box is not None:
                 if not text_reliable:
@@ -400,9 +471,16 @@ def recognize_pdf(
                         problem_image_png = None
                 elif has_figure:
                     try:
-                        figure_pngs = cutout.figure_cutouts_png(page_img, box, figures)
+                        figure_boxes = [
+                            figure
+                            for figure in text_light_figures
+                            if _box_intersection_area(figure, box) >= figure.area * 0.6
+                        ]
+                        figure_pngs = cutout.figure_cutouts_png(page_img, box, figure_boxes)
+                        figure_boxes = figure_boxes[: len(figure_pngs)]
                     except Exception:
                         figure_pngs = []
+                        figure_boxes = []
 
             result.problems.append(
                 RecognizedProblem(
@@ -418,6 +496,7 @@ def recognize_pdf(
                     page_width_px=page.width_px,
                     page_height_px=page.height_px,
                     line_geometries=line_geometries,
+                    figure_boxes=figure_boxes,
                 )
             )
 
@@ -457,7 +536,7 @@ def recognize_pdf(
     for passage in unlinked_passages:
         page_number = int(passage["page_number"])
         page_index = page_number - 1
-        page_img = page_images[page_index] if page_index < len(page_images) else None
+        page_img = page_images.get(page_index)
         fallback = _page_fallback_problem(pages[page_index], page_number, page_img)
         if fallback is not None:
             result.problems.append(fallback)

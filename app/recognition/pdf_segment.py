@@ -628,6 +628,37 @@ def _extract_figures(page: Any, scale: float) -> list[Box]:
     return _merge_boxes(figures, max_width=max_w, max_height=max_h)
 
 
+def _figure_text_char_counts(
+    boxes: list[Box],
+    text_lines: list[dict[str, Any]],
+) -> list[int]:
+    """Count text in only the figure boxes large enough for regional crops."""
+    counts = [0] * len(boxes)
+    candidate_indexes = [
+        index
+        for index, box in enumerate(boxes)
+        if box.area >= 22000.0 and box.width >= 60.0 and box.height >= 60.0
+    ]
+    if not candidate_indexes:
+        return counts
+    for line in text_lines:
+        for char in line.get("pdf_line_chars") or []:
+            bbox = char.get("bbox") or []
+            if len(bbox) != 4:
+                continue
+            try:
+                left, top, right, bottom = (float(value) for value in bbox)
+            except (TypeError, ValueError):
+                continue
+            center_x = (left + right) / 2.0
+            center_y = (top + bottom) / 2.0
+            for index in candidate_indexes:
+                box = boxes[index]
+                if box.left <= center_x <= box.right and box.top <= center_y <= box.bottom:
+                    counts[index] += 1
+    return counts
+
+
 # ---------------------------------------------------------------------------
 # 컬럼 클러스터링 (edb `_cluster_pdf_marker_columns` / `_column_bounds...` 포팅)
 # ---------------------------------------------------------------------------
@@ -810,6 +841,10 @@ def _segment_page(
     base_metadata["figure_bboxes_px"] = [
         [fig.left, fig.top, fig.right, fig.bottom] for fig in figures
     ]
+    # Preserve this cheap summary while the raw text dictionary is already in
+    # memory.  The recognition pipeline uses it to distinguish real diagrams
+    # from bordered editable-text blocks without reopening and rescanning PDF.
+    base_metadata["figure_text_char_counts"] = _figure_text_char_counts(figures, text_lines)
 
     raw_markers = _extract_markers(text_lines, height_px=float(height_px))
     figure_filtered_markers, suppressed_figure_markers = _filter_figure_embedded_markers(

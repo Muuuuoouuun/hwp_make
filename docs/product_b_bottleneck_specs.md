@@ -2,6 +2,8 @@
 
 Updated: 2026-07-09
 
+제품 B = **입력 PDF/이미지 → 원본과 같은 레이아웃의 편집형 HWPX**(좌표 기반 PDF 재구성, writer=`app/pdf_layout_writer.py`). 2026-07-09 기준 `/api/pdf-layout-export`는 `write_pdf_layout_hwpx()` 좌표 기반 경로를 기본으로 사용하고, rhwp 렌더 비교로 전체 페이지 `layout_view_sync_ratio` 0.94+를 검증합니다. 저장소가 병렬 편집 중이라 핫파일은 **append-only + 신규 키/컬럼 가드**로 3-way merge 충돌을 최소화합니다.
+
 Product B는 입력 PDF/HWP/HWPX를 평가원/교육청 시험지에 가까운 편집형 HWPX로 복원하는 작업입니다. 이 문서는 예전 병목 조사 메모를 현재 개발 기준으로 정리한 canonical 문서입니다.
 
 핵심 목표는 보기만 비슷한 문서가 아닙니다. 문항 번호가 싱크되고, 수식이 네이티브 수식으로 살아 있고, 폰트/간격이 시험지 기준에 맞으며, 렌더링에서 겹침과 overflow가 없어야 합니다.
@@ -19,7 +21,7 @@ Product B는 입력 PDF/HWP/HWPX를 평가원/교육청 시험지에 가까운 �
 - 네 개 로컬 수학 PDF 샘플 기준으로 선택지 분수 placeholder는 제거되었고, 단순 stem stacked fraction, log-base residue, 확정 split vector residue까지 복원되었습니다.
 - 현재 로컬 baseline은 `stem□` 48개, malformed equation 0, render overflow 0입니다. residual bucket은 fraction 13, root 7, vector/arrow 6, cases/grouping 13, adjacent script/structure 9입니다.
 - 남은 핵심 병목은 mixed fraction, root, super/subscript, cases, bbox 기반 vector base 추론입니다. QA 리포트는 실제 출력 잔여 placeholder와 원본 PDF 구조 힌트를 분리해서 기록합니다.
-- PDF 원본 레이아웃 HWPX는 흐름 기반 writer가 canonical입니다. 절대좌표 글상자 방식은 한컴 호환성과 편집성 문제가 있어 실험 기준으로만 둡니다.
+- PDF 원본 레이아웃 HWPX는 좌표 기반 writer가 canonical입니다. 흐름 기반 writer는 2단 flow 재구성 실험 경로로 유지합니다.
 - 폰트/간격 기본 profile은 평가원형 `신명조/HY신명조/신명 중명조 + Times New Roman + 돋움/중고딕`, 본문 10-11pt, 줄간격 160-170%, 장평 약 95, 자간 약 -5입니다.
 
 ## 현재 Canonical 기준
@@ -27,7 +29,7 @@ Product B는 입력 PDF/HWP/HWPX를 평가원/교육청 시험지에 가까운 �
 ### 1. 입력 경로는 두 개로 분리한다
 
 - 문제은행 편집 경로: `/api/import` -> recognition/storage -> `hwpx_writer_v2`
-- 원본 레이아웃 복원 경로: `/api/pdf-layout-export` -> `pdf_layout_writer.write_pdf_flow_hwpx`
+- 원본 레이아웃 복원 경로: `/api/pdf-layout-export` -> `pdf_layout_writer.write_pdf_layout_hwpx`
 
 두 경로를 한 성공 기준으로 섞지 않습니다. 문제은행 경로는 문항 단위 재구성이 목표이고, PDF 원본 레이아웃 경로는 원본 시험지 흐름과 배치를 유지하는 것이 목표입니다.
 
@@ -48,7 +50,9 @@ Born-digital 평가원/학평 PDF는 텍스트, PUA, 글리프 좌표가 남아 
 
 ### 5. 렌더 결과가 최종 판정이다
 
-XML 유효성만으로는 충분하지 않습니다. 합격 기준은 rhwp 렌더 또는 HWP open probe에서 overflow 0, column crossing 0, 문항/선지/수식 겹침 없음, 문항 번호 누락/중복 없음입니다.
+XML 유효성만으로는 충분하지 않습니다. 합격 기준은 rhwp 렌더 또는 HWP open probe에서 전체 페이지 레이아웃 sync 0.94+, overflow 0, column crossing 0, 문항/선지/수식 겹침 없음, 문항 번호 누락/중복 없음입니다. `visual_sync_ratio`는 content-crop 글자 렌더 차이 진단으로, `whole_page_visual_sync_ratio`는 원본 전체 페이지 렌더 차이, `layout_view_sync_ratio`는 좌우 여백/간격/크기를 포함한 전체 페이지 판정으로 봅니다.
+
+`/api/pdf-layout-export`의 객관 품질 점수 목표는 `quality.objective_score >= 95`입니다. 구성 요소는 `layout` 30%, `font` 20%, `math` 20%, `balance` 10%, `paging` 10%, `editable_text` 5%, `open_safety` 5%이며, `open_safety`는 package/schema/reopen 기반 `validate_editor_open_safety()` 통과를 뜻합니다. 전체 페이지 이미지 fallback은 이 점수에서 감점되므로 보기만 비슷한 출력은 통과 기준이 아닙니다.
 
 ### 6. 평가원/교육청 타이포그래피를 기준값으로 둔다
 
@@ -91,6 +95,18 @@ XML 유효성만으로는 충분하지 않습니다. 합격 기준은 rhwp 렌�
 - `pdf_segment` rawdict 기반 `pdf_line_chars`, `pdf_line_spans` 보존
 - PDF layout export API 검증과 typography XML 검증
 
+## 2026-07-09 좌표 기반 적용 메모
+
+**현재 결론:** PDF/HWP 입력은 목적이 다른 두 경로를 명확히 분리해서 병합합니다. 문제은행 편집용은 기존 `/api/import` -> recognition/storage -> `hwpx_writer_v2` 경로를 유지하고, 실물 시험지 싱크용은 `/api/pdf-layout-export` -> `pdf_layout_writer.write_pdf_layout_hwpx()` 경로로 바로 HWPX를 만듭니다. 두 경로를 한 버튼에 섞으면 "문항 DB 편집"과 "원본 시험지 복원"의 성공 기준이 달라져 회귀 원인을 추적하기 어렵습니다.
+
+- **문제 인식/DB 입력 경로:** PDF를 문항 단위로 분리해 stem/choice/image/layout metadata를 저장합니다. 이후 사용자가 문항을 골라 새 시험지를 재구성합니다.
+- **원본 레이아웃 HWPX 경로:** PDF 한 부를 그대로 편집 가능한 HWPX로 재생성합니다. 텍스트는 문단/표 셀로 넣고, 전체 페이지 이미지 폴백은 금지합니다. 표·도표·그림처럼 구조화가 위험한 일부 영역만 지역 이미지로 보존합니다.
+- **HWP 템플릿 캘리브레이션:** `scripts/analyze_hwp_templates.py`로 실제 `.hwp` 샘플을 HWPX로 export 후 header/section 스타일을 분석합니다. 2026-07-08 실행 결과, 평가원 양식은 본문 `신명 중명조`/영어 `Times New Roman`, 장평 95, 자간 -5 계열이 반복 확인됐습니다. 교육청 국어 샘플은 `한컴바탕`, 장평 95, 자간 -3 계열이라 평가원 양식과 별도 profile로 다룹니다.
+- **앱 진입점:** 파일 업로드 영역에서 `가져와서 편집`은 DB 입력, `PDF 원본 레이아웃 HWPX`는 직접 HWPX 복원으로 동작합니다.
+- **2026-07-09 세부 적용:** `/api/pdf-layout-export` 기본값은 좌표 기반 `pdf_layout_writer.write_pdf_layout_hwpx()`입니다. 텍스트는 편집 가능한 글상자로 보존하고, 선/표/박스/이미지는 좌표에 맞춰 배치합니다. 전체 변환 페이지를 rhwp로 렌더해 `layout_view_sync_ratio` 목표 0.94, 원본 전체 페이지 `whole_page_visual_sync_ratio`, content-crop `visual_sync_ratio`, 전경 겹침, 페이지 수, 비율 불일치, 일부 페이지만 비교한 truncation을 `layout_report.json`에 기록합니다. 기존 `write_pdf_flow_hwpx()`는 2단 flow 재구성 실험 경로로 유지합니다.
+- **PDF 수식 좌표 보존:** `pdf_segment.segment_pdf()`는 PyMuPDF `rawdict`를 우선 사용해 각 라인의 span/char bbox를 `ContentBlock.metadata.pdf_line_chars` 및 `pdf_line_spans`에 보존합니다. 지금은 회귀와 진단 기반이고, 다음 단계에서 분수선/루트/첨자 재조립에 이 좌표를 사용합니다.
+- **현재 수식 복원 룰:** HyhwpEQ `BC-□⃗`류 trailing vector accent는 `\vec{BC}`로 복원합니다. 2025 수능 1번처럼 `√ / 1 / 3□5×25□3`으로 갈라진 세제곱근+분수지수 구조는 `\sqrt[3]{5}×25^{\frac{1}{3}}` 형태로 재조립합니다.
+
 ## 삭제 또는 폐기한 옛 기준
 
 1. `PDF import = pypdf 텍스트 추출` 기준은 폐기합니다.
@@ -102,8 +118,8 @@ XML 유효성만으로는 충분하지 않습니다. 합격 기준은 rhwp 렌�
 3. `full-page raster fallback이면 충분` 기준은 폐기합니다.
    특히 원본 레이아웃 HWPX 경로에서는 편집 가능한 텍스트/수식이 핵심입니다.
 
-4. `절대좌표 글상자 writer를 canonical로 부활`시키는 기준은 폐기합니다.
-   한컴 호환성과 편집성을 위해 흐름 기반 writer가 canonical입니다. 절대좌표 접근은 별도 실험으로만 남깁니다.
+4. `흐름 기반 writer만 canonical`이라는 기준은 폐기합니다.
+   현재 `/api/pdf-layout-export` 기본 경로는 좌표 기반 writer이며, 흐름 기반 writer는 2단 flow 재구성 실험으로 유지합니다.
 
 5. `GUI에서 열리면 통과` 기준은 폐기합니다.
    GUI open은 보조이고, 수식/레이아웃/겹침/overflow 검증이 우선입니다.
