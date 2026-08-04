@@ -36,9 +36,26 @@ _PLACEHOLDER_CHARS = "□▢"
 _BARE_BAR_LINE_RE = re.compile(rf"^[{_PLACEHOLDER_CHARS}()\[\]{{}}|\s]+$")
 
 
+_RESTORED_STRUCTURE_RE = re.compile(r"\\(?:frac|sqrt|vec|overline|lim|int|sum|prod)\b")
+
+
 def _placeholder_count(value: str) -> int:
     text = str(value or "")
     return sum(text.count(char) for char in _PLACEHOLDER_CHARS)
+
+
+def _drops_restored_structure(target: str, replacement: str) -> bool:
+    """``replacement`` would delete a structure ``target`` already carries.
+
+    Both fallbacks below rewrite a line they could *not* map back to geometry,
+    so they have no evidence that the line they overwrite belongs to the row
+    being rebuilt.  A rebuild may never lose an already-restored formula — the
+    same invariant that stops a rebuild from raising a placeholder count.
+    """
+    return bool(
+        set(_RESTORED_STRUCTURE_RE.findall(str(target or "")))
+        - set(_RESTORED_STRUCTURE_RE.findall(str(replacement or "")))
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +124,58 @@ def _glyphs(line_geometries: list[dict[str, Any]]) -> list[Glyph]:
     return result
 
 
+def line_geometry_glyphs(line_geometries: list[dict[str, Any]]) -> list[Glyph]:
+    """Public view of the per-character geometry of one recognized problem."""
+    return _glyphs(line_geometries)
+
+
+def _mark_glyph_near_bar(
+    glyphs: Iterable[Glyph],
+    *,
+    bar_rect: tuple[float, float, float, float],
+    marks: str,
+    left_margin: float = 36.0,
+    right_margin: float | None = None,
+    vertical_margin: float = 28.0,
+) -> Glyph | None:
+    """Return the mark glyph (``√``/``⃗``) that sits against ``bar_rect``'s left edge.
+
+    Real exam PDFs draw a radical vinculum, a vector accent, and a fraction bar
+    with the *same* private-use glyph, so the only way to tell them apart is the
+    mark that abuts the bar.  ``right_margin`` defaults to the bar's own right
+    edge (the wide window ``app.importers`` has always used for short accent
+    bars); nested-bar analysis passes a tight window instead so a wide outer
+    fraction bar cannot claim a radical sign belonging to a bar nested inside it.
+    """
+    left, top, right, bottom = bar_rect
+    bar_y = (top + bottom) / 2.0
+    upper = right + 8.0 if right_margin is None else left + right_margin
+    lower = left - left_margin
+    best: Glyph | None = None
+    for glyph in glyphs:
+        if glyph.width <= 0 or glyph.height <= 0:
+            continue
+        if not any(mark in glyph.text for mark in marks):
+            continue
+        if not lower <= glyph.right <= upper:
+            continue
+        if abs(glyph.center_y - bar_y) > vertical_margin:
+            continue
+        if best is None or abs(glyph.right - left) < abs(best.right - left):
+            best = glyph
+    return best
+
+
+def glyphs_near_mark(
+    glyphs: Iterable[Glyph],
+    *,
+    bar_rect: tuple[float, float, float, float],
+    marks: str,
+) -> bool:
+    """``True`` when a ``marks`` glyph abuts the left edge of ``bar_rect``."""
+    return _mark_glyph_near_bar(glyphs, bar_rect=bar_rect, marks=marks) is not None
+
+
 def _line_glyphs(glyphs: Iterable[Glyph], line_index: int) -> list[Glyph]:
     return sorted((glyph for glyph in glyphs if glyph.line_index == line_index), key=lambda glyph: glyph.left)
 
@@ -134,6 +203,101 @@ def _baseline(glyphs: list[Glyph]) -> tuple[float, float]:
     ]
     center = _densest_center(centers, max(2.5, baseline_size * 0.55))
     return baseline_size, center
+
+
+def _reading_order_rows(glyphs: list[Glyph], line_count: int) -> list[list[int]]:
+    """Group text-line indices whose glyph baselines coincide into visual rows."""
+    metrics: dict[int, tuple[float, float, float]] = {}
+    for line_index in range(line_count):
+        line_glyphs = _line_glyphs(glyphs, line_index)
+        if not line_glyphs:
+            continue
+        size, center = _baseline(line_glyphs)
+        metrics[line_index] = (size, center, min(glyph.left for glyph in line_glyphs))
+    rows: list[list[int]] = []
+    for line_index in sorted(metrics, key=lambda index: (metrics[index][1], metrics[index][2])):
+        size, center, _left = metrics[line_index]
+        if rows:
+            row_center = statistics.median(metrics[index][1] for index in rows[-1])
+            row_size = statistics.median(metrics[index][0] for index in rows[-1])
+            if abs(center - row_center) <= max(3.0, row_size * 0.5):
+                rows[-1].append(line_index)
+                continue
+        rows.append([line_index])
+    return [sorted(row) for row in rows if len(row) > 1]
+
+
+def line_geometry_source_text(line_geometries: list[dict[str, Any]]) -> str:
+    """Problem text rebuilt from the text-line order of ``line_geometries``.
+
+    The per-line ``text`` values are normalized one line at a time upstream, so
+    a structure that spans two lines (a vector accent and its base name) is only
+    resolved when the joined text is normalized again as a whole.
+    """
+    return math_text.normalize_recognized_math_text(
+        "\n".join(
+            str(line.get("text") or "")
+            for line in line_geometries
+            if isinstance(line, dict) and str(line.get("text") or "").strip()
+        )
+    )
+
+
+def reading_order_line_geometries(
+    line_geometries: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    """Re-linearize PDF text-line fragments that share one visual baseline.
+
+    A HyhwpEQ equation row reaches us as several PDF text lines, and the content
+    stream can hand them over out of reading order (``x=1107`` before ``x=934``).
+    Every linear repair downstream then binds a fragment to the wrong neighbour —
+    most visibly the vector-accent rule, which takes the accent's base name from
+    the run that textually follows it.
+
+    Lines whose glyph baselines coincide are therefore re-sorted by their
+    leftmost glyph and re-emitted contiguously.  ``None`` is returned when the
+    stream already reads left to right, and also when the re-order fails to
+    strictly lower the placeholder count of the normalized text — a re-order
+    that proves nothing is not evidence.
+    """
+    lines = [line for line in line_geometries if isinstance(line, dict)]
+    if len(lines) != len(line_geometries) or len(lines) < 2:
+        return None
+    glyphs = _glyphs(lines)
+    rows = _reading_order_rows(glyphs, len(lines))
+    if not rows:
+        return None
+
+    order = list(range(len(lines)))
+    left_of: dict[int, float] = {}
+    for row in rows:
+        for line_index in row:
+            left_of[line_index] = min(glyph.left for glyph in _line_glyphs(glyphs, line_index))
+
+    changed = False
+    for row in sorted(rows, key=min):
+        members = set(row)
+        by_left = sorted(members, key=lambda index: left_of[index])
+        if [index for index in order if index in members] == by_left:
+            continue
+        positions = [position for position, index in enumerate(order) if index in members]
+        start, end = positions[0], positions[-1]
+        span = order[start : end + 1]
+        ordered_members = sorted(
+            (index for index in span if index in members), key=lambda index: left_of[index]
+        )
+        others = [index for index in span if index not in members]
+        order[start : end + 1] = [*ordered_members, *others]
+        changed = True
+    if not changed:
+        return None
+
+    reordered = [lines[index] for index in order]
+    if _placeholder_count(line_geometry_source_text(reordered)) >= _placeholder_count(
+        line_geometry_source_text(lines)
+    ):
+        return None
+    return reordered
 
 
 def _append_script(output: list[str], marker: str, text: str) -> None:
@@ -581,6 +745,334 @@ def _resolve_fraction_bars(
     return working, donors, resolved
 
 
+_ACCENT_ARROW_MARKS = "⃗→←"
+
+
+def classify_placeholder_glyph(glyphs: list[Glyph], bar: Glyph) -> str:
+    """Name the structure an unresolved bar glyph belongs to, from geometry alone.
+
+    Equation fonts draw a radical vinculum, a vector accent, an overline, a
+    fraction bar, and an empty answer box with the *same* private-use glyph, so
+    a residual can only be triaged by what surrounds that one glyph: the mark
+    abutting it and the operands stacked inside its own span.  Reading the
+    surrounding LaTeX instead mislabels a nested root as a vector merely because
+    an accent sits elsewhere on the same line.
+    """
+    rect = (bar.left, bar.top, bar.right, bar.bottom)
+    edge = max(4.0, bar.height * 0.12)
+    if (
+        _mark_glyph_near_bar(
+            glyphs,
+            bar_rect=rect,
+            marks="√",
+            left_margin=edge,
+            right_margin=edge,
+            vertical_margin=max(6.0, bar.height / 2.0),
+        )
+        is not None
+    ):
+        return "root"
+    tail = max(4.0, bar.width * 0.25)
+    for glyph in glyphs:
+        if glyph is bar or not any(mark in glyph.text for mark in _ACCENT_ARROW_MARKS):
+            continue
+        if abs(glyph.right - bar.right) <= tail and bar.top <= glyph.center_y <= bar.bottom:
+            return "vector_or_arrow"
+    numerator, denominator = _fraction_parts(glyphs, bar)
+    if numerator and denominator:
+        return "fraction"
+    if denominator:
+        return "overline_or_accent"
+    if numerator:
+        return "underline_or_script"
+    if bar.height > 0 and 0.6 <= bar.width / bar.height <= 1.7:
+        return "answer_box"
+    return "unknown"
+
+
+def _bar_area(bar: Glyph) -> float:
+    return max(0.0, bar.width) * max(0.0, bar.height)
+
+
+def _bar_contains(outer: Glyph, inner: Glyph, pad: float = 1.5) -> bool:
+    """``inner``'s rectangle lies wholly inside the strictly larger ``outer``."""
+    if outer is inner or _bar_area(outer) <= _bar_area(inner):
+        return False
+    return (
+        outer.left - pad <= inner.left
+        and inner.right <= outer.right + pad
+        and outer.top - pad <= inner.top
+        and inner.bottom <= outer.bottom + pad
+    )
+
+
+def _bar_children(bars: list[Glyph], bar: Glyph) -> list[Glyph]:
+    """The bars ``bar`` contains directly (a bar nested two levels down is not)."""
+    inside = [candidate for candidate in bars if _bar_contains(bar, candidate)]
+    return [
+        candidate
+        for candidate in inside
+        if not any(_bar_contains(other, candidate) for other in inside)
+    ]
+
+
+def _synthetic_glyph(text: str, parts: list[Glyph], bar: Glyph) -> Glyph:
+    """A resolved structure re-entered into the glyph stream at its ink extent.
+
+    The rule the bar draws spans the whole structure horizontally, so the bar
+    supplies the left/right edges.  Vertically its rectangle is the equation
+    font's full em box — several times taller than the rule — so the operands
+    alone decide where an enclosing structure sees this token stacked.
+    """
+    return Glyph(
+        text=text,
+        left=min(bar.left, *(part.left for part in parts)),
+        top=min(part.top for part in parts),
+        right=max(bar.right, *(part.right for part in parts)),
+        bottom=max(part.bottom for part in parts),
+        size=_baseline(parts)[0],
+        line_index=bar.line_index,
+    )
+
+
+def _bar_row_parts(candidates: list[Glyph]) -> tuple[list[Glyph], list[Glyph]] | None:
+    """Split a bar's operands into the two stacked bands it separates.
+
+    The bar rectangle's centre is not the drawn rule, so the split is taken at
+    the widest vertical gap between the operands themselves and is only accepted
+    when the two bands are a full glyph height apart and do not overlap at all.
+    """
+    if len(candidates) < 2:
+        return None
+    ordered = sorted(candidates, key=lambda glyph: glyph.center_y)
+    heights = [glyph.height for glyph in ordered if glyph.height > 0]
+    reference = statistics.median(heights) if heights else 0.0
+    split = 0
+    widest = 0.0
+    for index in range(1, len(ordered)):
+        gap = ordered[index].center_y - ordered[index - 1].center_y
+        if gap > widest:
+            widest = gap
+            split = index
+    if not split or widest < max(6.0, reference * 0.8):
+        return None
+    upper = ordered[:split]
+    lower = ordered[split:]
+    if max(glyph.bottom for glyph in upper) > min(glyph.top for glyph in lower):
+        return None
+    return upper, lower
+
+
+def _resolve_bar_structure(
+    glyphs: list[Glyph],
+    bars: list[Glyph],
+    bar: Glyph,
+    consumed_ids: set[int],
+) -> Glyph | None:
+    """Rebuild one bar and everything nested inside it, innermost first.
+
+    Evidence rules: a bar whose left edge is abutted by ``√`` is a radical
+    vinculum and takes the operands below it as its radicand; every other bar is
+    a fraction and must show two vertically disjoint operand bands.  Anything
+    else — no operands, a leftover placeholder — aborts the whole structure so
+    the residual square survives instead of being guessed away.
+    """
+    children = _bar_children(bars, bar)
+    parts: list[Glyph] = []
+    for child in children:
+        resolved = _resolve_bar_structure(glyphs, bars, child, consumed_ids)
+        if resolved is None:
+            return None
+        parts.append(resolved)
+    consumed_ids.add(id(bar))
+
+    candidates = [
+        glyph
+        for glyph in glyphs
+        if id(glyph) not in consumed_ids
+        and glyph.text not in _PLACEHOLDER_CHARS
+        and _math_glyph(glyph)
+        and bar.left - 1.5 <= glyph.center_x <= bar.right + 1.5
+        and abs(glyph.center_y - bar.center_y) <= max(24.0, bar.height * 0.72)
+    ]
+    edge = max(4.0, bar.height * 0.12)
+    sign = _mark_glyph_near_bar(
+        candidates,
+        bar_rect=(bar.left, bar.top, bar.right, bar.bottom),
+        marks="√",
+        left_margin=edge,
+        right_margin=edge,
+        vertical_margin=max(6.0, bar.height / 2.0),
+    )
+    if sign is None:
+        sign = _mark_glyph_near_bar(
+            glyphs,
+            bar_rect=(bar.left, bar.top, bar.right, bar.bottom),
+            marks="√",
+            left_margin=edge,
+            right_margin=edge,
+            vertical_margin=max(6.0, bar.height / 2.0),
+        )
+    candidates = [glyph for glyph in candidates if glyph is not sign]
+    candidates.extend(
+        part
+        for part in parts
+        if bar.left - 1.5 <= part.center_x <= bar.right + 1.5
+    )
+    if len(candidates) < len(parts):
+        return None
+
+    if sign is not None:
+        radicand = [glyph for glyph in candidates if glyph.center_y > bar.center_y]
+        text = _inline_expression(radicand)
+        if not text or _placeholder_count(text):
+            return None
+        consumed_ids.update(id(glyph) for glyph in radicand)
+        consumed_ids.add(id(sign))
+        return _synthetic_glyph(rf"\sqrt{{{text}}}", [sign, *radicand], bar)
+
+    split = _bar_row_parts(candidates)
+    if split is None:
+        return None
+    upper, lower = split
+    numerator = _inline_expression(upper)
+    denominator = _inline_expression(lower)
+    if not numerator or not denominator:
+        return None
+    if _placeholder_count(numerator) or _placeholder_count(denominator):
+        return None
+    consumed_ids.update(id(glyph) for glyph in (*upper, *lower))
+    return _synthetic_glyph(rf"\frac{{{numerator}}}{{{denominator}}}", [*upper, *lower], bar)
+
+
+def _limit_head_for_script(
+    lines: list[str],
+    mapping: dict[int, int],
+    glyphs: list[Glyph],
+    bar: Glyph,
+    script_glyphs: list[Glyph],
+    insert_at: int,
+) -> tuple[str, int] | None:
+    """``\\lim_{..}`` head when the run left of a bar is the subscript of a ``lim``.
+
+    The bar's own text line often carries nothing but the limit variable, which
+    the equation font stacks under a ``lim`` that ends the previous line.  The
+    run only becomes a subscript when it starts at the ``lim`` token, ends before
+    the bar, and sits below the ``lim`` baseline.
+    """
+    if not script_glyphs or insert_at <= 0 or insert_at > len(lines):
+        return None
+    head_index = insert_at - 1
+    if not re.search(r"(?:^|[^A-Za-z])lim$", lines[head_index].rstrip()):
+        return None
+    head_geometry = [index for index, target in mapping.items() if target == head_index]
+    if len(head_geometry) != 1:
+        return None
+    lim_glyphs = [
+        glyph for glyph in _line_glyphs(glyphs, head_geometry[0]) if glyph.text in {"l", "i", "m"}
+    ][-3:]
+    if [glyph.text for glyph in lim_glyphs] != ["l", "i", "m"]:
+        return None
+    lim_left = min(glyph.left for glyph in lim_glyphs)
+    lim_center = statistics.median(glyph.center_y for glyph in lim_glyphs)
+    if any(
+        glyph.left < lim_left - 10.0
+        or glyph.right > bar.left + 2.0
+        or glyph.center_y <= lim_center + 2.0
+        for glyph in script_glyphs
+    ):
+        return None
+    script = _latex_limit_script(_inline_expression(script_glyphs))
+    if not script:
+        return None
+    return rf"\lim_{{{script}}}", head_index
+
+
+def _apply_nested_structure(
+    stem: str,
+    line_geometries: list[dict[str, Any]],
+    glyphs: list[Glyph],
+    bar: Glyph,
+    structure: Glyph,
+    consumed_ids: set[int],
+) -> str | None:
+    mapping = _stem_geometry_map(stem, line_geometries)
+    involved = {glyph.line_index for glyph in glyphs if id(glyph) in consumed_ids}
+    involved.add(bar.line_index)
+    if not involved <= set(mapping):
+        return None
+    targets = sorted({mapping[index] for index in involved})
+    if len(targets) != len(involved):
+        return None
+    leftover = [
+        glyph for glyph in glyphs if glyph.line_index in involved and id(glyph) not in consumed_ids
+    ]
+    before = [glyph for glyph in leftover if glyph.right <= bar.left]
+    after = [glyph for glyph in leftover if glyph.left >= bar.right]
+    if len(before) + len(after) != len(leftover):
+        # A glyph the structure did not take sits inside its span; rewriting the
+        # lines would drop it.
+        return None
+
+    lines = str(stem or "").splitlines()
+    insert_at = targets[0]
+    prefix = _inline_expression(before)
+    suffix = _inline_expression(after)
+    limit = _limit_head_for_script(lines, mapping, glyphs, bar, before, insert_at)
+    removals = set(targets)
+    if limit is not None:
+        head, head_index = limit
+        replacement = f"${head}{structure.text}${suffix}".rstrip()
+        stripped = re.sub(r"\s*lim$", "", lines[head_index].rstrip()).rstrip()
+        lines[head_index] = f"{stripped} {replacement}".strip()
+    else:
+        lines[insert_at] = f"{prefix}${structure.text}${suffix}".strip()
+        removals.discard(insert_at)
+    return "\n".join(
+        line for index, line in enumerate(lines) if index not in removals
+    ).strip()
+
+
+def _repair_nested_bar_structures(
+    stem: str,
+    line_geometries: list[dict[str, Any]],
+    glyphs: list[Glyph],
+) -> tuple[str, int]:
+    """Rebuild a bar that geometrically contains other bars.
+
+    A fraction whose denominator is a difference of two square roots draws three
+    overlapping horizontal rules with the same private-use glyph.  Treated
+    independently they scramble, so the bars are ordered by area: a bar that
+    fully contains another is the outer structure and the contained bars are
+    resolved first.
+    """
+    bars = [glyph for glyph in glyphs if glyph.text in _PLACEHOLDER_CHARS]
+    if len(bars) < 2:
+        return stem, 0
+    repaired = stem
+    count = 0
+    for bar in sorted(bars, key=_bar_area, reverse=True):
+        if not _bar_children(bars, bar):
+            continue
+        if any(_bar_contains(other, bar) for other in bars):
+            continue
+        consumed_ids: set[int] = set()
+        structure = _resolve_bar_structure(glyphs, bars, bar, consumed_ids)
+        if structure is None or _placeholder_count(structure.text):
+            continue
+        candidate = _apply_nested_structure(
+            repaired, line_geometries, glyphs, bar, structure, consumed_ids
+        )
+        # The bar itself is often absent from ``line["text"]``, so the rebuild
+        # need not lower a count that was already zero — but it may never raise
+        # one either.
+        if candidate is None or _placeholder_count(candidate) > _placeholder_count(repaired):
+            continue
+        repaired = candidate
+        count += 1
+    return repaired, count
+
+
 def _latex_limit_script(text: str) -> str:
     return text.replace("→", r"\to ").replace("∞", r"\infty ").strip()
 
@@ -989,6 +1481,8 @@ def _repair_standalone_fractions(
             if formula_index is None:
                 continue
             lines = repaired.splitlines()
+            if _drops_restored_structure(lines[formula_index], replacement):
+                continue
             lines[formula_index] = replacement
             repaired = "\n".join(lines).strip()
         count += 1
@@ -1088,6 +1582,10 @@ def _repair_multi_fraction_rows(
             and (r"\frac" in line or "□" in line)
         ]
         if not fallback_targets:
+            continue
+        if _drops_restored_structure(
+            "\n".join(lines[index] for index in fallback_targets), expression
+        ):
             continue
         insert_at = fallback_targets[0]
         target_set = set(fallback_targets)
@@ -1515,10 +2013,11 @@ def repair_problem_math_layout(
     repaired, integral_count = _repair_integrals(repaired, geometry, glyphs)
     integral_count += integral_row_count
     repaired, limit_count = _repair_limits(repaired, geometry, glyphs)
+    repaired, nested_bar_count = _repair_nested_bar_structures(repaired, geometry, glyphs)
     repaired, repaired_choices, radical_count = _repair_radicals(repaired, choices, geometry, glyphs)
     repaired, multi_fraction_count = _repair_multi_fraction_rows(repaired, geometry, glyphs)
     repaired, bar_line_fraction_count = _repair_placeholder_only_fraction_lines(repaired, geometry, glyphs)
-    multi_fraction_count += bar_line_fraction_count
+    multi_fraction_count += bar_line_fraction_count + nested_bar_count
     suspicious_flat_fraction = bool(
         re.search(r"[A-Za-z]\d{2,}[A-Za-z]|[A-Za-z]\d+[A-Za-z]{2,}", repaired)
     )

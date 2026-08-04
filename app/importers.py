@@ -21,7 +21,13 @@ from pypdf import PdfReader
 
 from . import storage
 from .math_text import normalize_recognized_math_layout_text, normalize_recognized_math_text
-from .pdf_math_geometry import repair_problem_math_layout
+from .pdf_math_geometry import (
+    glyphs_near_mark,
+    line_geometry_glyphs,
+    line_geometry_source_text,
+    reading_order_line_geometries,
+    repair_problem_math_layout,
+)
 
 try:  # OCR은 선택 사항: pytesseract + tesseract 실행 파일이 있을 때만 사용
     import pytesseract
@@ -341,6 +347,19 @@ def _import_pdf_recognized(
                 < _placeholder_count_in_fields(source_text, [])
             ):
                 source_text = repaired_geometry_source
+            # The PDF content stream can emit the fragments of one equation row
+            # out of reading order.  Re-linearizing them by x only wins when it
+            # actually resolves structures the stream order hid, and the
+            # re-ordered geometry then has to travel with the re-ordered text so
+            # every later geometry lookup still matches line for line.
+            reading_order_geometries = reading_order_line_geometries(pdf_line_geometries)
+            if reading_order_geometries is not None:
+                reading_order_source = line_geometry_source_text(reading_order_geometries)
+                if _placeholder_count_in_fields(
+                    reading_order_source, []
+                ) < _placeholder_count_in_fields(source_text, []):
+                    source_text = reading_order_source
+                    pdf_line_geometries = reading_order_geometries
             stem_text, choices = _split_stem_and_choices(source_text)
             geometry_split = _split_stem_and_choices_from_pdf_geometry(
                 source_text,
@@ -1233,23 +1252,16 @@ def _pdf_geometry_near_mark(
     bar_rect: tuple[float, float, float, float],
     marks: str,
 ) -> bool:
-    left, top, right, bottom = bar_rect
-    bar_y = (top + bottom) / 2.0
-    for line in line_geometries:
-        if not isinstance(line, dict):
-            continue
-        for char in line.get("pdf_line_chars") or []:
-            if not isinstance(char, dict):
-                continue
-            normalized = normalize_recognized_math_text(str(char.get("c") or ""))
-            rect = _pdf_geometry_char_rect(char)
-            if not any(mark in normalized for mark in marks) or rect is None:
-                continue
-            char_left, char_top, char_right, char_bottom = rect
-            center_y = (char_top + char_bottom) / 2.0
-            if left - 36.0 <= char_right <= right + 8.0 and abs(center_y - bar_y) <= 28.0:
-                return True
-    return False
+    """Radical-vinculum vs vector-accent discrimination for a single bar.
+
+    The geometric predicate lives in ``pdf_math_geometry`` so the nested-bar
+    analysis there applies exactly the same evidence rule.
+    """
+    return glyphs_near_mark(
+        line_geometry_glyphs(line_geometries),
+        bar_rect=bar_rect,
+        marks=marks,
+    )
 
 
 def _pdf_geometry_bar_repair(

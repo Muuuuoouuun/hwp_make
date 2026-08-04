@@ -10,6 +10,7 @@ footers, two-column segmentation, figures, and page-number noise.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
@@ -23,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 os.environ.setdefault("HWP_MAKE_DATA_DIR", str(ROOT / "data" / "real_pdf_math_qa"))
 sys.path.insert(0, str(ROOT))
 
-from app import hwpx_writer_v2, importers, storage  # noqa: E402
+from app import hwpx_writer_v2, importers, pdf_math_geometry, storage  # noqa: E402
 from scripts import qa_hwp_math_samples as qa  # noqa: E402
 
 
@@ -130,21 +131,88 @@ def _line_has_placeholder(line: dict[str, Any]) -> bool:
     return any(char in text for char in PLACEHOLDER_CHARS)
 
 
-def _summarize_pdf_line(line: dict[str, Any]) -> dict[str, Any]:
+def _placeholder_glyph_types(pdf_lines: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
+    """Geometry label for every placeholder glyph of one problem, by line index.
+
+    An equation font draws a fraction bar, a radical vinculum, a vector accent,
+    an overline, and an empty answer box with the same private-use glyph, so the
+    only sound way to name a residual is the geometry of that glyph itself.  The
+    rule lives in ``app.pdf_math_geometry`` next to the repairs it mirrors.
+
+    The raw ``pdf_line_chars`` still carry the private-use code point, which is
+    why matching them against the normalized square never found anything; the
+    glyph view normalizes first, so every bar is seen here.
+    """
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    try:
+        glyphs = pdf_math_geometry.line_geometry_glyphs(pdf_lines)
+    except Exception:
+        return grouped
+    for bar in glyphs:
+        if bar.text not in PLACEHOLDER_CHARS:
+            continue
+        grouped.setdefault(bar.line_index, []).append(
+            {
+                "c": bar.text,
+                "bbox": [bar.left, bar.top, bar.right, bar.bottom],
+                "font": bar.font,
+                "size": bar.size,
+                "type": pdf_math_geometry.classify_placeholder_glyph(glyphs, bar),
+            }
+        )
+    return grouped
+
+
+def _dominant_type(entries: list[dict[str, Any]]) -> str:
+    labels = [str(entry.get("type") or "") for entry in entries if entry.get("type")]
+    if not labels:
+        return ""
+    return Counter(labels).most_common(1)[0][0]
+
+
+def _overlap_score(line_text: str, context: str) -> int:
+    """Longest run of the line's own text that also appears in the residual context."""
+    stripped = re.sub(rf"[{''.join(PLACEHOLDER_CHARS)}\s]+", "", str(line_text or ""))
+    if not stripped or not context:
+        return 0
+    matcher = difflib.SequenceMatcher(None, stripped, str(context), autojunk=False)
+    return matcher.find_longest_match(0, len(stripped), 0, len(context)).size
+
+
+def _residual_geometry_type(context: str, line_contexts: list[dict[str, Any]]) -> str:
+    """Geometry label for one residual square.
+
+    A residual is a bar the repair chain could not resolve, so it is named after
+    the unresolved bars of the same problem.  The PDF line whose own text
+    overlaps the residual context most wins; when no line stands out, the
+    distinct labels of every unresolved bar are reported together instead of
+    being guessed apart.
+    """
+    scored: list[tuple[int, str]] = []
+    labels: set[str] = set()
+    for line in line_contexts:
+        entries = line.get("placeholder_char_bboxes") or []
+        dominant = _dominant_type(entries)
+        if not dominant:
+            continue
+        labels.update(str(entry.get("type")) for entry in entries if entry.get("type"))
+        scored.append((_overlap_score(str(line.get("text") or ""), context), dominant))
+    if not labels:
+        return ""
+    best = max((score for score, _ in scored), default=0)
+    if best >= 2 and sum(1 for score, _ in scored if score == best) == 1:
+        return next(label for score, label in scored if score == best)
+    ordered = sorted(labels)
+    return "+".join(ordered) if len(ordered) <= 3 else "mixed"
+
+
+def _summarize_pdf_line(
+    line: dict[str, Any],
+    glyph_types: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     chars = line.get("pdf_line_chars") or []
     spans = line.get("pdf_line_spans") or []
-    placeholder_char_bboxes: list[dict[str, Any]] = []
-    for char in chars:
-        value = str(char.get("c") or "")
-        if value in PLACEHOLDER_CHARS:
-            placeholder_char_bboxes.append(
-                {
-                    "c": value,
-                    "bbox": char.get("bbox"),
-                    "font": char.get("font"),
-                    "size": char.get("size"),
-                }
-            )
+    entries = glyph_types or []
     return {
         "block_id": line.get("block_id"),
         "block_type": line.get("block_type"),
@@ -152,7 +220,8 @@ def _summarize_pdf_line(line: dict[str, Any]) -> dict[str, Any]:
         "bbox_px": line.get("bbox_px"),
         "char_count": len(chars),
         "span_count": len(spans),
-        "placeholder_char_bboxes": placeholder_char_bboxes[:12],
+        "placeholder_char_bboxes": entries[:12],
+        "geometry_type": _dominant_type(entries),
         "spans": spans[:8],
     }
 
@@ -160,7 +229,12 @@ def _summarize_pdf_line(line: dict[str, Any]) -> dict[str, Any]:
 def _output_placeholder_reports(item: dict[str, Any], item_index: int) -> list[dict[str, Any]]:
     layout = item.get("layout") or {}
     pdf_lines = [line for line in (layout.get("pdf_lines") or []) if isinstance(line, dict)]
-    line_contexts = [_summarize_pdf_line(line) for line in pdf_lines if _line_has_placeholder(line)]
+    glyph_types = _placeholder_glyph_types(pdf_lines)
+    line_contexts = [
+        _summarize_pdf_line(line, glyph_types.get(index))
+        for index, line in enumerate(pdf_lines)
+        if _line_has_placeholder(line)
+    ]
     base = {
         "item_index": item_index,
         "number": item.get("number"),
@@ -179,6 +253,7 @@ def _output_placeholder_reports(item: dict[str, Any], item_index: int) -> list[d
     for field, choice_index, text in fields:
         for match in re.finditer(r"[\u25a1\u25a2]", text):
             context = _context(text, match.start())
+            geometry_type = _residual_geometry_type(context, line_contexts)
             report = {
                 **base,
                 "field": field,
@@ -186,7 +261,11 @@ def _output_placeholder_reports(item: dict[str, Any], item_index: int) -> list[d
                 "offset": match.start(),
                 "char": match.group(0),
                 "context": context,
-                "inferred_type": _classify_placeholder_context(context),
+                # Geometry first: the surrounding LaTeX only says what else the
+                # line happened to carry, never what this square itself is.
+                "inferred_type": geometry_type or _classify_placeholder_context(context),
+                "geometry_type": geometry_type,
+                "context_type": _classify_placeholder_context(context),
                 "pdf_line_contexts": line_contexts[:8],
             }
             reports.append(report)
@@ -197,6 +276,7 @@ def _output_placeholder_reports(item: dict[str, Any], item_index: int) -> list[d
 def _source_placeholder_hint_reports(item: dict[str, Any], item_index: int) -> list[dict[str, Any]]:
     layout = item.get("layout") or {}
     pdf_lines = [line for line in (layout.get("pdf_lines") or []) if isinstance(line, dict)]
+    glyph_types = _placeholder_glyph_types(pdf_lines)
     base = {
         "item_index": item_index,
         "number": item.get("number"),
@@ -206,7 +286,14 @@ def _source_placeholder_hint_reports(item: dict[str, Any], item_index: int) -> l
         "problem_bbox_px": layout.get("bbox_px"),
     }
     reports: list[dict[str, Any]] = []
-    for line in (_summarize_pdf_line(line) for line in pdf_lines if _line_has_placeholder(line)):
+    summaries = [
+        _summarize_pdf_line(line, glyph_types.get(index))
+        for index, line in enumerate(pdf_lines)
+        if _line_has_placeholder(line)
+    ]
+    for line in summaries:
+        context = str(line.get("text") or "")
+        geometry_type = str(line.get("geometry_type") or "")
         reports.append(
             {
                 **base,
@@ -215,7 +302,9 @@ def _source_placeholder_hint_reports(item: dict[str, Any], item_index: int) -> l
                 "offset": None,
                 "char": None,
                 "context": line.get("text"),
-                "inferred_type": _classify_placeholder_context(str(line.get("text") or "")),
+                "inferred_type": geometry_type or _classify_placeholder_context(context),
+                "geometry_type": geometry_type,
+                "context_type": _classify_placeholder_context(context),
                 "pdf_line_contexts": [line],
                 "hint_only": True,
             }
