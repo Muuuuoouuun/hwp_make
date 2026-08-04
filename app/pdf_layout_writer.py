@@ -24,7 +24,7 @@ from uuid import uuid4
 import fitz
 import numpy as np
 from lxml import etree
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageFont
 
 from . import math_text, pdf_math_ai
 from .hancom_pua_map import is_hancom_eq_font
@@ -447,6 +447,7 @@ _PDF_FONT_FACES = (
     "신명 중명조",
     "한양신명조",
     "HY신명조",
+    "바탕",
     "돋움",
     "중고딕",
     "신명 중고딕",
@@ -504,6 +505,340 @@ _FLOW_BOX_MAX_LINE_SPACING = 165
 _FLOW_BOX_MIN_PADDING_PT = 1.2
 _FLOW_BOX_MAX_PADDING_PT = 12.0
 _FLOW_QUESTION_MARKER_RE = re.compile(r"^\s*([1-9][0-9]?)([.)])(?:\s|$)")
+
+# ---------------------------------------------------------------------------
+# Source-geometry character calibration (글꼴 크기 / 장평)
+# ---------------------------------------------------------------------------
+# The coordinate writer gives every source line its own text box anchored at the
+# source x, but the run inside it used to carry one bucketed font size (10pt for
+# anything between 8.7 and 12.8) and one global 95% ratio.  Against KICE body
+# copy set at 11.1pt that emitted roughly 17% too little advance per line, and
+# the error accumulated toward the line end - the glyph "double image" ghosting
+# seen against the source-foreground overlay.
+#
+# Calibration keeps the line fully editable (one text box, one paragraph, plain
+# text runs) and only chooses the character metrics that reproduce the measured
+# source geometry:
+#
+#   emit_size = source span size * page scale                (glyph height)
+#   ratio     = source segment advance / natural width * 100 (glyph width)
+#
+# A "segment" is a maximal run of word characters or of blanks, and its target
+# advance comes from the PDF's own per-character boxes, so word starts land on
+# the source word starts and the source justification is reproduced instead of
+# averaged away.  Segments render sequentially, so the solver carries the width
+# already emitted and targets absolute source positions; without that feedback
+# each segment's integer-ratio rounding would displace every later one.
+#
+# ``natural_width`` is measured on the real installed TrueType face through
+# FreeType.  The only place the face metrics and the Hancom/rhwp layout engine
+# disagree is the blank: ``charPr`` keeps ``useFontSpace="0"``, so the engine
+# advances a fixed half em rather than the face's own narrower space glyph.
+# That single documented correction, calibrated from a render round trip, makes
+# the model agree with the renderer to within a few tenths of a point on real
+# exam lines.  When a face cannot be resolved, or the emitted text cannot be
+# matched 1:1 against the source characters, calibration degrades to a single
+# line-wide ratio and finally to the previous fixed profile.
+_CALIB_REF_PX = 256
+_CALIB_SPACE_EM = 0.5
+_CALIB_RATIO_MIN = 60
+_CALIB_RATIO_MAX = 170
+_CALIB_SIZE_QUANT_PT = 0.25
+_CALIB_MIN_SIZE_PT = 5.5
+_CALIB_MAX_SIZE_PT = 40.0
+_CALIB_MIN_TARGET_PT = 8.0
+_CALIB_MIN_CHARS = 2
+# Placement corrections for calibrated line boxes, measured from a render round
+# trip against the source page raster (positive = right / down, in points).  The
+# layout engine insets the first glyph slightly and drops the first baseline one
+# device pixel lower than the source, and both are constant across sizes.
+_CALIB_TEXT_BOX_DX_PT = 0.75
+_CALIB_TEXT_BOX_DY_PT = -0.75
+# Prefer the installed face from the source font family (Batang) over the
+# generic HY신명조 mapping for calibrated runs.
+_CALIB_PREFER_SOURCE_FAMILY = True
+# Face -> (Windows font file, TrueType collection index) candidates.
+_CALIB_FONT_FILES: dict[str, tuple[tuple[str, int], ...]] = {
+    "HY신명조": (("H2MJSM.TTF", 0),),
+    "바탕": (("batang.ttc", 0),),
+    "한양신명조": (("H2MJSM.TTF", 0),),
+    "신명 중명조": (("H2MJSM.TTF", 0),),
+    "HYSinMyeongJo-Medium": (("H2MJSM.TTF", 0),),
+    "HYMyeongJo-Extra": (("H2MJRE.TTF", 0), ("H2MJSM.TTF", 0)),
+    "돋움": (("dotum.ttc", 0), ("gulim.ttc", 2), ("malgun.ttf", 0)),
+    "굴림": (("gulim.ttc", 0),),
+    "GulimChe": (("gulim.ttc", 1),),
+    "중고딕": (("H2GTRM.TTF", 0),),
+    "신명 중고딕": (("H2GTRM.TTF", 0),),
+    "HYGothic-Medium": (("H2GTRM.TTF", 0),),
+    "HYGothic-Extra": (("H2GTRE.TTF", 0), ("H2GTRM.TTF", 0)),
+    "HYGraphic-Medium": (("H2GPRM.TTF", 0),),
+    "HYHeadLine-Medium": (("H2HDRM.TTF", 0),),
+    "Times New Roman": (("times.ttf", 0),),
+}
+_CALIB_FONT_CACHE: dict[str, Any] = {}
+_CALIB_ADVANCE_CACHE: dict[tuple[str, str], float] = {}
+
+
+def _calib_font(face: str) -> Any:
+    """Return a FreeType handle for ``face``, or ``None`` when unavailable."""
+
+    if face in _CALIB_FONT_CACHE:
+        return _CALIB_FONT_CACHE[face]
+    handle = None
+    font_dir = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "Fonts"
+    for file_name, index in _CALIB_FONT_FILES.get(face, ()):
+        candidate = font_dir / file_name
+        if not candidate.is_file():
+            continue
+        try:
+            handle = ImageFont.truetype(str(candidate), _CALIB_REF_PX, index=index)
+        except Exception:  # pragma: no cover - unreadable/locked font file
+            handle = None
+            continue
+        break
+    _CALIB_FONT_CACHE[face] = handle
+    return handle
+
+
+def _calib_is_wide_codepoint(code_point: int) -> bool:
+    return (
+        0x1100 <= code_point <= 0x11FF
+        or 0x2E80 <= code_point <= 0xA4CF
+        or 0xAC00 <= code_point <= 0xD7A3
+        or 0xF900 <= code_point <= 0xFAFF
+        or 0xFF00 <= code_point <= 0xFF60
+    )
+
+
+def _calib_char_advance_em(face: str, char: str) -> float | None:
+    """Advance of ``char`` in em units as the HWP layout engine applies it."""
+
+    key = (face, char)
+    cached = _CALIB_ADVANCE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if char in (" ", "\u00a0"):
+        _CALIB_ADVANCE_CACHE[key] = _CALIB_SPACE_EM
+        return _CALIB_SPACE_EM
+    handle = _calib_font(face)
+    if handle is None:
+        return None
+    try:
+        advance = float(handle.getlength(char)) / float(_CALIB_REF_PX)
+    except Exception:  # pragma: no cover - FreeType refusing a codepoint
+        return None
+    if advance <= 0.0:
+        return None
+    if not _calib_is_wide_codepoint(ord(char[0])) and abs(advance - 1.0) < 1e-6:
+        # FreeType fell back to the full-em ``.notdef`` box: the face has no
+        # glyph, so the engine substitutes from another font.  Half an em is the
+        # measured average of those substitutions and keeps the estimate sane.
+        advance = _CALIB_SPACE_EM
+    _CALIB_ADVANCE_CACHE[key] = advance
+    return advance
+
+
+def _calib_natural_width_pt(text: str, face: str, size_pt: float) -> float | None:
+    """Uncompressed (ratio 100, spacing 0) advance width of ``text`` in points."""
+
+    total = 0.0
+    for char in text:
+        advance = _calib_char_advance_em(face, char)
+        if advance is None:
+            return None
+        total += advance
+    return total * float(size_pt)
+
+
+def _calib_font_for_span(span: dict[str, Any]) -> str:
+    """Face for a calibrated run, preferring the source family when installed.
+
+    KICE body copy is set in Haansoft Batang.  The generic mapping folds every
+    Myeongjo-ish source face onto HY신명조; for the calibrated coordinate path
+    the closer Batang outline reproduces the source strokes far better, so it is
+    used whenever the system actually has the face.
+    """
+
+    face = _flow_font_for_span(span)
+    if not _CALIB_PREFER_SOURCE_FAMILY or face not in {"HY신명조", "Times New Roman", "돋움"}:
+        return face
+    font = str(span.get("font") or "")
+    if is_hancom_eq_font(font):
+        # Recovered equation PUA is rewritten to Unicode symbols that only the
+        # Times fallback covers.
+        return face
+    recovered = _recover_pdf_font_name(font)
+    if ("Batang" in font or "batang" in font or "바탕" in recovered) and _calib_font("바탕"):
+        return "바탕"
+    return face
+
+
+def _calib_emit_size_pt(span: dict[str, Any], size_scale: float) -> float:
+    """Source span size mapped onto the output page and quantized."""
+
+    size = _span_size(span) * max(0.05, float(size_scale))
+    quantized = round(size / _CALIB_SIZE_QUANT_PT) * _CALIB_SIZE_QUANT_PT
+    return round(min(_CALIB_MAX_SIZE_PT, max(_CALIB_MIN_SIZE_PT, quantized)), 2)
+
+
+def _calib_line_ratio(
+    natural_width_pt: float,
+    size_sum_pt: float,
+    char_count: int,
+    target_width_pt: float,
+    *,
+    spacing: int = _FLOW_CHAR_SPACING,
+) -> int | None:
+    """Ratio (장평, percent) that renders ``natural_width_pt`` at the target."""
+
+    if natural_width_pt <= 0.0 or char_count < _CALIB_MIN_CHARS:
+        return None
+    if target_width_pt < _CALIB_MIN_TARGET_PT:
+        return None
+    # ``spacing`` is applied between characters, i.e. char_count - 1 times, in
+    # hundredths of the character's own em.
+    spacing_width = (size_sum_pt - size_sum_pt / char_count) * float(spacing) / 100.0
+    ratio = (float(target_width_pt) - spacing_width) / natural_width_pt * 100.0
+    if not math.isfinite(ratio):
+        return None
+    return int(min(_CALIB_RATIO_MAX, max(_CALIB_RATIO_MIN, round(ratio))))
+
+
+def _calib_segment_ratio(natural_width_pt: float, target_width_pt: float) -> int | None:
+    """Ratio for one word/blank segment measured against its source advance.
+
+    Calibrated runs carry ``spacing="0"`` so the rendered advance is exactly
+    ``natural_width * ratio / 100`` and every segment can be solved in isolation.
+    """
+
+    if natural_width_pt <= 0.0 or target_width_pt <= 0.0:
+        return None
+    ratio = float(target_width_pt) / natural_width_pt * 100.0
+    if not math.isfinite(ratio):
+        return None
+    return int(min(_CALIB_RATIO_MAX, max(_CALIB_RATIO_MIN, round(ratio))))
+
+
+def _calib_line_entries(
+    spans: list[dict[str, Any]],
+    *,
+    force_font: str | None,
+    source_size_scale: float,
+) -> list[dict[str, Any]] | None:
+    """Per-character emission plan with source advance geometry.
+
+    Returns ``None`` when the emitted text cannot be matched 1:1 against the
+    source characters (recovered math glyphs, dropped private-use codepoints),
+    in which case the caller falls back to a single line-wide ratio.
+    """
+
+    entries: list[dict[str, Any]] = []
+    previous_rect: fitz.Rect | None = None
+    previous_size = 10.0
+    previous_span: dict[str, Any] | None = None
+    for span in spans:
+        text = _pdf_output_text(str(span.get("text") or ""))
+        if text == "":
+            continue
+        rect = fitz.Rect(span["bbox"])
+        size = float(span.get("size") or previous_size)
+        chars = [
+            char
+            for char in (span.get("chars") or [])
+            if str(char.get("c") or "") != ""
+        ]
+        if "".join(str(char.get("c") or "") for char in chars) != text:
+            return None
+        if previous_rect is not None and not text.startswith(" "):
+            gap = rect.x0 - previous_rect.x1
+            if gap > max(2.2, previous_size * 0.22):
+                entries.append(
+                    {
+                        "char": " ",
+                        "span": previous_span if previous_span is not None else span,
+                        "x0": float(previous_rect.x1),
+                        "x1": float(rect.x0),
+                    }
+                )
+        face = force_font or _calib_font_for_span(span)
+        emit_size = _calib_emit_size_pt(span, source_size_scale)
+        for index, char in enumerate(chars):
+            bbox = char.get("bbox")
+            if not bbox or len(bbox) != 4:
+                return None
+            entries.append(
+                {
+                    "char": text[index],
+                    "span": span,
+                    "face": face,
+                    "size": emit_size,
+                    "x0": float(bbox[0]),
+                    "x1": float(bbox[2]),
+                }
+            )
+        previous_rect = rect
+        previous_size = size
+        previous_span = span
+    if not entries:
+        return None
+    for entry in entries:
+        if "face" not in entry:
+            span = entry["span"]
+            entry["face"] = force_font or _calib_font_for_span(span)
+            entry["size"] = _calib_emit_size_pt(span, source_size_scale)
+    return entries
+
+
+def _calib_segment_ratios(
+    entries: list[dict[str, Any]],
+    source_size_scale: float,
+) -> bool:
+    """Assign every word/blank segment the ratio matching its source advance."""
+
+    boundaries: list[int] = []
+    for index, entry in enumerate(entries):
+        is_blank = entry["char"].isspace()
+        if index == 0 or is_blank != entries[index - 1]["char"].isspace():
+            boundaries.append(index)
+    boundaries.append(len(entries))
+    scale = max(0.05, float(source_size_scale))
+    origin = entries[0]["x0"]
+    # Segments are laid out one after another, so a segment's own rounding error
+    # displaces every later segment.  Tracking the width actually rendered so far
+    # turns each segment's target into an absolute source position instead of a
+    # relative width, which keeps the line end as accurate as the line start.
+    cursor = 0.0
+    assigned = False
+    for position, start in enumerate(boundaries[:-1]):
+        end = boundaries[position + 1]
+        segment = entries[start:end]
+        if end < len(entries):
+            span_end = entries[end]["x0"]
+        else:
+            span_end = segment[-1]["x1"]
+        target = (span_end - origin) * scale - cursor
+        natural = 0.0
+        measurable = True
+        for entry in segment:
+            advance = _calib_char_advance_em(entry["face"], entry["char"])
+            if advance is None:
+                measurable = False
+                break
+            natural += advance * entry["size"]
+        ratio = (
+            _calib_segment_ratio(natural, target) if measurable else None
+        )
+        if ratio is None:
+            for entry in segment:
+                entry["ratio"] = _FLOW_CHAR_RATIO
+            cursor += natural * _FLOW_CHAR_RATIO / 100.0
+            continue
+        assigned = True
+        for entry in segment:
+            entry["ratio"] = ratio
+        cursor += natural * ratio / 100.0
+    return assigned
 
 
 def _ensure_pdf_font_faces(header: Any) -> None:
@@ -2121,7 +2456,7 @@ def _text_rects(spans: list[dict[str, Any]]) -> list[fitz.Rect]:
 
 
 def _resolved_text_color(
-    styles: dict[tuple[str, float, bool, str], str],
+    styles: dict[tuple[str, float, bool, str, int, int], str],
     span: dict[str, Any],
     *,
     allow_color: bool,
@@ -2143,37 +2478,126 @@ def _resolved_text_color(
 
 def _ensure_char_pr(
     doc: HwpxDocument,
-    styles: dict[tuple[str, float, bool, str], str],
+    styles: dict[tuple[str, float, bool, str, int, int], str],
     span: dict[str, Any],
     *,
     size_scale: float = 1.0,
     force_font: str | None = None,
     allow_color: bool = True,
+    size_pt: float | None = None,
+    ratio: int | None = None,
+    spacing: int | None = None,
 ) -> str:
-    size = max(5.5, round(_flow_size_for_span(span) * max(0.1, size_scale), 2))
+    if size_pt is not None:
+        size = max(5.5, round(float(size_pt), 2))
+    else:
+        size = max(5.5, round(_flow_size_for_span(span) * max(0.1, size_scale), 2))
     font = force_font or _flow_font_for_span(span)
     bold = _exam_bold_for_span(span)
     color = _resolved_text_color(styles, span, allow_color=allow_color)
-    key = (font, size, bold, color)
+    resolved_ratio = int(_FLOW_CHAR_RATIO if ratio is None else ratio)
+    resolved_spacing = int(_FLOW_CHAR_SPACING if spacing is None else spacing)
+    key = (font, size, bold, color, resolved_ratio, resolved_spacing)
     char_pr = styles.get(key)
     if char_pr is None:
         # ``color`` is always explicit so the vendored ``ensure_run_style`` predicate
         # never recycles a differently colored charPr for the same font/size/bold.
-        char_pr = doc.ensure_run_style(font=font, size=size, bold=bold, color=color)
-        _apply_char_metrics(doc.headers[0], [char_pr], ratio=_FLOW_CHAR_RATIO, spacing=_FLOW_CHAR_SPACING)
+        # ``ensure_run_style`` does not look at ratio/spacing, so a calibrated
+        # variant has to start from a private clone of the matching base style.
+        base_char_pr = doc.ensure_run_style(font=font, size=size, bold=bold, color=color)
+        if resolved_ratio == _FLOW_CHAR_RATIO and resolved_spacing == _FLOW_CHAR_SPACING:
+            char_pr = base_char_pr
+        else:
+            char_pr = _clone_char_pr(doc.headers[0], base_char_pr)
+        _apply_char_metrics(
+            doc.headers[0],
+            [char_pr],
+            ratio=resolved_ratio,
+            spacing=resolved_spacing,
+        )
         styles[key] = char_pr
     return char_pr
 
 
+def _clone_char_pr(header: Any, base_char_pr_id: str) -> str:
+    """Duplicate ``base_char_pr_id`` so ratio variants never share a charPr."""
+
+    properties = header.element.find(f".//{_hh('charProperties')}")
+    base = (
+        properties.find(f"{_hh('charPr')}[@id='{base_char_pr_id}']")
+        if properties is not None
+        else None
+    )
+    if properties is None or base is None:
+        return str(base_char_pr_id)
+    clone = deepcopy(base)
+    next_id = 0
+    for existing in properties.findall(_hh("charPr")):
+        try:
+            next_id = max(next_id, int(existing.get("id") or 0) + 1)
+        except ValueError:
+            continue
+    clone.set("id", str(next_id))
+    properties.append(clone)
+    properties.set("itemCnt", str(len(properties.findall(_hh("charPr")))))
+    header.mark_dirty()
+    return str(next_id)
+
+
 def _span_text_runs(
     doc: HwpxDocument,
-    styles: dict[tuple[str, float, bool, str], str],
+    styles: dict[tuple[str, float, bool, str, int, int], str],
     spans: list[dict[str, Any]],
     *,
     size_scale: float = 1.0,
     force_font: str | None = None,
+    target_width_pt: float | None = None,
+    source_size_scale: float | None = None,
 ) -> list[tuple[str, str]]:
-    runs: list[tuple[str, str]] = []
+    """Build ``(text, charPrIDRef)`` runs for one source line.
+
+    When ``target_width_pt`` and ``source_size_scale`` are supplied the runs are
+    emitted at the source glyph size and share one calibrated ratio so the line
+    reproduces the measured source advance width.
+    """
+
+    if target_width_pt is not None and source_size_scale is not None:
+        entries = _calib_line_entries(
+            spans, force_font=force_font, source_size_scale=source_size_scale
+        )
+        if entries and _calib_segment_ratios(entries, source_size_scale):
+            segment_runs: list[tuple[str, str]] = []
+            buffer: list[str] = []
+            current_key: tuple[int, str, float, int] | None = None
+            current_char_pr = ""
+            for entry in entries:
+                key = (
+                    id(entry["span"]),
+                    str(entry["face"]),
+                    float(entry["size"]),
+                    int(entry["ratio"]),
+                )
+                if current_key is not None and key != current_key:
+                    segment_runs.append(("".join(buffer), current_char_pr))
+                    buffer = []
+                if key != current_key:
+                    current_char_pr = _ensure_char_pr(
+                        doc,
+                        styles,
+                        entry["span"],
+                        size_scale=size_scale,
+                        force_font=entry["face"],
+                        size_pt=entry["size"],
+                        ratio=entry["ratio"],
+                        spacing=0,
+                    )
+                    current_key = key
+                buffer.append(entry["char"])
+            if buffer:
+                segment_runs.append(("".join(buffer), current_char_pr))
+            return [run for run in segment_runs if run[0] != ""]
+
+    pieces: list[tuple[str, dict[str, Any]]] = []
     previous_rect: fitz.Rect | None = None
     previous_size = 10.0
     for span in spans:
@@ -2185,18 +2609,41 @@ def _span_text_runs(
         if previous_rect is not None and not text.startswith(" "):
             gap = rect.x0 - previous_rect.x1
             if gap > max(2.2, previous_size * 0.22):
-                runs.append(
-                    (
-                        " ",
-                        _ensure_char_pr(
-                            doc,
-                            styles,
-                            span,
-                            size_scale=size_scale,
-                            force_font=force_font,
-                        ),
-                    )
-                )
+                pieces.append((" ", span))
+        pieces.append((text, span))
+        previous_rect = rect
+        previous_size = size
+
+    calibrated_ratio: int | None = None
+    emit_sizes: dict[int, float] = {}
+    emit_faces: dict[int, str] = {}
+    if target_width_pt is not None and source_size_scale is not None and pieces:
+        natural_total = 0.0
+        size_sum = 0.0
+        char_count = 0
+        measurable = True
+        for index, (text, span) in enumerate(pieces):
+            emit_size = _calib_emit_size_pt(span, source_size_scale)
+            emit_face = force_font or _calib_font_for_span(span)
+            emit_sizes[index] = emit_size
+            emit_faces[index] = emit_face
+            natural = _calib_natural_width_pt(text, emit_face, emit_size)
+            if natural is None:
+                measurable = False
+                break
+            natural_total += natural
+            size_sum += emit_size * len(text)
+            char_count += len(text)
+        if measurable:
+            calibrated_ratio = _calib_line_ratio(
+                natural_total, size_sum, char_count, float(target_width_pt)
+            )
+    if calibrated_ratio is None:
+        emit_sizes = {}
+        emit_faces = {}
+
+    runs: list[tuple[str, str]] = []
+    for index, (text, span) in enumerate(pieces):
         runs.append(
             (
                 text,
@@ -2205,12 +2652,12 @@ def _span_text_runs(
                     styles,
                     span,
                     size_scale=size_scale,
-                    force_font=force_font,
+                    force_font=emit_faces.get(index, force_font),
+                    size_pt=emit_sizes.get(index),
+                    ratio=calibrated_ratio,
                 ),
             )
         )
-        previous_rect = rect
-        previous_size = size
     return runs
 
 
@@ -2385,7 +2832,7 @@ def _add_math_ai_group_equation(
     page: fitz.Page,
     lines: list[dict[str, Any]],
     *,
-    styles: dict[tuple[str, float, bool, str], str],
+    styles: dict[tuple[str, float, bool, str, int, int], str],
     para_pr_id_ref: str,
     z_counter: list[int],
     page_transform: _PageTransform,
@@ -2419,7 +2866,7 @@ def _add_math_ai_recognition_equation(
     lines: list[dict[str, Any]],
     result: pdf_math_ai.MathAIRecognition,
     *,
-    styles: dict[tuple[str, float, bool, str], str],
+    styles: dict[tuple[str, float, bool, str, int, int], str],
     para_pr_id_ref: str,
     z_counter: list[int],
     page_transform: _PageTransform,
@@ -2462,7 +2909,7 @@ def _add_positioned_native_math_for_line(
     anchor: Any,
     line: dict[str, Any],
     *,
-    styles: dict[tuple[str, float, bool, str], str],
+    styles: dict[tuple[str, float, bool, str, int, int], str],
     z_counter: list[int],
     page_transform: _PageTransform,
     equation_counter: list[int],
@@ -2522,7 +2969,7 @@ def _add_char_layout_text_boxes(
     anchor: Any,
     line: dict[str, Any],
     *,
-    styles: dict[tuple[str, float, bool, str], str],
+    styles: dict[tuple[str, float, bool, str, int, int], str],
     para_pr_id_ref: str,
     z_counter: list[int],
     page_transform: _PageTransform,
@@ -4486,7 +4933,7 @@ def _append_cell_line(
     cell: Any,
     line: dict[str, Any],
     *,
-    styles: dict[tuple[str, float, bool, str], str],
+    styles: dict[tuple[str, float, bool, str, int, int], str],
     para_pr_id_ref: str,
     font_scale: float = 1.0,
     force_font: str | None = None,
@@ -4526,7 +4973,7 @@ def _append_cell_paragraph_lines(
     cell: Any,
     lines: list[dict[str, Any]],
     *,
-    styles: dict[tuple[str, float, bool, str], str],
+    styles: dict[tuple[str, float, bool, str, int, int], str],
     para_pr_id_ref: str,
     font_scale: float = 1.0,
     force_font: str | None = None,
@@ -5348,7 +5795,7 @@ def _append_native_flow_table(
     cell: Any,
     block: dict[str, Any],
     *,
-    styles: dict[tuple[str, float, bool, str], str],
+    styles: dict[tuple[str, float, bool, str, int, int], str],
     para_styles: dict[tuple[Any, ...], str],
     cell_width: int,
     border_fill_id_ref: str,
@@ -6357,7 +6804,7 @@ def _append_header_table(
     table_height: int,
     no_border_fill: str,
     compact_para: str,
-    styles: dict[tuple[str, float, bool, str], str],
+    styles: dict[tuple[str, float, bool, str, int, int], str],
     page_break: bool,
     coordinate_scale: float = 1.0,
     font_scale: float = 1.0,
@@ -6427,7 +6874,7 @@ def _append_header_content_to_cell(
     table_height: int,
     no_border_fill: str,
     compact_para: str,
-    styles: dict[tuple[str, float, bool, str], str],
+    styles: dict[tuple[str, float, bool, str, int, int], str],
     para_styles: dict[tuple[Any, ...], str],
     coordinate_scale: float = 1.0,
     font_scale: float = 1.0,
@@ -6821,7 +7268,7 @@ def _append_flow_block(
     cell: Any,
     block: dict[str, Any],
     *,
-    styles: dict[tuple[str, float, bool, str], str],
+    styles: dict[tuple[str, float, bool, str, int, int], str],
     para_styles: dict[tuple[Any, ...], str],
     para_pr_id_ref: str,
     cell_width: int,
@@ -7246,7 +7693,7 @@ def write_pdf_flow_hwpx(
     )
     _apply_char_metrics(header, [spacer_cp], ratio=100, spacing=0)
 
-    styles: dict[tuple[str, float, bool, str], str] = {}
+    styles: dict[tuple[str, float, bool, str, int, int], str] = {}
     para_styles: dict[tuple[Any, ...], str] = {}
     page_count = 0
     line_count = 0
@@ -8593,7 +9040,7 @@ def _write_structured_math_page_tables(
         ratio=_FLOW_CHAR_RATIO,
         spacing=_FLOW_CHAR_SPACING,
     )
-    header_styles: dict[tuple[str, float, bool, str], str] = {}
+    header_styles: dict[tuple[str, float, bool, str, int, int], str] = {}
     para_styles: dict[tuple[Any, ...], str] = {}
     equation_counter = [0]
 
@@ -10169,7 +10616,7 @@ def write_pdf_layout_hwpx(
     page_standard_names: set[str] = set()
     page_print_paper_names: set[str] = set()
     page_print_scale_values: set[float] = set()
-    styles: dict[tuple[str, float, bool, str], str] = {}
+    styles: dict[tuple[str, float, bool, str, int, int], str] = {}
     z_counter = [0]
     equation_counter = [0]
     math_ai_enabled = pdf_math_ai.resolve_math_ai_enabled(math_ai_recognition)
@@ -10372,16 +10819,24 @@ def write_pdf_layout_hwpx(
                         continue
                     line_spans = line["spans"]
                     bbox = page_transform.rect(fitz.Rect(line["bbox"]))
-                    runs = _span_text_runs(doc, styles, line_spans)
+                    runs = _span_text_runs(
+                        doc,
+                        styles,
+                        line_spans,
+                        target_width_pt=float(bbox.width),
+                        source_size_scale=page_transform.scale_x,
+                    )
                     if runs:
                         pad_x = 1.5
                         pad_y = 1.0
-                        x_pt = max(0.0, bbox.x0 - 0.3)
+                        x_pt = max(0.0, bbox.x0 - 0.3 + _CALIB_TEXT_BOX_DX_PT)
+                        height_pt = max(2.0, bbox.height + pad_y * 2)
+                        y_pt = bbox.y0 - 0.8 + _CALIB_TEXT_BOX_DY_PT
                         run_stats = _add_text_box_runs(
                             doc,
                             anchor,
                             x_pt=x_pt,
-                            y_pt=max(0.0, bbox.y0 - 0.8),
+                            y_pt=max(0.0, y_pt),
                             width_pt=_expanded_text_width(
                                 page_transform.target_rect,
                                 bbox,
@@ -10389,7 +10844,7 @@ def write_pdf_layout_hwpx(
                                 pad_x=pad_x,
                                 extra_right_pt=18.0,
                             ),
-                            height_pt=max(2.0, bbox.height + pad_y * 2),
+                            height_pt=height_pt,
                             runs=runs,
                             para_pr_id_ref=text_para_pr,
                             z_order=_next_z(z_counter),
