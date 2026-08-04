@@ -28,7 +28,7 @@ from PIL import Image, ImageFilter
 
 from . import math_text, pdf_math_ai
 from .hancom_pua_map import is_hancom_eq_font
-from .hwpx_writer import _equation_placeholder, _equation_size, _hancom_eqn_script
+from .hwpx_writer import _equation_reserved_width, _equation_size, _hancom_eqn_script
 
 _VENDOR = Path(__file__).resolve().parent / "_vendor"
 if str(_VENDOR) not in sys.path:
@@ -388,8 +388,11 @@ def _set_invisible_line_shape(element: Any) -> None:
     line_shape = element.find(_q("lineShape"))
     if line_shape is None:
         return
-    # Hancom Viewer is stricter than rhwp about zero-width line shapes.
-    line_shape.set("style", "SOLID")
+    # Hancom Viewer is stricter than rhwp about zero-width line shapes, so the
+    # width stays non-zero; ``NONE`` is what actually suppresses the stroke.
+    # A white SOLID hairline is invisible on paper but draws a visible frame as
+    # soon as the box sits on a colored or dark fill.
+    line_shape.set("style", "NONE")
     line_shape.set("width", "1")
     line_shape.set("color", "#FFFFFF")
     line_shape.set("alpha", "0")
@@ -472,6 +475,28 @@ _PDF_HFT_TYPE_INFO = {
 
 _FLOW_CHAR_RATIO = 95
 _FLOW_CHAR_SPACING = -5
+_DEFAULT_TEXT_COLOR = "#000000"
+# Source spans darker than this on every channel keep the default (black) style so
+# ordinary body text never multiplies ``charPr`` variants.
+_TEXT_COLOR_NEAR_BLACK_MAX = 40
+# Quantize meaningful colors so near-identical fills share one ``charPr``.
+_TEXT_COLOR_QUANTIZE_STEP = 4
+# Upper bound on distinct non-black text colors per document; beyond this the
+# default style is reused instead of growing the header indefinitely.
+_MAX_TEXT_COLOR_VARIANTS = 24
+# Channel spread that separates saturated ink from neutral (gray) ink.
+_COLORED_PIXEL_SPREAD = 15
+_LATIN_SANS_FONT_TOKENS = (
+    "helvetica",
+    "arial",
+    "calibri",
+    "verdana",
+    "tahoma",
+    "segoe",
+    "roboto",
+    "sans",
+    "gothic",
+)
 _FLOW_BODY_LINE_SPACING = 165
 _FLOW_ENGLISH_BODY_LINE_SPACING = 160
 _FLOW_BOX_MIN_LINE_SPACING = 112
@@ -663,6 +688,11 @@ def _flow_font_for_span(span: dict[str, Any]) -> str:
         # ``_pdf_output_text``; Times renders those far better than a Hangul face.
         return "Times New Roman"
     if _latin_ratio(text) >= 0.55 or "Times" in font or "NewRoman" in font:
+        # Colored spans are badge/emphasis text, frequently inverted on a filled
+        # background, where the serif body normalization visibly thins the ink.
+        # Keep those on the sans face when the source font is a latin sans too.
+        if _text_color_for_span(span) != _DEFAULT_TEXT_COLOR and _is_latin_sans_font(font):
+            return "돋움"
         return "Times New Roman"
     if _bold_for_span(span):
         return "돋움"
@@ -671,6 +701,49 @@ def _flow_font_for_span(span: dict[str, Any]) -> str:
     if any(token in recovered for token in ("명조", "바탕")):
         return "HY신명조"
     return "HY신명조"
+
+
+def _is_latin_sans_font(font: str) -> bool:
+    lowered = str(font or "").lower()
+    return any(token in lowered for token in _LATIN_SANS_FONT_TOKENS)
+
+
+def _span_color_rgb(span: dict[str, Any]) -> tuple[int, int, int] | None:
+    """Return the span fill color as ``(r, g, b)`` bytes when PyMuPDF reports one."""
+
+    raw = span.get("color")
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        value = int(raw)
+        if value < 0 or value > 0xFFFFFF:
+            return None
+        return ((value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
+    if isinstance(raw, (tuple, list)) and len(raw) >= 3:
+        channels: list[int] = []
+        for component in raw[:3]:
+            try:
+                number = float(component)
+            except (TypeError, ValueError):
+                return None
+            if number <= 1.0:
+                number *= 255.0
+            channels.append(max(0, min(255, int(round(number)))))
+        return (channels[0], channels[1], channels[2])
+    return None
+
+
+def _text_color_for_span(span: dict[str, Any]) -> str:
+    """Return the ``#RRGGBB`` run color for *span* (black for near-black fills)."""
+
+    rgb = _span_color_rgb(span)
+    if rgb is None or max(rgb) <= _TEXT_COLOR_NEAR_BLACK_MAX:
+        return _DEFAULT_TEXT_COLOR
+    step = max(1, _TEXT_COLOR_QUANTIZE_STEP)
+    quantized = tuple(max(0, min(255, int(round(channel / step)) * step)) for channel in rgb)
+    if max(quantized) <= _TEXT_COLOR_NEAR_BLACK_MAX:
+        return _DEFAULT_TEXT_COLOR
+    return "#" + "".join(f"{channel:02X}" for channel in quantized)
 
 
 def _flow_size_for_span(span: dict[str, Any]) -> float:
@@ -759,10 +832,22 @@ def _append_pdf_equation(run: Any, script: str, equation_index: int) -> None:
             "font": "HancomEQN",
         },
     )
+    # Inline equations are treatAsChar objects: the renderer advances the text
+    # cursor by this width.  Reporting a zero object width makes rhwp/Hancom
+    # place consecutive fractions, integrals and surrounding prose at the same x
+    # coordinate, which is the source of the severe overlap seen in real KICE
+    # math papers.  Reserve the space on the object rather than with a blank
+    # text run, which would be indistinguishable from real text when edited.
     _append_xml_child(
         equation,
         _q("sz"),
-        {"width": "0", "widthRelTo": "ABSOLUTE", "height": "0", "heightRelTo": "ABSOLUTE", "protect": "0"},
+        {
+            "width": str(_equation_reserved_width(script)),
+            "widthRelTo": "ABSOLUTE",
+            "height": "0",
+            "heightRelTo": "ABSOLUTE",
+            "protect": "0",
+        },
     )
     _append_xml_child(
         equation,
@@ -786,14 +871,6 @@ def _append_pdf_equation(run: Any, script: str, equation_index: int) -> None:
     comment.text = "수식입니다."
     script_node = _append_xml_child(equation, _q("script"))
     script_node.text = script
-    # Inline equations report a zero object width in OWPML and rely on the
-    # following text run to reserve horizontal flow space.  Without this
-    # placeholder rhwp/Hancom place consecutive fractions, integrals and
-    # surrounding prose at the same x coordinate, which is the source of the
-    # severe overlap seen in real KICE math papers.
-    placeholder = _append_xml_child(run, _q("t"))
-    placeholder.set(f"{{{XML}}}space", "preserve")
-    placeholder.text = "\u00a0" * len(_equation_placeholder(script))
 
 
 def _append_positioned_pdf_equation(
@@ -1731,6 +1808,18 @@ def _add_pdf_clip_overlay(
                 eroded,
                 max(0.0, min(1.0, float(foreground_stroke_soften_strength))),
             )
+            # Stroke softening is tuned for neutral ink weight; applied to
+            # saturated pixels it washes out source colors, so colored ink is
+            # restored from the untouched crop.
+            base_pixels = np.asarray(image, dtype=np.uint8)
+            colored = (
+                base_pixels.max(axis=2).astype(np.int16)
+                - base_pixels.min(axis=2).astype(np.int16)
+            ) >= _COLORED_PIXEL_SPREAD
+            if colored.any():
+                merged = np.asarray(softened, dtype=np.uint8).copy()
+                merged[colored] = base_pixels[colored]
+                softened = Image.fromarray(merged, mode="RGB")
             output = io.BytesIO()
             softened.save(output, format="PNG", optimize=True)
             image_data = output.getvalue()
@@ -2031,21 +2120,46 @@ def _text_rects(spans: list[dict[str, Any]]) -> list[fitz.Rect]:
     return [fitz.Rect(span["bbox"]) for span in spans if span.get("text", "").strip()]
 
 
+def _resolved_text_color(
+    styles: dict[tuple[str, float, bool, str], str],
+    span: dict[str, Any],
+    *,
+    allow_color: bool,
+) -> str:
+    if not allow_color:
+        return _DEFAULT_TEXT_COLOR
+    color = _text_color_for_span(span)
+    if color == _DEFAULT_TEXT_COLOR:
+        return _DEFAULT_TEXT_COLOR
+    known = {
+        key[3]
+        for key in styles
+        if len(key) > 3 and key[3] != _DEFAULT_TEXT_COLOR
+    }
+    if color not in known and len(known) >= _MAX_TEXT_COLOR_VARIANTS:
+        return _DEFAULT_TEXT_COLOR
+    return color
+
+
 def _ensure_char_pr(
     doc: HwpxDocument,
-    styles: dict[tuple[str, float, bool], str],
+    styles: dict[tuple[str, float, bool, str], str],
     span: dict[str, Any],
     *,
     size_scale: float = 1.0,
     force_font: str | None = None,
+    allow_color: bool = True,
 ) -> str:
     size = max(5.5, round(_flow_size_for_span(span) * max(0.1, size_scale), 2))
     font = force_font or _flow_font_for_span(span)
     bold = _exam_bold_for_span(span)
-    key = (font, size, bold)
+    color = _resolved_text_color(styles, span, allow_color=allow_color)
+    key = (font, size, bold, color)
     char_pr = styles.get(key)
     if char_pr is None:
-        char_pr = doc.ensure_run_style(font=font, size=size, bold=bold)
+        # ``color`` is always explicit so the vendored ``ensure_run_style`` predicate
+        # never recycles a differently colored charPr for the same font/size/bold.
+        char_pr = doc.ensure_run_style(font=font, size=size, bold=bold, color=color)
         _apply_char_metrics(doc.headers[0], [char_pr], ratio=_FLOW_CHAR_RATIO, spacing=_FLOW_CHAR_SPACING)
         styles[key] = char_pr
     return char_pr
@@ -2053,7 +2167,7 @@ def _ensure_char_pr(
 
 def _span_text_runs(
     doc: HwpxDocument,
-    styles: dict[tuple[str, float, bool], str],
+    styles: dict[tuple[str, float, bool, str], str],
     spans: list[dict[str, Any]],
     *,
     size_scale: float = 1.0,
@@ -2271,7 +2385,7 @@ def _add_math_ai_group_equation(
     page: fitz.Page,
     lines: list[dict[str, Any]],
     *,
-    styles: dict[tuple[str, float, bool], str],
+    styles: dict[tuple[str, float, bool, str], str],
     para_pr_id_ref: str,
     z_counter: list[int],
     page_transform: _PageTransform,
@@ -2305,7 +2419,7 @@ def _add_math_ai_recognition_equation(
     lines: list[dict[str, Any]],
     result: pdf_math_ai.MathAIRecognition,
     *,
-    styles: dict[tuple[str, float, bool], str],
+    styles: dict[tuple[str, float, bool, str], str],
     para_pr_id_ref: str,
     z_counter: list[int],
     page_transform: _PageTransform,
@@ -2348,7 +2462,7 @@ def _add_positioned_native_math_for_line(
     anchor: Any,
     line: dict[str, Any],
     *,
-    styles: dict[tuple[str, float, bool], str],
+    styles: dict[tuple[str, float, bool, str], str],
     z_counter: list[int],
     page_transform: _PageTransform,
     equation_counter: list[int],
@@ -2408,7 +2522,7 @@ def _add_char_layout_text_boxes(
     anchor: Any,
     line: dict[str, Any],
     *,
-    styles: dict[tuple[str, float, bool], str],
+    styles: dict[tuple[str, float, bool, str], str],
     para_pr_id_ref: str,
     z_counter: list[int],
     page_transform: _PageTransform,
@@ -4372,7 +4486,7 @@ def _append_cell_line(
     cell: Any,
     line: dict[str, Any],
     *,
-    styles: dict[tuple[str, float, bool], str],
+    styles: dict[tuple[str, float, bool, str], str],
     para_pr_id_ref: str,
     font_scale: float = 1.0,
     force_font: str | None = None,
@@ -4412,7 +4526,7 @@ def _append_cell_paragraph_lines(
     cell: Any,
     lines: list[dict[str, Any]],
     *,
-    styles: dict[tuple[str, float, bool], str],
+    styles: dict[tuple[str, float, bool, str], str],
     para_pr_id_ref: str,
     font_scale: float = 1.0,
     force_font: str | None = None,
@@ -5234,7 +5348,7 @@ def _append_native_flow_table(
     cell: Any,
     block: dict[str, Any],
     *,
-    styles: dict[tuple[str, float, bool], str],
+    styles: dict[tuple[str, float, bool, str], str],
     para_styles: dict[tuple[Any, ...], str],
     cell_width: int,
     border_fill_id_ref: str,
@@ -6243,7 +6357,7 @@ def _append_header_table(
     table_height: int,
     no_border_fill: str,
     compact_para: str,
-    styles: dict[tuple[str, float, bool], str],
+    styles: dict[tuple[str, float, bool, str], str],
     page_break: bool,
     coordinate_scale: float = 1.0,
     font_scale: float = 1.0,
@@ -6313,7 +6427,7 @@ def _append_header_content_to_cell(
     table_height: int,
     no_border_fill: str,
     compact_para: str,
-    styles: dict[tuple[str, float, bool], str],
+    styles: dict[tuple[str, float, bool, str], str],
     para_styles: dict[tuple[Any, ...], str],
     coordinate_scale: float = 1.0,
     font_scale: float = 1.0,
@@ -6707,7 +6821,7 @@ def _append_flow_block(
     cell: Any,
     block: dict[str, Any],
     *,
-    styles: dict[tuple[str, float, bool], str],
+    styles: dict[tuple[str, float, bool, str], str],
     para_styles: dict[tuple[Any, ...], str],
     para_pr_id_ref: str,
     cell_width: int,
@@ -7132,7 +7246,7 @@ def write_pdf_flow_hwpx(
     )
     _apply_char_metrics(header, [spacer_cp], ratio=100, spacing=0)
 
-    styles: dict[tuple[str, float, bool], str] = {}
+    styles: dict[tuple[str, float, bool, str], str] = {}
     para_styles: dict[tuple[Any, ...], str] = {}
     page_count = 0
     line_count = 0
@@ -8479,7 +8593,7 @@ def _write_structured_math_page_tables(
         ratio=_FLOW_CHAR_RATIO,
         spacing=_FLOW_CHAR_SPACING,
     )
-    header_styles: dict[tuple[str, float, bool], str] = {}
+    header_styles: dict[tuple[str, float, bool, str], str] = {}
     para_styles: dict[tuple[Any, ...], str] = {}
     equation_counter = [0]
 
@@ -10055,7 +10169,7 @@ def write_pdf_layout_hwpx(
     page_standard_names: set[str] = set()
     page_print_paper_names: set[str] = set()
     page_print_scale_values: set[float] = set()
-    styles: dict[tuple[str, float, bool], str] = {}
+    styles: dict[tuple[str, float, bool, str], str] = {}
     z_counter = [0]
     equation_counter = [0]
     math_ai_enabled = pdf_math_ai.resolve_math_ai_enabled(math_ai_recognition)

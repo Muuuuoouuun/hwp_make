@@ -30,6 +30,16 @@ _INLINE_MATH_CONNECTOR_RE = re.compile(
     r"^[\s,;:=+\-−*/×÷<>≤≥∩∪→∞πθ\[\](){}|'′.]+$"
 )
 
+_PLACEHOLDER_CHARS = "□▢"
+# A text line that carries nothing but a fraction bar and the delimiters the
+# equation font stacks around it (big braces, absolute-value rules, brackets).
+_BARE_BAR_LINE_RE = re.compile(rf"^[{_PLACEHOLDER_CHARS}()\[\]{{}}|\s]+$")
+
+
+def _placeholder_count(value: str) -> int:
+    text = str(value or "")
+    return sum(text.count(char) for char in _PLACEHOLDER_CHARS)
+
 
 @dataclass(frozen=True, slots=True)
 class Glyph:
@@ -507,6 +517,70 @@ def _fraction_parts(glyphs: list[Glyph], rule: Glyph) -> tuple[list[Glyph], list
     return numerator, denominator
 
 
+def _fraction_from_bar(
+    glyphs: list[Glyph],
+    rule: Glyph,
+) -> tuple[str, list[Glyph], list[Glyph]] | None:
+    """Return ``\\frac{..}{..}`` for a bar glyph with unambiguous stacked parts.
+
+    Evidence rule: the bar's own character rectangle must have math glyphs both
+    above and below it and horizontally inside its span (``_fraction_parts``).
+    Vector accents, radical vinculums, and empty answer boxes carry no glyphs on
+    one of the two sides, so they never reach a substitution here.
+    """
+    numerator, denominator = _fraction_parts(glyphs, rule)
+    numerator_text = _inline_expression(numerator)
+    denominator_text = _inline_expression(denominator)
+    if not numerator_text or not denominator_text:
+        return None
+    if _placeholder_count(numerator_text) or _placeholder_count(denominator_text):
+        return None
+    return rf"\frac{{{numerator_text}}}{{{denominator_text}}}", numerator, denominator
+
+
+def _resolve_fraction_bars(
+    scope: list[Glyph],
+    glyphs: list[Glyph],
+) -> tuple[list[Glyph], set[int], int]:
+    """Swap resolvable fraction bars inside ``scope`` for ``\\frac`` tokens.
+
+    ``scope`` is the glyph run about to be flattened by ``_inline_expression``;
+    ``glyphs`` is the wider search space the numerator/denominator may live in
+    because the PDF text layer emits them as separate lines.
+    """
+    if not scope:
+        return list(scope), set(), 0
+    baseline_size = _baseline(scope)[0]
+    working = list(scope)
+    donors: set[int] = set()
+    resolved = 0
+    for rule in [glyph for glyph in scope if glyph.text in _PLACEHOLDER_CHARS]:
+        fraction = _fraction_from_bar(glyphs, rule)
+        if fraction is None:
+            continue
+        text, numerator, denominator = fraction
+        removed = {id(glyph) for glyph in (rule, *numerator, *denominator)}
+        working = [glyph for glyph in working if id(glyph) not in removed]
+        working.append(
+            Glyph(
+                text=text,
+                left=rule.left,
+                top=rule.top,
+                right=rule.right,
+                bottom=rule.bottom,
+                size=baseline_size,
+                line_index=rule.line_index,
+            )
+        )
+        donors.update(
+            glyph.line_index
+            for glyph in (*numerator, *denominator)
+            if glyph.line_index != rule.line_index
+        )
+        resolved += 1
+    return working, donors, resolved
+
+
 def _latex_limit_script(text: str) -> str:
     return text.replace("→", r"\to ").replace("∞", r"\infty ").strip()
 
@@ -982,9 +1056,18 @@ def _repair_multi_fraction_rows(
             )
         if valid_rules < 2:
             continue
+        # A bar whose numerator or denominator sits outside the row window is
+        # still a fraction; retry those against every glyph of the problem so
+        # the flattened row cannot leak a bare bar into the equation.
+        working, extra_donor_lines, _extra = _resolve_fraction_bars(working, glyphs)
+        involved_lines.update(extra_donor_lines)
         involved_lines.update(glyph.line_index for glyph in row_glyphs)
         expression = _inline_expression(working)
         if not expression or _HANGUL_RE.search(expression):
+            continue
+        if _placeholder_count(expression):
+            # Rewriting the row would swap already-recovered stacked lines for
+            # an equation that still hides an unresolved structure.
             continue
         candidate, changed = _replace_geometry_lines(
             repaired,
@@ -1015,6 +1098,72 @@ def _repair_multi_fraction_rows(
     return repaired, repairs
 
 
+def _repair_placeholder_only_fraction_lines(
+    stem: str,
+    line_geometries: list[dict[str, Any]],
+    glyphs: list[Glyph],
+) -> tuple[str, int]:
+    """Rebuild a stacked fraction whose bar owns a whole PDF text line.
+
+    Tall grouping structures (piecewise braces, absolute-value rules) push the
+    fraction bar onto a line of its own, so no linear pass can see which rows
+    belong to it.  The bar is only rewritten when its numerator and denominator
+    each occupy a separate text line that the bar consumes completely, which
+    makes the reconstruction unambiguous and keeps the removal lossless.
+    """
+    mapping = _stem_geometry_map(stem, line_geometries)
+    lines = str(stem or "").splitlines()
+    replacements: dict[int, str] = {}
+    removals: set[int] = set()
+    count = 0
+    for geometry_index, stem_index in sorted(mapping.items()):
+        source = _line_text(line_geometries[geometry_index])
+        if _placeholder_count(source) != 1 or not _BARE_BAR_LINE_RE.fullmatch(source):
+            continue
+        if stem_index in removals or stem_index in replacements:
+            continue
+        rules = [glyph for glyph in _line_glyphs(glyphs, geometry_index) if glyph.text in _PLACEHOLDER_CHARS]
+        if len(rules) != 1:
+            continue
+        fraction = _fraction_from_bar(glyphs, rules[0])
+        if fraction is None:
+            continue
+        text, numerator, denominator = fraction
+        part_ids = {id(glyph) for glyph in (*numerator, *denominator)}
+        donor_lines = {glyph.line_index for glyph in (*numerator, *denominator)}
+        if geometry_index in donor_lines or not donor_lines <= set(mapping):
+            continue
+        donor_stems = {mapping[index] for index in donor_lines}
+        if donor_stems & (removals | set(replacements)) or stem_index in donor_stems:
+            continue
+        # Deleting a donor line may not drop glyphs the fraction did not take.
+        if any(
+            id(glyph) not in part_ids
+            for index in donor_lines
+            for glyph in _line_glyphs(glyphs, index)
+        ):
+            continue
+        replacements[stem_index] = _replace_nth_placeholder(lines[stem_index], 0, text)
+        removals.update(donor_stems)
+        count += 1
+    if not count:
+        return stem, 0
+    rebuilt = [
+        replacements.get(index, line)
+        for index, line in enumerate(lines)
+        if index not in removals
+    ]
+    return "\n".join(rebuilt).strip(), count
+
+
+def _replace_nth_placeholder(text: str, occurrence: int, replacement: str) -> str:
+    matches = list(re.finditer(rf"[{_PLACEHOLDER_CHARS}]", str(text or "")))
+    if occurrence < 0 or occurrence >= len(matches):
+        return text
+    match = matches[occurrence]
+    return f"{text[:match.start()]}{replacement}{text[match.end():]}"
+
+
 def _repair_inline_scripts(stem: str, line_geometries: list[dict[str, Any]], glyphs: list[Glyph]) -> tuple[str, int]:
     lines = str(stem or "").splitlines()
     changed = 0
@@ -1034,10 +1183,18 @@ def _repair_inline_scripts(stem: str, line_geometries: list[dict[str, Any]], gly
         )
         if not has_script:
             continue
-        rebuilt = _inline_expression(line_chars)
-        if rebuilt and rebuilt != lines[stem_index].strip():
-            lines[stem_index] = rebuilt
-            changed += 1
+        working, _donors, _resolved = _resolve_fraction_bars(line_chars, glyphs)
+        rebuilt = math_text.normalize_recognized_math_text(_inline_expression(working))
+        if not rebuilt or rebuilt == lines[stem_index].strip():
+            continue
+        # ``line["text"]`` can already carry a structure (``\frac``/``\vec``)
+        # that the raw characters only express as a private-use bar glyph.
+        # Re-flattening those characters would trade a restored formula for a
+        # bare placeholder, so a rebuild may never add unresolved squares.
+        if _placeholder_count(rebuilt) > _placeholder_count(lines[stem_index]):
+            continue
+        lines[stem_index] = rebuilt
+        changed += 1
     return "\n".join(lines).strip(), changed
 
 
@@ -1360,6 +1517,8 @@ def repair_problem_math_layout(
     repaired, limit_count = _repair_limits(repaired, geometry, glyphs)
     repaired, repaired_choices, radical_count = _repair_radicals(repaired, choices, geometry, glyphs)
     repaired, multi_fraction_count = _repair_multi_fraction_rows(repaired, geometry, glyphs)
+    repaired, bar_line_fraction_count = _repair_placeholder_only_fraction_lines(repaired, geometry, glyphs)
+    multi_fraction_count += bar_line_fraction_count
     suspicious_flat_fraction = bool(
         re.search(r"[A-Za-z]\d{2,}[A-Za-z]|[A-Za-z]\d+[A-Za-z]{2,}", repaired)
     )

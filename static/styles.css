@@ -219,6 +219,7 @@ select { cursor: pointer; }
 .pane-heading > div, .pane-titlebar > div { gap: 8px; }
 .pane-heading h2, .pane-titlebar h2 { margin: 0; font-size: 14px; letter-spacing: -.02em; }
 .pane-context { max-width: min(220px, 30vw); overflow: hidden; padding-left: 8px; border-left: 1px solid var(--line); color: var(--muted); font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.pane-context.warn { border-left-color: var(--warning); color: var(--warning); font-weight: 700; }
 .pane-heading p { margin: 2px 0 0 26px; color: var(--muted); font-size: 10px; }
 .pane-heading.with-count { display: grid; grid-template-columns: 1fr auto; }
 .pane-heading.with-count p { grid-column: 1 / -1; }
@@ -362,6 +363,7 @@ select { cursor: pointer; }
 .preview-controls { flex: 0 0 auto; padding: 7px 10px; border-bottom: 1px solid var(--line); background: #fff; }
 .preview-controls > label, .preview-controls .field-row { margin-bottom: 5px; }
 .option-row { grid-template-columns: 1fr 1fr; }
+.layout-plan-warnings { flex: 0 0 auto; margin: 0; padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--warning-soft); color: var(--warning); font-size: 10px; line-height: 1.45; }
 .paper-stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; padding: 10px; background: var(--surface-strong); overscroll-behavior: contain; }
 .paper-stage.pan-ready { cursor: grab; }
 .paper-stage.panning { cursor: grabbing; user-select: none; }
@@ -388,6 +390,9 @@ select { cursor: pointer; }
 .basket-label { overflow: hidden; color: #252525; font-size: 10px; font-weight: 760; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .basket-snippet { display: -webkit-box; margin-top: 3px; overflow: hidden; color: #555; font-family: "Batang", serif; font-size: 9px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .basket-position { margin-top: 4px; color: #7b8494; font-size: 8px; }
+.basket-risk-badge { display: inline-flex; align-self: flex-start; align-items: center; min-height: 0; margin-top: 4px; padding: 2px 6px; border: 0; border-radius: 999px; background: var(--warning-soft); color: var(--warning); font-family: "Pretendard", sans-serif; font-size: 8px; font-weight: 700; cursor: pointer; }
+.basket-risk-badge.shift { background: var(--accent-soft); color: var(--accent); }
+.basket-risk-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .basket-btn { min-width: 23px; min-height: 23px; padding: 0; border-color: transparent; opacity: 0; }
 .basket-row:hover .basket-btn, .basket-row:focus-within .basket-btn { opacity: 1; }
 .preview-footer { display: grid; grid-template-columns: minmax(100px, .65fr) minmax(220px, 1.35fr); align-items: center; flex: 0 0 auto; gap: 6px; padding: 5px 10px; border-top: 1px solid var(--line); background: #fff; }

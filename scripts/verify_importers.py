@@ -356,6 +356,10 @@ if math_text.extract_math_spans("시험일 2026-07-07"):
 for non_formula in ("쪽 범위 100-200", "문항 ID A1-2026", "가격은 $5 and $10"):
     if math_text.extract_math_spans(non_formula):
         failures.append(f"Math analyzer: non-formula text was misread as formula: {non_formula}")
+# 통화 필터가 실제 수식(숫자+식별자)까지 삼키면 $ 짝이 밀려 수식/산문 스왑이 난다(2026-08-03).
+for formula_like in ("주기가 $6  pi$이고", "반지름이 $60 r$일 때"):
+    if not math_text.extract_math_spans(formula_like):
+        failures.append(f"Math analyzer: currency filter swallowed a real formula: {formula_like}")
 
 odd_form_key = importers._recognized_pdf_loose_duplicate_key(
     "26",

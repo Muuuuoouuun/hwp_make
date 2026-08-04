@@ -225,7 +225,7 @@
 
         <section id="previewWorkPane" class="work-pane preview-pane" aria-label="시험지 미리보기와 내보내기">
           <div class="pane-titlebar">
-            <div><span class="section-index">03</span><h2>시험지 미리보기</h2></div>
+            <div><span class="section-index">03</span><h2>시험지 미리보기</h2><span id="layoutPlanSummary" class="pane-context" title="내보내기 전 추정치"></span></div>
             <div class="preview-title-actions">
               <div class="zoom-toolbar" role="toolbar" aria-label="시험지 확대와 이동">
                 <button id="zoomOutButton" type="button" title="축소 (-)" aria-label="시험지 축소" aria-keyshortcuts="-">
@@ -256,6 +256,7 @@
               <label id="nativeMathLabel" class="check-label"><input id="exportNativeMath" type="checkbox" /> 네이티브 수식</label>
             </div>
           </div>
+          <div id="layoutPlanWarnings" class="layout-plan-warnings hidden" role="note" aria-live="polite"></div>
           <div id="paperStage" class="paper-stage" role="region" tabindex="0" aria-label="시험지 작업 캔버스, 현재 배율 100%. Space를 누른 채 드래그하여 이동합니다.">
             <div id="paperViewport" class="paper-viewport">
             <div id="paperSheet" class="paper-sheet one-column">
@@ -363,6 +364,7 @@
     </div>
 
     <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+    <script src="/static/layout-planner.js?v=1"></script>
     <script src="/static/app.js?v=25" type="module"></script>
   </body>
 </html>

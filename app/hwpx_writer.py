@@ -1086,9 +1086,46 @@ def _equation_size(script: str) -> tuple[int, int]:
     return width, min(height, 6200)
 
 
+# ``hp:sz`` is the box the renderer scales the equation glyphs into, so it has to
+# track the drawn advance rather than the deliberately generous width
+# ``_equation_size`` budgets for the writer's own line-wrap estimator.  Measured
+# against rhwp renders, HancomEQN draws at roughly 0.6x that budget; reserving
+# the raw estimate turns the slack the old blank placeholder runs absorbed into
+# real ink and overruns the right page margin.
+_EQUATION_RENDER_WIDTH_RATIO = 0.60
+# Dense contexts (choice grids, narrow columns) keep the tighter budget they have
+# always used, so several equations still share one line.
+_EQUATION_COMPACT_WIDTH_RATIO = 0.37
+
+
+def _equation_reserved_width(script: str, *, compact: bool = False) -> int:
+    """Return the flow width (HWPUNIT) an inline equation must reserve.
+
+    Inline ``hp:equation`` shapes are ``treatAsChar`` objects, so the renderer
+    advances the text cursor by the object's ``hp:sz`` width.  Publishing a zero
+    width makes Hancom/rhwp draw the equation and the prose that follows it at
+    the same x coordinate -- the severe overlap seen in real KICE math papers.
+    Declaring the extent on the object is what keeps consecutive fractions,
+    integrals and surrounding text apart, without padding the flow with blank
+    text runs that are indistinguishable from real text once edited.
+    """
+
+    width, _height = _equation_size(script)
+    ratio = _EQUATION_COMPACT_WIDTH_RATIO if compact else _EQUATION_RENDER_WIDTH_RATIO
+    return max(300, int(width * ratio))
+
+
 def _equation_placeholder(script: str) -> str:
-    width, _ = _equation_size(script)
-    return " " * max(2, min(36, width // 550))
+    """Deprecated shim: inline equations no longer pad the flow with blanks.
+
+    Width reservation moved onto the equation object itself
+    (:func:`_equation_reserved_width` -> ``hp:sz@width``).  Whitespace-only runs
+    next to an equation are layout debt: they are indistinguishable from real
+    text when the document is edited.  Kept as a stable import for callers that
+    still reference it; it always yields an empty string.
+    """
+
+    return ""
 
 
 def _native_math_height(text: str) -> int:
@@ -1103,14 +1140,14 @@ def _native_math_height(text: str) -> int:
 
 
 def _equation_xml(script: str, instance: int) -> str:
-    placeholder = _equation_placeholder(script)
+    reserved_width = _equation_reserved_width(script)
     return f"""<hp:equation id="{1000000000 + instance}" zOrder="{instance}" numberingType="EQUATION" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" version="Equation Version 60" baseLine="0" textColor="#000000" baseUnit="1000" lineMode="CHAR" font="HancomEQN">
-        <hp:sz width="0" widthRelTo="ABSOLUTE" height="0" heightRelTo="ABSOLUTE" protect="0"/>
+        <hp:sz width="{reserved_width}" widthRelTo="ABSOLUTE" height="0" heightRelTo="ABSOLUTE" protect="0"/>
         <hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>
         <hp:outMargin left="56" right="56" top="0" bottom="0"/>
         <hp:shapeComment>수식입니다.</hp:shapeComment>
         <hp:script>{_esc(script)}</hp:script>
-      </hp:equation><hp:t xml:space="preserve">{placeholder}</hp:t>"""
+      </hp:equation>"""
 
 
 def _text_runs(

@@ -130,6 +130,8 @@ const els = {
   paperTemplateLabel: document.querySelector("#paperTemplateLabel"),
   paperLayoutHint: document.querySelector("#paperLayoutHint"),
   paperColumnLabel: document.querySelector("#paperColumnLabel"),
+  layoutPlanSummary: document.querySelector("#layoutPlanSummary"),
+  layoutPlanWarnings: document.querySelector("#layoutPlanWarnings"),
   exportTemplate: document.querySelector("#exportTemplate"),
   exportFormat: document.querySelector("#exportFormat"),
   exportAnswerSheet: document.querySelector("#exportAnswerSheet"),
@@ -1467,6 +1469,84 @@ async function handleImportedProblems(created, { quick = false } = {}) {
   return true;
 }
 
+// --- 예상 배치 · 분할 경고 (static/layout-planner.js) -------------------------
+// HwpLayoutPlanner.planLayout() 은 문항 높이를 추정해 페이지/단 배치를 미리 계산하는 순수
+// 클라이언트 라이브러리다. 실제 출력은 내보내기 시 서버 writer(app/hwpx_writer_v2.py 등)가
+// 최종 확정하므로 여기서 만드는 값은 어디까지나 "내보내기 전 추정치"다.
+//
+// 템플릿 컬럼 수: planLayout 은 template.columns / template.inline_short_choices /
+// template.answer_blank / template.include_answers / template.include_explanations 를 읽는다.
+// 백엔드 ExamTemplate(app/exam_templates.py)의 export_option() 이 dataclass 전체 필드를
+// 그대로 직렬화해 /api/export-templates 로 내려주므로, currentExportTemplate() 이 반환하는
+// 객체를 그대로 넘기면 된다 — 별도 매핑표가 필요 없다. 참고로 현재 값은 kice_*(평가원 국어/
+// 수학/영어/사탐/과탐 등) = columns 2, 그 외 basic/school_exam/legacy_* = columns 1 이다.
+function resolveBasketProblem(entry) {
+  return state.problemById.get(entry.id) || state.problems.find((item) => item.id === entry.id) || null;
+}
+
+function computeLayoutPlan() {
+  const planner = window.HwpLayoutPlanner;
+  if (!planner || !state.basket.length) return null;
+  const template = currentExportTemplate() || { columns: 1 };
+  const problems = state.basket.map(
+    (entry) => resolveBasketProblem(entry) || { id: entry.id, title: entry.label, stem: entry.label },
+  );
+  return planner.planLayout(problems, template);
+}
+
+function layoutRiskLabel(index) {
+  const entry = state.basket[index];
+  if (!entry) return `${index + 1}번째 문항`;
+  const problem = resolveBasketProblem(entry);
+  return `${index + 1}. ${problem ? problemLabel(problem) : entry.label}`;
+}
+
+function renderLayoutPlanSummary(plan) {
+  if (els.layoutPlanSummary) {
+    if (!plan) {
+      els.layoutPlanSummary.textContent = "";
+      els.layoutPlanSummary.removeAttribute("title");
+      els.layoutPlanSummary.classList.remove("warn");
+    } else {
+      const parts = [`예상 ${plan.pageCount}쪽`, `${plan.columns}단`];
+      if (plan.splitCount > 0) parts.push(`분할주의 ${plan.splitCount}문항`);
+      els.layoutPlanSummary.textContent = parts.join(" · ");
+      els.layoutPlanSummary.title =
+        "내보내기 전 추정치 · 문항 높이 기준으로 계산한 예상 배치이며 실제 결과는 HWPX 만들기에서 확정됩니다.";
+      els.layoutPlanSummary.classList.toggle("warn", plan.splitCount > 0);
+    }
+  }
+  if (els.layoutPlanWarnings) {
+    const risky = plan?.placements?.filter((item) => item.oversized) || [];
+    if (!risky.length) {
+      els.layoutPlanWarnings.classList.add("hidden");
+      els.layoutPlanWarnings.textContent = "";
+    } else {
+      const names = risky.map((item) => layoutRiskLabel(item.index)).join(", ");
+      els.layoutPlanWarnings.textContent =
+        `분할 위험 ${risky.length}문항 — ${names}: 예상 높이가 한 단을 초과해 다음 단·페이지로 ` +
+        "이어질 수 있습니다. 내보내기 전 추정치이며 실제 결과는 HWPX 만들기에서 확정됩니다.";
+      els.layoutPlanWarnings.classList.remove("hidden");
+    }
+  }
+}
+
+function createLayoutRiskBadge(placement) {
+  const badge = document.createElement("button");
+  badge.type = "button";
+  const isSplit = Boolean(placement.oversized);
+  badge.className = `basket-risk-badge ${isSplit ? "split" : "shift"}`;
+  const text = isSplit ? "분할 위험" : "단 이동";
+  badge.textContent = text;
+  const detail = isSplit
+    ? "예상 높이가 한 단을 초과해 다음 단·페이지로 이어질 수 있습니다. 내보내기 전 추정치이며 실제 결과는 HWPX 만들기에서 확정됩니다."
+    : `앞 문항 뒤 남은 공간에 들어가지 않아 ${placement.label}부터 시작할 것으로 예상됩니다. 내보내기 전 추정치입니다.`;
+  badge.title = detail;
+  badge.setAttribute("aria-label", `${text}: ${detail}`);
+  badge.addEventListener("click", () => toast(detail));
+  return badge;
+}
+
 function renderBasket() {
   persistBasket();
   const count = state.basket.length;
@@ -1480,6 +1560,8 @@ function renderBasket() {
   if (els.previewButton) els.previewButton.disabled = !count;
   if (els.exportButton) els.exportButton.disabled = !count;
   els.basketList.innerHTML = "";
+  const layoutPlan = computeLayoutPlan();
+  renderLayoutPlanSummary(layoutPlan);
   if (!state.basket.length) {
     const empty = document.createElement("div");
     empty.className = "basket-empty";
@@ -1490,7 +1572,7 @@ function renderBasket() {
   }
 
   state.basket.forEach((entry, index) => {
-    const problem = state.problemById.get(entry.id) || state.problems.find((item) => item.id === entry.id);
+    const problem = resolveBasketProblem(entry);
     if (problem) entry.label = problemLabel(problem);
 
     const row = document.createElement("div");
@@ -1522,6 +1604,10 @@ function renderBasket() {
     position.textContent = `${index + 1}번째 문항 · 실제 열 위치는 페이지 렌더에서 확정`;
 
     body.append(label, snippet, position);
+    const placement = layoutPlan?.placements?.[index];
+    if (placement && (placement.oversized || placement.breakBefore)) {
+      body.append(createLayoutRiskBadge(placement));
+    }
     label.addEventListener("click", async () => {
       await selectProblem(entry.id);
     });

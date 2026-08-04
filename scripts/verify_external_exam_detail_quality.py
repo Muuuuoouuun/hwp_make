@@ -74,21 +74,25 @@ def _paragraph_audit(path: Path) -> dict[str, int]:
 
 
 def main() -> int:
-    # 실물 평가원 PDF는 저작권상 로컬 전용(data/ 는 gitignore) — 없으면 저장소 관례대로 SKIP(exit 2).
-    missing_sources = [
-        str(ROOT / "data" / "external_exam_qa" / group / f"{subject}.pdf")
+    # 실물 평가원 PDF는 저작권상 로컬 전용(data/ 는 gitignore) — 케이스 단위로 존재하는
+    # 것만 검증하고, 없는 케이스는 명시적으로 건너뛴다(전부 없으면 저장소 관례대로 exit 2).
+    available_cases = [
+        (group, subject)
         for group, subject in CASES
-        if not (ROOT / "data" / "external_exam_qa" / group / f"{subject}.pdf").is_file()
+        if (ROOT / "data" / "external_exam_qa" / group / f"{subject}.pdf").is_file()
     ]
-    if missing_sources:
-        print("SKIP: external exam source PDFs missing (local-only samples):")
-        for path in missing_sources:
-            print(f"  - {path}")
+    skipped_cases = [case for case in CASES if case not in available_cases]
+    if skipped_cases:
+        print(f"주의: 소스 PDF 없는 케이스 {len(skipped_cases)}건은 건너뜀 (로컬 전용 샘플):")
+        for group, subject in skipped_cases:
+            print(f"  - {group}/{subject}.pdf")
+    if not available_cases:
+        print("SKIP: external exam source PDFs missing entirely (local-only samples).")
         return 2
 
-    report: dict[str, object] = {"cases": [], "failures": []}
+    report: dict[str, object] = {"cases": [], "failures": [], "skipped_cases": [f"{g}/{s}" for g, s in skipped_cases]}
     failures: list[str] = report["failures"]  # type: ignore[assignment]
-    for group, subject in CASES:
+    for group, subject in available_cases:
         source = ROOT / "data" / "external_exam_qa" / group / f"{subject}.pdf"
         output_dir = source.parent / "outputs_developed"
         output_dir.mkdir(parents=True, exist_ok=True)

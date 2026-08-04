@@ -57,9 +57,65 @@ const oneColumn = planner.planLayout([problem(6, 10), problem(7, 10)], { key: "b
 assert(oneColumn.columns === 1, "single-column template was not respected");
 assert(oneColumn.placements.every((item) => item.start.column === 1), "single-column plan emitted a second column");
 
-// NOTE(2026-08-03 병합): layout-planner는 현재 워크벤치 UI에 배선되지 않은 독립 라이브러리다.
-// (ai_0.1 워크벤치 UI 채택으로 구 UI 배선이 제거됨. 높이 기반 예상 페이지/분할 경고의
-// 워크벤치 재통합은 후속 작업 — 재통합 시 여기에 배선 어설션을 복원할 것.)
-// 위의 planLayout 단위 검증만 회귀핀으로 유지한다.
+// 워크벤치 배선 핀 (P1-⑤, 2026-08-03 병합 이후 재통합): layout-planner.js 가 index.html 에서
+// 로드되고, app.js 의 renderBasket() 흐름이 planLayout 을 호출해 "예상 배치·경계 경고"
+// (요약 줄 · 문항 배지 · 분할 경고 목록)를 실제로 렌더링하는지 고정한다.
+const indexHtml = fs.readFileSync(path.join(root, "static", "index.html"), "utf8");
+const appJs = fs.readFileSync(path.join(root, "static", "app.js"), "utf8");
 
-console.log("Frontend layout planning OK");
+assert(
+  /<script src="\/static\/layout-planner\.js\?v=\d+"><\/script>/.test(indexHtml),
+  "index.html does not load layout-planner.js with a cache-busted script tag",
+);
+const plannerTagIndex = indexHtml.indexOf("layout-planner.js");
+const appTagIndex = indexHtml.indexOf("/static/app.js");
+assert(
+  plannerTagIndex >= 0 && appTagIndex >= 0 && plannerTagIndex < appTagIndex,
+  "layout-planner.js must load before the app.js module tag so HwpLayoutPlanner exists on globalThis in time",
+);
+for (const id of ["layoutPlanSummary", "layoutPlanWarnings"]) {
+  assert(indexHtml.includes(`id="${id}"`), `index.html is missing #${id}`);
+  assert(
+    appJs.includes(`document.querySelector("#${id}")`),
+    `app.js does not bind #${id} in its els lookup table`,
+  );
+}
+
+assert(appJs.includes("function computeLayoutPlan("), "app.js is missing computeLayoutPlan()");
+assert(
+  appJs.includes("window.HwpLayoutPlanner"),
+  "computeLayoutPlan() must read the planner off window.HwpLayoutPlanner (defensive against a missing script tag)",
+);
+assert(/planner\.planLayout\(/.test(appJs), "computeLayoutPlan() does not call HwpLayoutPlanner.planLayout()");
+assert(appJs.includes("function renderLayoutPlanSummary("), "app.js is missing renderLayoutPlanSummary()");
+assert(appJs.includes("function createLayoutRiskBadge("), "app.js is missing createLayoutRiskBadge()");
+assert(appJs.includes("basket-risk-badge"), "basket rows do not render a layout-risk badge element");
+assert(
+  appJs.includes("분할 위험") && appJs.includes("단 이동"),
+  "risk badge copy (분할 위험 for oversized / 단 이동 for breakBefore) is missing",
+);
+
+// renderBasket() must compute + render the plan on every call, since both basket mutations and
+// syncTemplatePreview() (export template change) funnel through it.
+const renderBasketStart = appJs.indexOf("function renderBasket(");
+assert(renderBasketStart >= 0, "renderBasket() not found in app.js");
+const renderBasketBody = appJs.slice(renderBasketStart, renderBasketStart + 1000);
+assert(renderBasketBody.includes("computeLayoutPlan()"), "renderBasket() does not compute the layout plan");
+assert(
+  renderBasketBody.includes("renderLayoutPlanSummary(layoutPlan)"),
+  "renderBasket() does not render the layout plan summary/warnings",
+);
+assert(
+  appJs.includes("layoutPlan?.placements?.[index]"),
+  "basket rows are not matched to their layout-plan placement by index",
+);
+
+const syncTemplatePreviewStart = appJs.indexOf("function syncTemplatePreview()");
+assert(syncTemplatePreviewStart >= 0, "syncTemplatePreview() not found in app.js");
+const syncTemplatePreviewBody = appJs.slice(syncTemplatePreviewStart, syncTemplatePreviewStart + 800);
+assert(
+  syncTemplatePreviewBody.includes("renderBasket();"),
+  "syncTemplatePreview() must still re-render the basket (and therefore the layout plan) on template change",
+);
+
+console.log("Frontend layout planning + workbench wiring OK");

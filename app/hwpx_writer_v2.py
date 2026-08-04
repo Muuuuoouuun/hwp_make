@@ -44,8 +44,8 @@ from .hwpx_writer import (  # noqa: E402  (포맷 로직 재사용)
     MAX_IMAGE_WIDTH,
     PX_TO_HWPUNIT,
     SOURCE_MARKER_RE,
+    _equation_reserved_width,
     _equation_size,
-    _equation_placeholder,
     _format_choice,
     _hancom_eqn_script,
     _native_math_height,
@@ -662,11 +662,15 @@ def _append_equation_run(
             "font": "HancomEQN",
         },
     )
+    # Inline equations are treatAsChar objects: the renderer advances the text
+    # cursor by this width.  A zero width makes Hancom/rhwp draw the following
+    # prose on top of the equation, so declare the estimated extent instead of
+    # padding the flow with blank text runs.
     equation.append(
         equation.makeelement(
             f"{_HP}sz",
             {
-                "width": "0",
+                "width": str(_equation_reserved_width(script, compact=compact_placeholder)),
                 "widthRelTo": "ABSOLUTE",
                 "height": "0",
                 "heightRelTo": "ABSOLUTE",
@@ -705,13 +709,6 @@ def _append_equation_run(
     script_node.text = script
     equation.append(script_node)
     run.append(equation)
-    placeholder = run.makeelement(f"{_HP}t", {"{http://www.w3.org/XML/1998/namespace}space": "preserve"})
-    if compact_placeholder:
-        width, _height = _equation_size(script)
-        placeholder.text = " " * max(1, min(12, width // 900))
-    else:
-        placeholder.text = _equation_placeholder(script)
-    run.append(placeholder)
 
 
 def _replace_paragraph_runs(

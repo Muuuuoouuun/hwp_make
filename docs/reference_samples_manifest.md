@@ -101,6 +101,19 @@ python scripts/verify_pdf_layout_hwpx.py "data/exports/25수능_수학_flow.hwpx
 - HWP sample equation/layout QA: `python scripts/qa_hwp_math_samples.py`
 - HWP open probe when a licensed Hancom install is available: `powershell -ExecutionPolicy Bypass -File scripts/probe_hwp_open.ps1`
 
+## Gate ↔ Sample Availability Map (2026-08-03 감사)
+
+이 머신 기준으로 샘플 의존 게이트가 어떤 파일을 어디서 찾는지의 매핑. 소스가 없으면 게이트는 exit 2(SKIP)이며, 케이스 단위 SKIP을 지원하는 게이트는 가용 케이스만 검증한다.
+
+| 게이트 | 요구 파일 | 이 머신 상태 |
+| --- | --- | --- |
+| `verify_real_pdf_math_samples.py` | `data/uploads/{25수능 수학, 26-6월 수학영역_문제지, 수학 2교시, 수학영역_문제지_홀수형_2025학년도}.pdf` | 4/4 가용 → 상시 실행 |
+| `verify_external_exam_detail_quality.py` | `data/external_exam_qa/{2027_kice_june_high3,2026_june_high1}/{korean,math,english}.pdf` | 2026_june_high1 3/3 가용(`data/full_subject_qa/sources`에서 복사, 2026-08-03) · 2027_kice_june_high3 소스 0/3 — **2026년 6월 시행 고3(2027학년도) 모평 국/수/영 문제 PDF 확보 필요** |
+| `verify_unseen_exam_quality.py` | `data/external_exam_qa/second_pass_unseen/{2026_csat,2026_march_high1}/...` | 0/6 — 2026학년도 수능·2026년 3월 고1 국/수/영 문제 PDF 확보 필요 |
+| `verify_pdf_layout_real_math_exams.py`, `verify_pdf_layout_real_subjects_96.py` | `수학A_짝수형_최종.pdf`, `수학B_짝수형_최종.pdf` (+국어/영어는 가용) | 수학A/B 미보유 — 원 개발기 전용 파일. 로컬 수학 PDF 4종으로 `--sample` 수동 측정 후 대체 등록 검토 |
+| `verify_final_output_quality_96.py`, `verify_pdf_layout_visual_fidelity.py` | `data/exports/final_results_96/` · `final_results_98/` 패키지(벤치마크 수동 실행 산출물) | 미생성 — 위 수학A/B 확보 후 `benchmark_four_subject_conversion.py`로 생성 |
+| `verify_detection_quality_97.py`, `verify_four_theme_quality.py`, `verify_math_visual_spacing.py`, `verify_pdf_layout_hwpx.py`, `verify_hancom_pdf_visual_fidelity.py` | 인자 필수(패키지/경로 지정) 수동 도구 | 게이트에선 의도된 SKIP — 자동화하려면 기본 패키지 경로 배선 필요 |
+
 ## Update Rules
 
 - Add a row when a new real exam sample becomes part of regular QA.

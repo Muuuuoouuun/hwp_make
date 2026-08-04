@@ -126,8 +126,16 @@ FORMULA_TOKEN_RE = re.compile(
 DATE_LIKE_RE = re.compile(r"^\d{1,4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?$")
 NUMERIC_RANGE_RE = re.compile(r"^\d+(?:\.\d+)?\s*[-~]\s*\d+(?:\.\d+)?$")
 ALNUM_ID_RE = re.compile(r"^[A-Za-z]+\d+\s*[-/]\s*\d{2,}$")
-CURRENCY_SPAN_RE = re.compile(r"^\$\d+(?:\.\d+)?(?:\s+\w+)?\s+\$\d+(?:\.\d+)?$")
-CURRENCY_FRAGMENT_RE = re.compile(r"^\$\d+(?:\.\d+)?(?:\s+\w+)?\s*\$$")
+# 통화 표기("$5 and $10")의 연결어만 허용한다. 임의의 \w+ 를 받으면 "$6  pi$"(6π),
+# "$60 r$"(60r) 같은 실제 수식까지 통화로 오인해 삼키고, 남은 $ 짝이 한 칸씩 밀려
+# 수식 객체 안에 한국어 산문이 들어가는 스왑이 생긴다(2026-08-03 실물 HWP 4부 중 2부 재현).
+_CURRENCY_CONNECTOR = r"(?:and|or|to|per|each|from|vs|원|달러|dollars?|cents?|won)"
+CURRENCY_SPAN_RE = re.compile(
+    rf"^\$\d+(?:\.\d+)?(?:\s+{_CURRENCY_CONNECTOR})?\s+\$\d+(?:\.\d+)?$", re.IGNORECASE
+)
+CURRENCY_FRAGMENT_RE = re.compile(
+    rf"^\$\d+(?:\.\d+)?(?:\s+{_CURRENCY_CONNECTOR})?\s*\$$", re.IGNORECASE
+)
 LATIN_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 PLAIN_HYPHENATED_LATIN_RE = re.compile(r"^[A-Za-z0-9]+(?:[-\u2010-\u2015][A-Za-z0-9]+)+$")
 MATH_LATIN_WORD_ALLOWLIST = {
