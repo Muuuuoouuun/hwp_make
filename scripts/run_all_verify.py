@@ -43,6 +43,12 @@ EXCLUDE = {
     "pdf_layout_hwpx_probe.py",
 }
 TIMEOUT_SEC = 300
+# 실물 시험 다건 변환+렌더+합성 스위트는 300초로 부족(단독 PASS인데 게이트에서만
+# exit 124 타임아웃 FAIL 나던 사례, 2026-08-04). 스크립트별 상한 오버라이드.
+TIMEOUT_OVERRIDES_SEC = {
+    "verify_external_exam_detail_quality.py": 900,
+    "verify_unseen_exam_quality.py": 900,
+}
 
 
 def discover_py() -> list[Path]:
@@ -61,7 +67,7 @@ def classify(code: int) -> str:
     return "FAIL"
 
 
-def run_subprocess(cmd: list[str]) -> tuple[str, int, str]:
+def run_subprocess(cmd: list[str], *, timeout_sec: int = TIMEOUT_SEC) -> tuple[str, int, str]:
     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     try:
         proc = subprocess.run(
@@ -72,7 +78,7 @@ def run_subprocess(cmd: list[str]) -> tuple[str, int, str]:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=TIMEOUT_SEC,
+            timeout=timeout_sec,
         )
     except subprocess.TimeoutExpired:
         return ("FAIL", 124, "(타임아웃)")
@@ -100,7 +106,10 @@ def main() -> int:
     results: list[tuple[str, str, int, str]] = []
 
     for path in py_targets:
-        status, code, tail = run_subprocess([sys.executable, str(path)])
+        status, code, tail = run_subprocess(
+            [sys.executable, str(path)],
+            timeout_sec=TIMEOUT_OVERRIDES_SEC.get(path.name, TIMEOUT_SEC),
+        )
         results.append((path.name, status, code, tail))
         print(f"  [{status:4}] {path.name} (exit {code}){('  · ' + tail) if tail else ''}")
 

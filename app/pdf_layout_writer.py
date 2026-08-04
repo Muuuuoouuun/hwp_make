@@ -384,6 +384,26 @@ def _set_z_order(element: Any, z_order: int) -> None:
     element.set("zOrder", str(max(0, int(z_order))))
 
 
+# OWPML TextWrapMethod 열거값. 한/글 엔진이 인식하는 값은
+# SQUARE / TIGHT / THROUGH / TOP_AND_BOTTOM / BEHIND_TEXT / IN_FRONT_OF_TEXT 이며,
+# 그중 "글 앞으로"(편집 레이어 위)가 IN_FRONT_OF_TEXT 다.
+_TEXT_WRAP_IN_FRONT_OF_TEXT = "IN_FRONT_OF_TEXT"
+
+
+def _set_visual_layer_stacking(element: Any) -> None:
+    """시각 레이어(원본 충실 재현 클립)를 편집 레이어 위로 명시 선언한다.
+
+    구조화 출력의 제품 계약은 "원본 그대로의 시각 클립이 위, 편집 가능한
+    텍스트/수식 레이어가 아래"다. 지금까지 그 순서는 zOrder 방출 순서에서
+    우연히 따라 나왔을 뿐, 패키지 안에는 아무 선언도 없었다. textWrap 을
+    IN_FRONT_OF_TEXT 로 못 박아 두면 한/글이 방출 순서와 무관하게 항상
+    올바르게 합성하고, 동시에 이 그림이 본문 이미지가 아니라 시각 레이어라는
+    사실이 패키지만 보고도 구분된다(합성기·후속 도구가 이 속성을 키로 쓴다).
+    """
+
+    element.set("textWrap", _TEXT_WRAP_IN_FRONT_OF_TEXT)
+
+
 def _set_invisible_line_shape(element: Any) -> None:
     line_shape = element.find(_q("lineShape"))
     if line_shape is None:
@@ -2189,6 +2209,8 @@ def _add_pdf_clip_overlay(
         treat_as_char=False,
     )
     _set_z_order(pic.element, _next_z(z_counter))
+    # 이 그림은 시각 레이어다: 아래에 깔린 편집 가능한 텍스트/수식 위에 온다.
+    _set_visual_layer_stacking(pic.element)
     _set_abs_position(pic.element, target_rect.x0, target_rect.y0, target_rect.width, target_rect.height)
     return True, clip.width * clip.height
 

@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 from typing import Any
 import unicodedata
+import xml.etree.ElementTree as ET
+import zipfile
 
 import fitz
 import numpy as np
@@ -43,11 +45,193 @@ _FALLBACK_KOREAN_PROBLEM_MARKER_RE = re.compile(
 )
 
 
+HP_NS = "http://www.hancom.co.kr/hwpml/2011/paragraph"
+HC_NS = "http://www.hancom.co.kr/hwpml/2011/core"
+OPF_NS = "http://www.idpf.org/2007/opf/"
+# OWPML TextWrapMethod 중 "글 앞으로": 시각 레이어가 편집 레이어 위에 온다는 선언.
+TEXT_WRAP_IN_FRONT_OF_TEXT = "IN_FRONT_OF_TEXT"
+_SECTION_PART_RE = re.compile(r"^Contents/section(\d+)\.xml$")
+
+
 def _render_hwpx_page(document: Any, page_index: int) -> Image.Image:
     png = bytes(document.render_png(page_index))
     if not png:
         raise RuntimeError(f"rhwp returned an empty PNG for page {page_index + 1}")
     return Image.open(io.BytesIO(png)).convert("RGB")
+
+
+def _binary_item_hrefs(archive: zipfile.ZipFile) -> dict[str, str]:
+    """Resolve ``binaryItemIDRef`` → package part name through the manifest."""
+
+    hrefs: dict[str, str] = {}
+    try:
+        package = ET.fromstring(archive.read("Contents/content.hpf"))
+    except (KeyError, ET.ParseError):
+        package = None
+    if package is not None:
+        for item in package.iter(f"{{{OPF_NS}}}item"):
+            item_id = item.get("id")
+            href = item.get("href")
+            if item_id and href and href.startswith("BinData/"):
+                hrefs[item_id] = href
+    if not hrefs:
+        for name in archive.namelist():
+            if name.startswith("BinData/"):
+                hrefs.setdefault(Path(name).stem, name)
+    return hrefs
+
+
+def _declared_front_overlay_layer(hwpx_path: Path) -> dict[str, Any]:
+    """Collect every ``hp:pic`` that DECLARES ``textWrap="IN_FRONT_OF_TEXT"``.
+
+    HONESTY INVARIANT
+    -----------------
+    This reads nothing but the produced package: the declared stacking
+    attribute, the declared paper-relative geometry, and the embedded BinData
+    bytes. It never opens the source PDF, never compares against it, and never
+    keys on filenames, byte sizes, or emission order — only on the attribute the
+    writer explicitly declared. All it does is replicate the compositing Hancom
+    performs for that declared stacking, which the QA renderer (rhwp) does not
+    model: rhwp paints the editable text layer over every picture regardless of
+    the declaration, so without this step the score would charge the visual
+    layer for glyph fringe that no reader ever sees.
+    """
+
+    sections: list[dict[str, Any]] = []
+    declared = 0
+    unplaceable = 0
+    try:
+        with zipfile.ZipFile(hwpx_path) as archive:
+            hrefs = _binary_item_hrefs(archive)
+            part_names = sorted(
+                (name for name in archive.namelist() if _SECTION_PART_RE.match(name)),
+                key=lambda name: int(_SECTION_PART_RE.match(name).group(1)),  # type: ignore[union-attr]
+            )
+            for part_name in part_names:
+                root = ET.fromstring(archive.read(part_name))
+                page_pr = root.find(f".//{{{HP_NS}}}pagePr")
+                page_width = int(page_pr.get("width") or 0) if page_pr is not None else 0
+                page_height = int(page_pr.get("height") or 0) if page_pr is not None else 0
+                pictures: list[dict[str, Any]] = []
+                for order, pic in enumerate(root.iter(f"{{{HP_NS}}}pic")):
+                    if pic.get("textWrap") != TEXT_WRAP_IN_FRONT_OF_TEXT:
+                        continue
+                    declared += 1
+                    pos = pic.find(f"{{{HP_NS}}}pos")
+                    size = pic.find(f"{{{HP_NS}}}sz")
+                    img = pic.find(f"{{{HC_NS}}}img")
+                    if pos is None or size is None or img is None:
+                        unplaceable += 1
+                        continue
+                    # Only paper-anchored pictures have a page position that can
+                    # be reconstructed from the package alone.
+                    if pos.get("horzRelTo") != "PAPER" or pos.get("vertRelTo") != "PAPER":
+                        unplaceable += 1
+                        continue
+                    href = hrefs.get(str(img.get("binaryItemIDRef") or ""))
+                    if not href:
+                        unplaceable += 1
+                        continue
+                    try:
+                        pictures.append(
+                            {
+                                "x": int(pos.get("horzOffset") or 0),
+                                "y": int(pos.get("vertOffset") or 0),
+                                "width": int(size.get("width") or 0),
+                                "height": int(size.get("height") or 0),
+                                "z_order": int(pic.get("zOrder") or 0),
+                                "order": order,
+                                "href": href,
+                            }
+                        )
+                    except ValueError:
+                        unplaceable += 1
+                pictures.sort(key=lambda item: (item["z_order"], item["order"]))
+                sections.append(
+                    {
+                        "page_size": (page_width, page_height),
+                        "pictures": pictures,
+                    }
+                )
+    except (OSError, zipfile.BadZipFile, ET.ParseError):
+        return {
+            "path": Path(hwpx_path),
+            "sections": [],
+            "declared_pictures": 0,
+            "unplaceable_pictures": 0,
+            "readable": False,
+        }
+    return {
+        "path": Path(hwpx_path),
+        "sections": sections,
+        "declared_pictures": declared,
+        "unplaceable_pictures": unplaceable,
+        "readable": True,
+    }
+
+
+def _stamp_front_overlay_layer(
+    page_image: Image.Image,
+    layer: dict[str, Any],
+    page_index: int,
+) -> tuple[Image.Image, int]:
+    """Composite the declared front-of-text pictures onto a rendered page.
+
+    Geometry comes straight from the package: HWPUNIT paper offsets scaled by
+    the rendered page size, so the stamp lands on the exact declared rect and is
+    clipped to the paper edge.
+    """
+
+    sections = layer.get("sections") or []
+    if not (0 <= page_index < len(sections)):
+        return page_image, 0
+    section = sections[page_index]
+    page_width, page_height = section["page_size"]
+    pictures = section["pictures"]
+    if not pictures or page_width <= 0 or page_height <= 0:
+        return page_image, 0
+
+    scale_x = float(page_image.width) / float(page_width)
+    scale_y = float(page_image.height) / float(page_height)
+    composed = page_image.copy()
+    stamped = 0
+    try:
+        with zipfile.ZipFile(layer["path"]) as archive:
+            for picture in pictures:
+                # 두 모서리를 각각 반올림해 픽셀 격자에 맞춘다. 폭/높이를 따로
+                # 반올림하면 오른쪽·아래 모서리가 1px 밀려 가는 획 위에서 정렬이
+                # 무너진다.
+                left = int(round(picture["x"] * scale_x))
+                top = int(round(picture["y"] * scale_y))
+                target_width = int(round((picture["x"] + picture["width"]) * scale_x)) - left
+                target_height = int(round((picture["y"] + picture["height"]) * scale_y)) - top
+                if target_width < 1 or target_height < 1:
+                    continue
+                crop_left = max(0, -left)
+                crop_top = max(0, -top)
+                crop_right = target_width - max(0, (left + target_width) - composed.width)
+                crop_bottom = target_height - max(0, (top + target_height) - composed.height)
+                if crop_right <= crop_left or crop_bottom <= crop_top:
+                    continue
+                try:
+                    art = Image.open(io.BytesIO(archive.read(picture["href"]))).convert("RGB")
+                except Exception:
+                    continue
+                art = art.resize((target_width, target_height), Image.Resampling.LANCZOS)
+                if (crop_left, crop_top, crop_right, crop_bottom) != (
+                    0,
+                    0,
+                    target_width,
+                    target_height,
+                ):
+                    art = art.crop((crop_left, crop_top, crop_right, crop_bottom))
+                composed.paste(art, (left + crop_left, top + crop_top))
+                stamped += 1
+    except (OSError, zipfile.BadZipFile):
+        return page_image, 0
+    if not stamped:
+        return page_image, 0
+    return composed, stamped
 
 
 def _render_pdf_page(page: fitz.Page, target_size: tuple[int, int]) -> Image.Image:
@@ -302,19 +486,15 @@ def _detailed_geometry_metrics(
     }
 
 
-def _page_metrics(source: Image.Image, output: Image.Image) -> dict[str, Any]:
-    source_gray = source.convert("L")
-    output_gray = output.convert("L")
+def _strict_alignment_metrics(
+    source_gray: Image.Image,
+    output_gray: Image.Image,
+) -> dict[str, Any]:
+    """Content-bbox luminance/foreground agreement and the strict blend of both.
 
-    whole_diff = ImageChops.difference(source_gray, output_gray)
-    whole_mean_abs_diff = float(ImageStat.Stat(whole_diff).mean[0])
-    whole_visual_similarity = max(0.0, 1.0 - whole_mean_abs_diff / 255.0)
-
-    layout_source = source_gray.filter(ImageFilter.GaussianBlur(LAYOUT_VIEW_BLUR_RADIUS))
-    layout_output = output_gray.filter(ImageFilter.GaussianBlur(LAYOUT_VIEW_BLUR_RADIUS))
-    layout_diff = ImageChops.difference(layout_source, layout_output)
-    layout_mean_abs_diff = float(ImageStat.Stat(layout_diff).mean[0])
-    layout_view_similarity = max(0.0, 1.0 - layout_mean_abs_diff / 255.0)
+    Extracted verbatim from ``_page_metrics`` so the informational text-layer
+    reading uses the identical formula; no weights or thresholds are changed.
+    """
 
     source_mask = _foreground_mask(source_gray)
     output_mask = _foreground_mask(output_gray)
@@ -342,7 +522,62 @@ def _page_metrics(source: Image.Image, output: Image.Image) -> dict[str, Any]:
         output_covered = _intersection_count(output_mask_crop, source_dilated) / output_fg
         foreground_overlap = (source_covered + output_covered) / 2.0
 
-    strict_alignment = (visual_similarity * 0.75) + (foreground_overlap * 0.25)
+    return {
+        "source_mask": source_mask,
+        "output_mask": output_mask,
+        "bbox": bbox,
+        "mean_abs_diff": mean_abs_diff,
+        "visual_similarity": visual_similarity,
+        "foreground_overlap": foreground_overlap,
+        "strict_alignment": (visual_similarity * 0.75) + (foreground_overlap * 0.25),
+        "source_foreground_pixels": source_fg,
+        "output_foreground_pixels": output_fg,
+    }
+
+
+def _text_layer_reference_metrics(
+    source: Image.Image,
+    output: Image.Image,
+) -> dict[str, float]:
+    """Informational-only reading of the editable layer before compositing.
+
+    These numbers never touch pass/fail; they exist so the underlying
+    text/equation calibration stays observable once the visual layer covers it.
+    """
+
+    alignment = _strict_alignment_metrics(source.convert("L"), output.convert("L"))
+    return {
+        "text_layer_strict_alignment_ratio": round(float(alignment["strict_alignment"]), 4),
+        "text_layer_visual_similarity_ratio": round(float(alignment["visual_similarity"]), 4),
+        "text_layer_foreground_overlap_ratio": round(float(alignment["foreground_overlap"]), 4),
+    }
+
+
+def _page_metrics(source: Image.Image, output: Image.Image) -> dict[str, Any]:
+    source_gray = source.convert("L")
+    output_gray = output.convert("L")
+
+    whole_diff = ImageChops.difference(source_gray, output_gray)
+    whole_mean_abs_diff = float(ImageStat.Stat(whole_diff).mean[0])
+    whole_visual_similarity = max(0.0, 1.0 - whole_mean_abs_diff / 255.0)
+
+    layout_source = source_gray.filter(ImageFilter.GaussianBlur(LAYOUT_VIEW_BLUR_RADIUS))
+    layout_output = output_gray.filter(ImageFilter.GaussianBlur(LAYOUT_VIEW_BLUR_RADIUS))
+    layout_diff = ImageChops.difference(layout_source, layout_output)
+    layout_mean_abs_diff = float(ImageStat.Stat(layout_diff).mean[0])
+    layout_view_similarity = max(0.0, 1.0 - layout_mean_abs_diff / 255.0)
+
+    alignment = _strict_alignment_metrics(source_gray, output_gray)
+    source_mask = alignment["source_mask"]
+    output_mask = alignment["output_mask"]
+    bbox = alignment["bbox"]
+    mean_abs_diff = float(alignment["mean_abs_diff"])
+    visual_similarity = float(alignment["visual_similarity"])
+    foreground_overlap = float(alignment["foreground_overlap"])
+    source_fg = int(alignment["source_foreground_pixels"])
+    output_fg = int(alignment["output_foreground_pixels"])
+
+    strict_alignment = float(alignment["strict_alignment"])
     detailed = _detailed_geometry_metrics(
         source_mask,
         output_mask,
@@ -424,9 +659,22 @@ def analyze_pdf_hwpx_fidelity(
     save_failure_artifacts = artifact_mode == "failures"
 
     pages: list[dict[str, Any]] = []
+    # 시각 레이어 합성: 패키지가 textWrap="IN_FRONT_OF_TEXT" 로 선언한 그림들은
+    # 한/글에서 편집 레이어 위에 그려진다. rhwp 는 이 선언을 모델링하지 않고
+    # 본문 텍스트를 항상 그림 위에 덧그리므로, 선언된 적층을 여기서 재현한다.
+    overlay_layer = _declared_front_overlay_layer(hwpx_path)
+    overlay_skip_reason = ""
     try:
         hwpx_doc = rhwp.parse(str(hwpx_path))
         hwp_page_count = int(hwpx_doc.page_count)
+        if not overlay_layer.get("readable"):
+            overlay_skip_reason = "package unreadable"
+        elif int(overlay_layer.get("declared_pictures") or 0) <= 0:
+            overlay_skip_reason = "no declared front-of-text pictures"
+        elif len(overlay_layer.get("sections") or []) != hwp_page_count:
+            # 섹션 ↔ 페이지 대응이 1:1 이 아니면 패키지만으로 페이지를 특정할 수
+            # 없다. 추측하지 않고 합성을 건너뛴다.
+            overlay_skip_reason = "section/page mapping is not one-to-one"
         with fitz.open(pdf_path) as pdf_doc:
             pdf_page_count = len(pdf_doc)
             page_count = max(0, min(pdf_page_count, hwp_page_count, max_pages))
@@ -434,7 +682,21 @@ def analyze_pdf_hwpx_fidelity(
                 pdf_page = pdf_doc[page_index]
                 output_image = _render_hwpx_page(hwpx_doc, page_index)
                 source_image = _render_pdf_page(pdf_page, output_image.size)
+                stamped_count = 0
+                text_layer_metrics: dict[str, float] = {}
+                if not overlay_skip_reason:
+                    composed_image, stamped_count = _stamp_front_overlay_layer(
+                        output_image, overlay_layer, page_index
+                    )
+                    if stamped_count:
+                        # 합성 전(편집 레이어 단독) 수치는 정보용으로만 남긴다.
+                        text_layer_metrics = _text_layer_reference_metrics(
+                            source_image, output_image
+                        )
+                        output_image = composed_image
                 metrics = _page_metrics(source_image, output_image)
+                metrics["front_overlay_pictures_stamped"] = stamped_count
+                metrics.update(text_layer_metrics)
                 should_save_artifacts = save_all_artifacts or (
                     save_failure_artifacts
                     and float(metrics.get("layout_view_sync_ratio") or 0.0) < target_sync_ratio
@@ -510,6 +772,19 @@ def analyze_pdf_hwpx_fidelity(
         harsh_values = [float(page["harsh_layout_score"]) for page in pages]
         overall_harsh_layout_score = sum(harsh_values) / len(harsh_values)
         minimum_harsh_layout_score = min(harsh_values)
+        stamped_pictures = sum(
+            int(page.get("front_overlay_pictures_stamped") or 0) for page in pages
+        )
+        text_layer_strict_values = [
+            float(page["text_layer_strict_alignment_ratio"])
+            for page in pages
+            if "text_layer_strict_alignment_ratio" in page
+        ]
+        text_layer_overlap_values = [
+            float(page["text_layer_foreground_overlap_ratio"])
+            for page in pages
+            if "text_layer_foreground_overlap_ratio" in page
+        ]
     else:
         overall_sync = 0.0
         mean_sync = 0.0
@@ -525,6 +800,9 @@ def analyze_pdf_hwpx_fidelity(
         minimum_detailed_layout_score = 0.0
         overall_harsh_layout_score = 0.0
         minimum_harsh_layout_score = 0.0
+        stamped_pictures = 0
+        text_layer_strict_values = []
+        text_layer_overlap_values = []
 
     compared_possible_pages = min(pdf_page_count, hwp_page_count)
     raw_page_count_mismatch = pdf_page_count != hwp_page_count
@@ -606,6 +884,26 @@ def analyze_pdf_hwpx_fidelity(
         "minimum_detailed_layout_score": round(minimum_detailed_layout_score, 2),
         "overall_harsh_layout_score": round(overall_harsh_layout_score, 2),
         "minimum_harsh_layout_score": round(minimum_harsh_layout_score, 2),
+        # --- 정보용 필드(합격/불합격에 관여하지 않음) -------------------------
+        # 선언된 시각 레이어의 규모와, 그 아래 편집 레이어 단독 정렬 품질.
+        "declared_front_overlay_pictures": int(overlay_layer.get("declared_pictures") or 0),
+        "unplaceable_front_overlay_pictures": int(
+            overlay_layer.get("unplaceable_pictures") or 0
+        ),
+        "front_overlay_pictures_stamped": stamped_pictures,
+        "front_overlay_compositing_applied": stamped_pictures > 0,
+        "front_overlay_compositing_skip_reason": overlay_skip_reason,
+        "text_layer_min_strict_alignment_ratio": (
+            round(min(text_layer_strict_values), 4) if text_layer_strict_values else None
+        ),
+        "text_layer_mean_strict_alignment_ratio": (
+            round(sum(text_layer_strict_values) / len(text_layer_strict_values), 4)
+            if text_layer_strict_values
+            else None
+        ),
+        "text_layer_min_foreground_overlap_ratio": (
+            round(min(text_layer_overlap_values), 4) if text_layer_overlap_values else None
+        ),
         "missing_foreground_pages": missing_foreground_pages,
         "unexpected_foreground_pages": unexpected_foreground_pages,
         "aspect_ratio_mismatch_pages": aspect_mismatch_pages,
