@@ -463,13 +463,12 @@ def delete_problem(problem_id: int) -> None:
         conn.commit()
 
 
-def list_problems(
+def _problem_filter_clause(
     query: str = "",
     source_type: str = "",
     subject: str = "",
     tag: str = "",
-    limit: int = 300,
-) -> list[dict[str, Any]]:
+) -> tuple[str, list[Any]]:
     where: list[str] = []
     params: list[Any] = []
     if query:
@@ -488,10 +487,34 @@ def list_problems(
         where.append("tags LIKE ?")
         params.append(f"%{tag}%")
     clause = f"WHERE {' AND '.join(where)}" if where else ""
+    return clause, params
+
+
+def count_problems(
+    query: str = "",
+    source_type: str = "",
+    subject: str = "",
+    tag: str = "",
+) -> int:
+    clause, params = _problem_filter_clause(query, source_type, subject, tag)
+    with connect() as conn:
+        row = conn.execute(f"SELECT COUNT(*) AS total FROM problems {clause}", params).fetchone()
+    return int(row["total"] if row else 0)
+
+
+def list_problems(
+    query: str = "",
+    source_type: str = "",
+    subject: str = "",
+    tag: str = "",
+    limit: int = 300,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    clause, params = _problem_filter_clause(query, source_type, subject, tag)
     with connect() as conn:
         rows = conn.execute(
-            f"SELECT * FROM problems {clause} ORDER BY id DESC LIMIT ?",
-            [*params, limit],
+            f"SELECT * FROM problems {clause} ORDER BY id DESC LIMIT ? OFFSET ?",
+            [*params, limit, offset],
         ).fetchall()
     return [row_to_problem(row) for row in rows]
 

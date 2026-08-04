@@ -6,22 +6,30 @@ const PREVIEW_ZOOM_STEP = 0.1;
 const ACTUAL_PREVIEW_ZOOM_MIN = 0.25;
 const ACTUAL_PREVIEW_ZOOM_MAX = 2;
 const ACTUAL_PREVIEW_ZOOM_STEP = 0.1;
+const MAX_CLIENT_UPLOAD_BYTES = 64 * 1024 * 1024;
 
 const state = {
   problems: [],
+  problemsTotal: 0,
+  problemsHasMore: false,
   problemById: new Map(),
   basket: [], // 내보내기 순서를 유지하는 [{id, label}] 목록
   activeId: null,
   templates: [],
   exports: [], // 내보내기 기록 [{name, size, modified, format, url}]
+  exportsError: null,
   lastDefaultTitle: DEFAULT_EXPORT_TITLE,
   sideMode: "source",
   activeMathField: null,
   problemsRequestId: 0,
   collecting: false,
+  importController: null,
+  conversionBusy: false,
   nativeMathTouched: false,
   draftDirty: false,
+  draftRevision: 0,
   savingDraft: false,
+  savingDraftPromise: null,
   aiStatus: null,
   aiBusy: false,
   panelLayout: {
@@ -33,6 +41,7 @@ const state = {
   previewZoom: 1,
   previewFit: false,
   paperBaseWidth: 0,
+  paperViewportMode: null,
   panMode: false,
   spacePanning: false,
   panPointer: null,
@@ -72,6 +81,9 @@ const els = {
   importButton: document.querySelector("#importButton"),
   quickImportButton: document.querySelector("#quickImportButton"),
   layoutExportButton: document.querySelector("#layoutExportButton"),
+  importProgress: document.querySelector("#importProgress"),
+  importProgressText: document.querySelector("#importProgressText"),
+  cancelImportButton: document.querySelector("#cancelImportButton"),
   layoutMathAi: document.querySelector("#layoutMathAi"),
   collectUrl: document.querySelector("#collectUrl"),
   collectButton: document.querySelector("#collectButton"),
@@ -92,6 +104,7 @@ const els = {
   selectedText: document.querySelector("#selectedText"),
   selectAllButton: document.querySelector("#selectAllButton"),
   clearSelectionButton: document.querySelector("#clearSelectionButton"),
+  loadMoreProblemsButton: document.querySelector("#loadMoreProblemsButton"),
   basketClearButton: document.querySelector("#basketClearButton"),
   orderEditorButton: document.querySelector("#orderEditorButton"),
   basketList: document.querySelector("#basketList"),
@@ -138,6 +151,8 @@ const els = {
   exportNativeMath: document.querySelector("#exportNativeMath"),
   nativeMathLabel: document.querySelector("#nativeMathLabel"),
   exportButton: document.querySelector("#exportButton"),
+  conversionStatus: document.querySelector("#conversionStatus"),
+  conversionStatusText: document.querySelector("#conversionStatusText"),
   emptyEditor: document.querySelector("#emptyEditor"),
   editorForm: document.querySelector("#editorForm"),
   contentBadges: document.querySelector("#contentBadges"),
@@ -231,39 +246,107 @@ function toast(message) {
   toast.timer = window.setTimeout(() => els.toast.classList.add("hidden"), 3600);
 }
 
+function friendlyErrorMessage(error) {
+  const raw = String(error?.message || error || "알 수 없는 오류").trim();
+  if (error?.name === "AbortError" || /aborted|aborterror|작업이 취소/i.test(raw)) {
+    return "작업이 취소되었습니다.";
+  }
+  if (/failed to fetch|networkerror|load failed/i.test(raw)) {
+    return "서버에 연결하지 못했습니다. 연결 상태를 확인한 뒤 다시 시도하세요.";
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return String(parsed?.detail || parsed?.message || raw);
+  } catch {
+    return raw;
+  }
+}
+
+async function responseError(response) {
+  let message = response.statusText || `HTTP ${response.status}`;
+  try {
+    const text = await response.text();
+    if (text) message = text;
+  } catch {
+    // Keep the HTTP status text when the body cannot be read.
+  }
+  return new Error(friendlyErrorMessage(message));
+}
+
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
+  let response;
+  try {
+    response = await fetch(path, {
+      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+      ...options,
+    });
+  } catch (error) {
+    throw new Error(friendlyErrorMessage(error));
+  }
   if (!response.ok) {
-    let detail = response.statusText;
-    try {
-      const body = await response.json();
-      detail = body.detail || detail;
-    } catch {
-      // Keep the HTTP status text.
-    }
-    throw new Error(detail);
+    throw await responseError(response);
   }
   return response.json();
 }
 
-async function loadProblems({ render = true } = {}) {
+function setButtonBusy(button, busy, busyLabel = "처리 중...") {
+  if (!button) return;
+  if (busy) {
+    if (!button.dataset.idleLabel) button.dataset.idleLabel = button.textContent;
+    button.textContent = busyLabel;
+    button.classList.add("is-busy");
+    button.setAttribute("aria-busy", "true");
+  } else {
+    button.textContent = button.dataset.idleLabel || button.textContent;
+    delete button.dataset.idleLabel;
+    button.classList.remove("is-busy");
+    button.removeAttribute("aria-busy");
+  }
+}
+
+function setConversionStatus(message, tone = "idle") {
+  if (els.conversionStatusText) els.conversionStatusText.textContent = message;
+  if (els.conversionStatus) els.conversionStatus.dataset.tone = tone;
+}
+
+function syncConversionReadyStatus() {
+  if (state.conversionBusy) return;
+  const count = state.basket.length;
+  if (!count) {
+    setConversionStatus("시험지에 문항을 담으면 변환할 수 있습니다.");
+    return;
+  }
+  const format = String(els.exportFormat?.value || "hwpx").toUpperCase();
+  setConversionStatus(`변환 준비 · 문항 ${count}개 · ${format}`);
+}
+
+async function loadProblems({ render = true, append = false } = {}) {
   const requestId = ++state.problemsRequestId;
   const params = new URLSearchParams();
   if (els.searchInput.value.trim()) params.set("q", els.searchInput.value.trim());
   if (els.sourceFilter.value) params.set("source_type", els.sourceFilter.value);
+  params.set("limit", "100");
+  params.set("offset", String(append ? state.problems.length : 0));
   const data = await api(`/api/problems?${params.toString()}`);
   if (requestId !== state.problemsRequestId) return false;
-  state.problems = data.items;
-  if (!params.toString()) state.problemById = new Map();
-  for (const problem of data.items) state.problemById.set(problem.id, problem);
-  if (!params.toString() && state.activeId && !state.problemById.has(state.activeId)) state.activeId = null;
-  els.countBadge.textContent = `${state.problems.length}개`;
-  if (els.libraryProblemHint) els.libraryProblemHint.textContent = `검색 결과 ${state.problems.length}개`;
-  els.statusText.textContent = `가져온 문제 ${state.problems.length}개`;
-  if (els.flowProblemCount) els.flowProblemCount.textContent = `가져온 문제 ${state.problems.length}개`;
+  const incoming = data.items || [];
+  state.problems = append
+    ? [...new Map([...state.problems, ...incoming].map((item) => [item.id, item])).values()]
+    : incoming;
+  state.problemsTotal = Number(data.total ?? state.problems.length);
+  state.problemsHasMore = Boolean(data.has_more);
+  for (const problem of incoming) state.problemById.set(problem.id, problem);
+  els.countBadge.textContent = `${state.problems.length}/${state.problemsTotal}`;
+  if (els.libraryProblemHint) els.libraryProblemHint.textContent = `검색 결과 ${state.problemsTotal}개 · ${state.problems.length}개 표시`;
+  els.statusText.textContent = `가져온 문제 ${state.problemsTotal}개`;
+  if (els.flowProblemCount) els.flowProblemCount.textContent = `가져온 문제 ${state.problemsTotal}개`;
+  if (els.loadMoreProblemsButton) {
+    els.loadMoreProblemsButton.classList.toggle("hidden", !state.problemsHasMore);
+    els.loadMoreProblemsButton.textContent = `문제 더 불러오기 (${state.problems.length}/${state.problemsTotal})`;
+  }
+  if (els.selectAllButton) {
+    els.selectAllButton.textContent = state.problemsHasMore ? `표시된 ${state.problems.length}개 모두 담기` : "검색 결과 모두 담기";
+  }
   if (render) {
     renderList();
     renderBasket();
@@ -331,8 +414,13 @@ function syncExportOptions({ resetNativeMath = false } = {}) {
     els.nativeMathLabel.classList.toggle("disabled", !isHwpx);
   }
   if (els.exportButton) {
-    els.exportButton.textContent = `${isHwpx ? "HWPX" : "DOCX"} 만들기`;
+    if (!state.conversionBusy) els.exportButton.textContent = `${isHwpx ? "HWPX" : "DOCX"} 만들기`;
   }
+  if (els.previewButton && !state.conversionBusy) {
+    els.previewButton.textContent = isHwpx ? "실제 미리보기" : "HWPX 기준 미리보기";
+    els.previewButton.setAttribute("aria-label", isHwpx ? "실제 HWPX 페이지 미리보기" : "DOCX 내보내기 전 HWPX 기준 레이아웃 미리보기");
+  }
+  syncConversionReadyStatus();
 }
 
 function syncTemplatePreview() {
@@ -372,7 +460,7 @@ function desktopWorkspaceActive() {
 }
 
 function mobileWorkspaceActive() {
-  return window.matchMedia("(max-width: 700px)").matches;
+  return window.matchMedia("(max-width: 980px)").matches;
 }
 
 function setMobilePane(pane, { focus = false } = {}) {
@@ -384,7 +472,12 @@ function setMobilePane(pane, { focus = false } = {}) {
     setWorkflowStep(step);
     if (focus) {
       const target = pane === "source" ? document.querySelector(".source-pane") : pane === "editor" ? document.querySelector(".editor-pane") : document.querySelector(".preview-pane");
-      window.requestAnimationFrame(() => target?.scrollIntoView({ block: "start" }));
+      window.requestAnimationFrame(() => {
+        if (!target) return;
+        target.tabIndex = -1;
+        target.focus({ preventScroll: true });
+        window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      });
     }
   }
 }
@@ -595,9 +688,18 @@ function previewZoomPercent() {
   return Math.round(state.previewZoom * 100);
 }
 
+function ensurePaperBaseWidth() {
+  if (!els.paperStage) return;
+  const mode = mobileWorkspaceActive() ? "mobile" : "desktop";
+  if (!state.paperBaseWidth || state.paperViewportMode !== mode) {
+    state.paperViewportMode = mode;
+    state.paperBaseWidth = Math.max(mode === "mobile" ? 400 : 320, els.paperStage.clientWidth - 32);
+  }
+}
+
 function updatePaperCanvasSize({ preserveCenter = false } = {}) {
   if (!els.paperStage || !els.paperViewport || !els.paperSheet || state.panelLayout.previewCollapsed) return;
-  if (!state.paperBaseWidth) state.paperBaseWidth = Math.max(400, els.paperStage.clientWidth - 32);
+  ensurePaperBaseWidth();
   const stage = els.paperStage;
   const hadCanvasSize = Boolean(els.paperViewport.style.width && els.paperViewport.style.height);
   const oldWidth = Math.max(1, els.paperViewport.offsetWidth);
@@ -637,7 +739,7 @@ function setPreviewZoom(nextZoom, { announce = true, fit = false } = {}) {
 
 function fitPreviewToStage({ announce = true } = {}) {
   if (!els.paperStage || !els.paperSheet || state.panelLayout.previewCollapsed) return;
-  if (!state.paperBaseWidth) state.paperBaseWidth = Math.max(400, els.paperStage.clientWidth - 32);
+  ensurePaperBaseWidth();
   els.paperSheet.style.setProperty("--paper-base-width", `${state.paperBaseWidth}px`);
   const baseHeight = Math.max(520, els.paperSheet.offsetHeight);
   const widthScale = (els.paperStage.clientWidth - 32) / state.paperBaseWidth;
@@ -774,6 +876,7 @@ async function commandSave() {
     toast("저장할 문항을 먼저 선택하세요.");
     return;
   }
+  state.draftRevision += 1;
   state.draftDirty = true;
   await flushActiveDraft({ quiet: false });
 }
@@ -1457,11 +1560,9 @@ async function handleImportedProblems(created, { quick = false } = {}) {
     toast("새로 가져온 문제가 없습니다.");
     return false;
   }
-  state.activeId = created[0].id;
   addManyToBasket(created, { replace: quick });
-  renderList();
   renderBasket();
-  renderEditor();
+  await selectProblem(created[0].id);
   setSideMode("library");
   if (quick) {
     return exportSelected(created.map((problem) => problem.id));
@@ -1557,8 +1658,9 @@ function renderBasket() {
   syncPaperPreviewMeta();
   if (els.basketClearButton) els.basketClearButton.disabled = !state.basket.length;
   if (els.orderEditorButton) els.orderEditorButton.disabled = !state.basket.length;
-  if (els.previewButton) els.previewButton.disabled = !count;
-  if (els.exportButton) els.exportButton.disabled = !count;
+  if (els.previewButton) els.previewButton.disabled = !count || state.conversionBusy;
+  if (els.exportButton) els.exportButton.disabled = !count || state.conversionBusy;
+  syncConversionReadyStatus();
   els.basketList.innerHTML = "";
   const layoutPlan = computeLayoutPlan();
   renderLayoutPlanSummary(layoutPlan);
@@ -1677,7 +1779,7 @@ function renderBasket() {
       row.classList.add("drag-over");
     });
     row.addEventListener("dragleave", () => row.classList.remove("drag-over"));
-    row.addEventListener("drop", (event) => {
+    row.addEventListener("drop", async (event) => {
       event.preventDefault();
       event.stopPropagation();
       row.classList.remove("drag-over");
@@ -1686,10 +1788,8 @@ function renderBasket() {
         const dropped = state.problems.find((item) => item.id === problemId);
         if (dropped) {
           insertBasketProblemAt(dropped, index);
-          state.activeId = dropped.id;
-          renderList();
           renderBasket();
-          renderEditor();
+          await selectProblem(dropped.id);
         }
         return;
       }
@@ -1720,20 +1820,39 @@ function formatExportTime(iso) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-async function loadExportHistory() {
+async function loadExportHistory({ throwOnError = false } = {}) {
   try {
     const data = await api("/api/exports");
     state.exports = data.items || [];
-  } catch {
+    state.exportsError = null;
+  } catch (error) {
     state.exports = [];
+    state.exportsError = friendlyErrorMessage(error);
+    renderHistory();
+    if (throwOnError) throw error;
+    return false;
   }
   renderHistory();
+  return true;
 }
 
 function renderHistory() {
   const items = state.exports || [];
   els.historyBadge.textContent = String(items.length);
   els.historyList.innerHTML = "";
+  if (state.exportsError) {
+    const error = document.createElement("div");
+    error.className = "inline-error";
+    const message = document.createElement("span");
+    message.textContent = `기록을 불러오지 못했습니다: ${state.exportsError}`;
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.textContent = "다시 시도";
+    retry.addEventListener("click", () => loadExportHistory());
+    error.append(message, retry);
+    els.historyList.append(error);
+    return;
+  }
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "basket-empty";
@@ -1835,6 +1954,7 @@ function renderList() {
       toggleBasket(problem);
       renderList();
       renderBasket();
+      window.requestAnimationFrame(() => els.problemList.querySelector(`[data-id="${problem.id}"] .problem-merge-btn`)?.focus());
     });
 
     const action = document.createElement("div");
@@ -1844,19 +1964,19 @@ function renderList() {
     status.className = `problem-status ${selected ? "selected" : ""}`;
     status.textContent = selected ? "담김" : "보관함";
 
-    body.append(title, meta, preview);
-    action.append(status, mergeButton);
-    row.append(body, action);
-    row.tabIndex = 0;
-    row.setAttribute("role", "button");
-    row.setAttribute("aria-label", `${problemLabel(problem)} 편집`);
-    row.addEventListener("click", () => selectProblem(problem.id));
-    row.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        selectProblem(problem.id);
-      }
+    const editButton = document.createElement("button");
+    editButton.type = "button";
+    editButton.className = "problem-edit-btn";
+    editButton.textContent = "편집";
+    editButton.setAttribute("aria-label", `${problemLabel(problem)} 편집`);
+    editButton.addEventListener("click", async () => {
+      await selectProblem(problem.id);
+      window.requestAnimationFrame(() => els.editTitle?.focus({ preventScroll: true }));
     });
+
+    body.append(title, meta, preview);
+    action.append(status, editButton, mergeButton);
+    row.append(body, action);
     row.addEventListener("dragstart", (event) => {
       event.dataTransfer.setData("application/x-problem-id", String(problem.id));
       event.dataTransfer.effectAllowed = "copyMove";
@@ -1976,6 +2096,7 @@ function refreshEditorInspector() {
 
 function markDraftDirty() {
   if (!activeProblem() || els.editorForm.classList.contains("hidden")) return;
+  state.draftRevision += 1;
   state.draftDirty = true;
   setSaveStatus("저장되지 않은 변경", "saving");
   window.clearTimeout(markDraftDirty.timer);
@@ -1985,33 +2106,82 @@ function markDraftDirty() {
 async function flushActiveDraft({ quiet = false } = {}) {
   const problem = activeProblem();
   if (!problem || !state.draftDirty) return true;
-  if (state.savingDraft) return false;
+  if (state.savingDraftPromise) {
+    const saved = await state.savingDraftPromise;
+    if (!saved) return false;
+    return state.draftDirty ? flushActiveDraft({ quiet }) : true;
+  }
+  const problemId = problem.id;
+  const revision = state.draftRevision;
+  const payload = editorPayload(problem, problem.image_paths || []);
   state.savingDraft = true;
   setSaveStatus("저장 중…", "saving");
-  try {
-    const updated = await api(`/api/problems/${problem.id}`, {
-      method: "PUT",
-      body: JSON.stringify(editorPayload(problem, problem.image_paths || [])),
-    });
-    const savedProblem = updated.item || updated;
-    if (savedProblem?.id) {
-      state.problemById.set(savedProblem.id, savedProblem);
-      const index = state.problems.findIndex((item) => item.id === savedProblem.id);
-      if (index >= 0) state.problems[index] = savedProblem;
+  state.savingDraftPromise = (async () => {
+    try {
+      const updated = await api(`/api/problems/${problemId}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      const savedProblem = updated.item || updated;
+      if (savedProblem?.id) {
+        state.problemById.set(savedProblem.id, savedProblem);
+        const index = state.problems.findIndex((item) => item.id === savedProblem.id);
+        if (index >= 0) state.problems[index] = savedProblem;
+      }
+      const currentRevisionSaved = state.activeId === problemId && state.draftRevision === revision;
+      state.draftDirty = !currentRevisionSaved;
+      setSaveStatus(currentRevisionSaved ? "저장됨" : "새 변경 저장 대기…", currentRevisionSaved ? "saved" : "saving");
+      renderList();
+      renderBasket();
+      if (!quiet && currentRevisionSaved) toast("문항을 저장했습니다.");
+      return true;
+    } catch (error) {
+      state.draftDirty = true;
+      setSaveStatus("저장 실패", "error");
+      if (!quiet) toast(`저장 실패: ${friendlyErrorMessage(error)}`);
+      return false;
+    } finally {
+      state.savingDraft = false;
+      state.savingDraftPromise = null;
     }
-    state.draftDirty = false;
-    setSaveStatus("저장됨", "saved");
-    renderList();
-    renderBasket();
-    if (!quiet) toast("문항을 저장했습니다.");
-    return true;
-  } catch (error) {
-    setSaveStatus("저장 실패", "error");
-    if (!quiet) toast(`저장 실패: ${error.message}`);
-    return false;
-  } finally {
-    state.savingDraft = false;
+  })();
+  const saved = await state.savingDraftPromise;
+  if (!saved) return false;
+  if (state.activeId === problemId && state.draftDirty) {
+    return flushActiveDraft({ quiet });
   }
+  return true;
+}
+
+async function hydrateBasketProblems() {
+  const missingIds = [...new Set(state.basket.map((entry) => entry.id).filter((id) => !state.problemById.has(id)))];
+  if (!missingIds.length) return;
+  for (let offset = 0; offset < missingIds.length; offset += 100) {
+    const batch = missingIds.slice(offset, offset + 100);
+    const settled = await Promise.allSettled(batch.map((id) => api(`/api/problems/${id}`)));
+    settled.forEach((result) => {
+      if (result.status !== "fulfilled") return;
+      const problem = result.value?.item || result.value;
+      if (problem?.id) state.problemById.set(problem.id, problem);
+    });
+  }
+}
+
+function renderProblemLoadError(error) {
+  const message = friendlyErrorMessage(error);
+  els.problemList.replaceChildren();
+  const panel = document.createElement("div");
+  panel.className = "inline-error";
+  const text = document.createElement("span");
+  text.textContent = `문제 목록을 불러오지 못했습니다: ${message}`;
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.textContent = "다시 시도";
+  retry.addEventListener("click", () => loadProblems().catch(renderProblemLoadError));
+  panel.append(text, retry);
+  els.problemList.append(panel);
+  els.loadMoreProblemsButton?.classList.add("hidden");
+  els.statusText.textContent = "문제 목록 연결 실패";
 }
 
 async function removeImage(problem, index) {
@@ -2032,6 +2202,7 @@ async function attachImages() {
   const problem = activeProblem();
   const files = Array.from(els.attachInput.files || []);
   if (!problem || !files.length) return;
+  if (!validateUploadSizes(files)) return;
   try {
     // 첨부 전에 현재 편집 내용을 먼저 저장해 둔다.
     await api(`/api/problems/${problem.id}`, {
@@ -2093,14 +2264,20 @@ function kindForFile(file) {
   return EXT_KINDS[ext] || null;
 }
 
-function fileToBase64(file) {
+function fileToBase64(file, { signal } = {}) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(reader.error);
+    reader.onabort = () => reject(new DOMException("작업이 취소되었습니다.", "AbortError"));
     reader.onload = () => {
       const result = String(reader.result || "");
       resolve(result.includes(",") ? result.split(",", 2)[1] : result);
     };
+    if (signal?.aborted) {
+      reject(new DOMException("작업이 취소되었습니다.", "AbortError"));
+      return;
+    }
+    signal?.addEventListener("abort", () => reader.abort(), { once: true });
     reader.readAsDataURL(file);
   });
 }
@@ -2119,6 +2296,24 @@ function setImportButtonsDisabled(buttons, disabled) {
   for (const button of buttons.filter(Boolean)) button.disabled = disabled;
 }
 
+function validateUploadSizes(files) {
+  const oversized = Array.from(files || []).find((file) => Number(file.size || 0) > MAX_CLIENT_UPLOAD_BYTES);
+  if (!oversized) return true;
+  const sizeMb = Math.ceil(oversized.size / (1024 * 1024));
+  toast(`${oversized.name}은 ${sizeMb}MB입니다. 파일은 64MB 이하만 처리할 수 있습니다.`);
+  return false;
+}
+
+function setImportProgress(message = "", active = false) {
+  if (els.importProgressText) els.importProgressText.textContent = message;
+  els.importProgress?.classList.toggle("hidden", !active);
+}
+
+function confirmQuickReplace(quick) {
+  if (!quick || !state.basket.length) return true;
+  return window.confirm(`현재 시험지의 ${state.basket.length}개 문항을 새로 가져올 문항으로 바꾸고 바로 만들까요? 기존 문항 자체는 삭제되지 않습니다.`);
+}
+
 function isPdfFile(file) {
   return file?.type === "application/pdf" || /\.pdf$/i.test(file?.name || "");
 }
@@ -2129,20 +2324,29 @@ async function importFiles({ quick = false } = {}) {
     toast("파일을 선택하세요.");
     return;
   }
+  if (!confirmQuickReplace(quick)) return;
+  if (!validateUploadSizes(files)) return;
+  const controller = new AbortController();
+  state.importController = controller;
+  const actionButton = quick ? els.quickImportButton : els.importButton;
+  setButtonBusy(actionButton, true, quick ? "가져와서 만드는 중..." : "가져오는 중...");
   setImportButtonsDisabled([els.importButton, els.quickImportButton, els.layoutExportButton], true);
+  let total = 0;
+  const notices = [];
+  const created = [];
   try {
-    let total = 0;
-    const notices = [];
-    const created = [];
-    for (const file of files) {
+    for (const [index, file] of files.entries()) {
+      setImportProgress(`${index + 1}/${files.length} · ${file.name} 읽는 중`, true);
       const kind = kindForFile(file);
       if (!kind) {
         notices.push(`${file.name}: 지원하지 않는 형식이라 건너뜀`);
         continue;
       }
-      const dataBase64 = await fileToBase64(file);
+      const dataBase64 = await fileToBase64(file, { signal: controller.signal });
+      setImportProgress(`${index + 1}/${files.length} · ${file.name} 문항 인식 중`, true);
       const result = await api("/api/import", {
         method: "POST",
+        signal: controller.signal,
         body: JSON.stringify({
           kind,
           filename: file.name,
@@ -2167,8 +2371,36 @@ async function importFiles({ quick = false } = {}) {
     els.fileInput.value = "";
     els.fileName.textContent = "HWP, HWPX, DOCX, PDF, 이미지, TXT";
   } catch (error) {
-    toast(`가져오기 실패: ${error.message}`);
+    const message = friendlyErrorMessage(error);
+    if (!created.length && message === "작업이 취소되었습니다.") {
+      try {
+        await loadProblems();
+      } catch (refreshError) {
+        toast(`작업을 취소했지만 서버 목록을 다시 확인하지 못했습니다: ${friendlyErrorMessage(refreshError)}`);
+        return;
+      }
+    }
+    if (created.length) {
+      try {
+        await loadProblems({ render: false });
+        addManyToBasket(created, { replace: quick });
+        renderBasket();
+        await selectProblem(created[0].id);
+        setSideMode("library");
+      } catch (refreshError) {
+        toast(`${created.length}개는 이미 가져왔지만 목록 새로고침에 실패했습니다: ${friendlyErrorMessage(refreshError)}`);
+        return;
+      }
+    }
+    if (message === "작업이 취소되었습니다.") {
+      toast(created.length ? `작업을 취소했습니다. ${created.length}개 문항은 이미 가져와 목록에 반영했습니다.` : message);
+    } else {
+      toast(created.length ? `가져오기가 중단됐습니다. ${created.length}개는 반영했습니다: ${message}` : `가져오기 실패: ${message}`);
+    }
   } finally {
+    state.importController = null;
+    setImportProgress("", false);
+    setButtonBusy(actionButton, false);
     setImportButtonsDisabled([els.importButton, els.quickImportButton, els.layoutExportButton], false);
   }
 }
@@ -2184,14 +2416,19 @@ async function exportPdfLayoutFiles() {
     toast("PDF 파일만 원본 레이아웃 HWPX로 만들 수 있습니다.");
     return;
   }
+  if (!validateUploadSizes(pdfFiles)) return;
+  const controller = new AbortController();
+  state.importController = controller;
+  const results = [];
 
+  setButtonBusy(els.layoutExportButton, true, "원본 레이아웃 변환 중...");
   setImportButtonsDisabled([els.importButton, els.quickImportButton, els.layoutExportButton], true);
   try {
-    const results = [];
-    for (const file of pdfFiles) {
+    for (const [index, file] of pdfFiles.entries()) {
+      setImportProgress(`${index + 1}/${pdfFiles.length} · ${file.name} 원본 좌표 변환 중`, true);
       const payload = {
         filename: file.name,
-        data_base64: await fileToBase64(file),
+        data_base64: await fileToBase64(file, { signal: controller.signal }),
         boxed_passages: true,
         layout_mode: "coordinate",
         native_math: true,
@@ -2202,6 +2439,7 @@ async function exportPdfLayoutFiles() {
       }
       const result = await api("/api/pdf-layout-export", {
         method: "POST",
+        signal: controller.signal,
         body: JSON.stringify(payload),
       });
       results.push(result);
@@ -2217,8 +2455,32 @@ async function exportPdfLayoutFiles() {
     await loadExportHistory();
     toast(`${results.length}개 PDF를 원본 레이아웃 HWPX로 만들었습니다.`);
   } catch (error) {
-    toast(`원본 레이아웃 변환 실패: ${error.message}`);
+    const message = friendlyErrorMessage(error);
+    if (!results.length && message === "작업이 취소되었습니다.") {
+      try {
+        await loadExportHistory();
+      } catch (refreshError) {
+        toast(`작업을 취소했지만 서버 기록을 다시 확인하지 못했습니다: ${friendlyErrorMessage(refreshError)}`);
+        return;
+      }
+    }
+    if (results.length) {
+      try {
+        await loadExportHistory();
+      } catch (refreshError) {
+        toast(`${results.length}개 파일은 이미 만들었지만 기록 새로고침에 실패했습니다: ${friendlyErrorMessage(refreshError)}`);
+        return;
+      }
+    }
+    if (message === "작업이 취소되었습니다.") {
+      toast(results.length ? `작업을 취소했습니다. ${results.length}개 파일은 이미 만들어 기록에 반영했습니다.` : message);
+    } else {
+      toast(results.length ? `변환이 중단됐습니다. ${results.length}개 파일은 완료했습니다: ${message}` : `원본 레이아웃 변환 실패: ${message}`);
+    }
   } finally {
+    state.importController = null;
+    setImportProgress("", false);
+    setButtonBusy(els.layoutExportButton, false);
     setImportButtonsDisabled([els.importButton, els.quickImportButton, els.layoutExportButton], false);
   }
 }
@@ -2230,10 +2492,11 @@ async function collectFromUrl({ quick = false } = {}) {
     toast("수집할 URL을 입력하세요.");
     return;
   }
+  if (!confirmQuickReplace(quick)) return;
   state.collecting = true;
+  const actionButton = quick ? els.quickCollectButton : els.collectButton;
+  setButtonBusy(actionButton, true, quick ? "가져와서 만드는 중..." : "가져오는 중...");
   setImportButtonsDisabled([els.collectButton, els.quickCollectButton], true);
-  els.collectButton.textContent = "가져오는 중...";
-  if (els.quickCollectButton) els.quickCollectButton.textContent = "만드는 중...";
   try {
     const result = await api("/api/collect", {
       method: "POST",
@@ -2248,12 +2511,11 @@ async function collectFromUrl({ quick = false } = {}) {
     );
     els.collectUrl.value = "";
   } catch (error) {
-    toast(`수집 실패: ${error.message}`);
+    toast(`수집 실패: ${friendlyErrorMessage(error)}`);
   } finally {
     state.collecting = false;
+    setButtonBusy(actionButton, false);
     setImportButtonsDisabled([els.collectButton, els.quickCollectButton], false);
-    els.collectButton.textContent = "URL에서 가져오기";
-    if (els.quickCollectButton) els.quickCollectButton.textContent = "바로 만들기";
   }
 }
 
@@ -2264,6 +2526,9 @@ async function addManualProblem({ quick = false } = {}) {
     toast("제목이나 본문을 입력하세요.");
     return;
   }
+  if (!confirmQuickReplace(quick)) return;
+  const actionButton = quick ? els.quickManualButton : els.manualButton;
+  setButtonBusy(actionButton, true, quick ? "가져와서 만드는 중..." : "추가하는 중...");
   setImportButtonsDisabled([els.manualButton, els.quickManualButton], true);
   try {
     const result = await api("/api/import-text", {
@@ -2276,9 +2541,6 @@ async function addManualProblem({ quick = false } = {}) {
       }),
     });
     const created = result.created || [];
-    if (created.length) {
-      state.activeId = created[created.length - 1].id;
-    }
     els.manualTitle.value = "";
     els.manualStem.value = "";
     await loadProblems({ render: false });
@@ -2291,14 +2553,16 @@ async function addManualProblem({ quick = false } = {}) {
           : `${created.length}개 문항을 가져와 시험지 구성에 담았습니다.${result.notices?.[1] ? ` ${result.notices[1]}` : ""}`
     );
   } catch (error) {
-    toast(`입력 실패: ${error.message}`);
+    toast(`입력 실패: ${friendlyErrorMessage(error)}`);
   } finally {
+    setButtonBusy(actionButton, false);
     setImportButtonsDisabled([els.manualButton, els.quickManualButton], false);
   }
 }
 
 async function saveActive(event) {
   event.preventDefault();
+  state.draftRevision += 1;
   state.draftDirty = true;
   await flushActiveDraft({ quiet: false });
 }
@@ -2330,21 +2594,31 @@ async function exportSelected(idsOverride = null) {
   }
   setWorkflowStep(3);
   if (mobileWorkspaceActive()) setMobilePane("preview", { focus: true });
+  const format = String(els.exportFormat.value || "hwpx").toUpperCase();
+  state.conversionBusy = true;
+  setButtonBusy(els.exportButton, true, `${format} 변환 중...`);
+  setConversionStatus(`문항 ${ids.length}개를 ${format} 파일로 변환하고 있습니다.`, "working");
+  els.previewButton.disabled = true;
   els.exportButton.disabled = true;
   try {
-    const response = await fetch("/api/export", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ids,
-        title: els.exportTitle.value.trim() || DEFAULT_EXPORT_TITLE,
-        format: els.exportFormat.value,
-        template_key: els.exportTemplate.value || "basic",
-        include_answer_sheet: els.exportAnswerSheet.checked,
-        native_math: els.exportFormat.value === "hwpx" && Boolean(els.exportNativeMath?.checked),
-      }),
-    });
-    if (!response.ok) throw new Error(await response.text());
+    let response;
+    try {
+      response = await fetch("/api/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ids,
+          title: els.exportTitle.value.trim() || DEFAULT_EXPORT_TITLE,
+          format: els.exportFormat.value,
+          template_key: els.exportTemplate.value || "basic",
+          include_answer_sheet: els.exportAnswerSheet.checked,
+          native_math: els.exportFormat.value === "hwpx" && Boolean(els.exportNativeMath?.checked),
+        }),
+      });
+    } catch (error) {
+      throw new Error(friendlyErrorMessage(error));
+    }
+    if (!response.ok) throw await responseError(response);
     const blob = await response.blob();
     const disposition = response.headers.get("content-disposition") || "";
     const match = disposition.match(/filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/);
@@ -2359,12 +2633,18 @@ async function exportSelected(idsOverride = null) {
     link.remove();
     URL.revokeObjectURL(url);
     await loadExportHistory();
+    setConversionStatus(`${format} 변환 완료 · ${filename} 다운로드를 시작했습니다.`, "success");
     toast(`${ids.length}개 문항을 내보냈습니다.`);
     return true;
   } catch (error) {
-    toast(`내보내기 실패: ${error.message}`);
+    const message = friendlyErrorMessage(error);
+    setConversionStatus(`${format} 변환 실패 · ${message}`, "error");
+    toast(`내보내기 실패: ${message}`);
     return false;
   } finally {
+    state.conversionBusy = false;
+    setButtonBusy(els.exportButton, false);
+    els.previewButton.disabled = !state.basket.length;
     els.exportButton.disabled = !state.basket.length;
   }
 }
@@ -2489,9 +2769,13 @@ async function previewExport() {
   }
   setWorkflowStep(3);
   if (mobileWorkspaceActive()) setMobilePane("preview", { focus: true });
-  const buttonLabel = els.previewButton.textContent;
+  const selectedFormat = String(els.exportFormat.value || "hwpx").toLowerCase();
+  const previewBasis = selectedFormat === "docx" ? "DOCX 내보내기 전 HWPX 기준 레이아웃" : "실제 HWPX 출력";
+  state.conversionBusy = true;
+  setButtonBusy(els.previewButton, true, "페이지 생성 중...");
+  setConversionStatus(`${previewBasis} 페이지를 생성하고 있습니다.`, "working");
   els.previewButton.disabled = true;
-  els.previewButton.textContent = "미리보기 생성...";
+  els.exportButton.disabled = true;
   try {
     const result = await api("/api/preview", {
       method: "POST",
@@ -2507,17 +2791,23 @@ async function previewExport() {
     resetActualPreview();
     state.actualPreviewPages = asArray(result.pages).filter(Boolean);
     const notes = [];
+    if (selectedFormat === "docx") notes.push("DOCX와 글꼴·줄바꿈이 달라질 수 있는 HWPX 기준 레이아웃");
     if (result.truncated) notes.push(`전체 ${result.page_count}쪽 중 ${state.actualPreviewPages.length}쪽만 표시`);
     if (result.note) notes.push(result.note);
     if (!notes.length) notes.push(`렌더된 ${state.actualPreviewPages.length}쪽`);
     els.previewNote.textContent = notes.join(" · ");
+    setConversionStatus(`${previewBasis} 미리보기 완료 · ${state.actualPreviewPages.length}쪽`, "success");
     openModal(els.previewModal, els.previewButton, els.previewClose);
     setActualPreviewPage(0);
   } catch (error) {
-    toast(`미리보기 실패: ${error.message}`);
+    const message = friendlyErrorMessage(error);
+    setConversionStatus(`실제 미리보기 실패 · ${message}`, "error");
+    toast(`미리보기 실패: ${message}`);
   } finally {
+    state.conversionBusy = false;
+    setButtonBusy(els.previewButton, false);
     els.previewButton.disabled = !state.basket.length;
-    els.previewButton.textContent = buttonLabel;
+    els.exportButton.disabled = !state.basket.length;
   }
 }
 
@@ -2929,9 +3219,12 @@ function setInputMode(mode) {
     const active = button.dataset.inputMode === activeMode;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
   });
   els.inputModePanels.forEach((panel) => {
-    panel.classList.toggle("hidden", panel.dataset.inputPanel !== activeMode);
+    const active = panel.dataset.inputPanel === activeMode;
+    panel.classList.toggle("hidden", !active);
+    panel.setAttribute("aria-hidden", String(!active));
   });
 }
 
@@ -2942,14 +3235,34 @@ function setSideMode(mode) {
     const active = button.dataset.sideMode === activeMode;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
   });
   els.sidePanes.forEach((pane) => {
     const active = pane.dataset.sidePane === activeMode;
     pane.classList.toggle("active", active);
     pane.classList.toggle("hidden", !active);
+    pane.setAttribute("aria-hidden", String(!active));
   });
   setWorkflowStep(activeMode === "library" ? 2 : 1);
   if (mobileWorkspaceActive()) setMobilePane("source");
+}
+
+function bindTablistKeyboard(buttons) {
+  const tabs = Array.from(buttons || []);
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("keydown", (event) => {
+      let targetIndex = null;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") targetIndex = (index + 1) % tabs.length;
+      if (event.key === "ArrowLeft" || event.key === "ArrowUp") targetIndex = (index - 1 + tabs.length) % tabs.length;
+      if (event.key === "Home") targetIndex = 0;
+      if (event.key === "End") targetIndex = tabs.length - 1;
+      if (targetIndex === null) return;
+      event.preventDefault();
+      const target = tabs[targetIndex];
+      target.click();
+      target.focus();
+    });
+  });
 }
 
 async function safeLoadProblems() {
@@ -2974,7 +3287,10 @@ els.workflowSteps.forEach((button) => {
 els.inputModeButtons.forEach((button) => {
   button.addEventListener("click", () => setInputMode(button.dataset.inputMode));
 });
+bindTablistKeyboard(els.sideSwitchButtons);
+bindTablistKeyboard(els.inputModeButtons);
 els.fileInput.addEventListener("change", showSelectedFiles);
+els.cancelImportButton?.addEventListener("click", () => state.importController?.abort());
 els.dropzone.addEventListener("keydown", (event) => {
   if (event.key === "Enter" || event.key === " ") {
     event.preventDefault();
@@ -3010,6 +3326,9 @@ els.quickManualButton.addEventListener("click", () => addManualProblem({ quick: 
 els.attachButton.addEventListener("click", () => els.attachInput.click());
 els.attachInput.addEventListener("change", attachImages);
 els.mathInsertButtons.forEach((button) => button.addEventListener("click", handleMathInsert));
+els.mathInsertButtons.forEach((button) => {
+  if (button.title) button.setAttribute("aria-label", button.title);
+});
 [
   els.manualStem,
   els.editStem,
@@ -3112,6 +3431,11 @@ window.addEventListener("blur", () => {
   state.panPointer = null;
   els.paperStage?.classList.remove("pan-ready", "panning");
 });
+window.addEventListener("beforeunload", (event) => {
+  if (!state.draftDirty && !state.savingDraft) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 window.addEventListener("resize", debounce(() => {
   normalizePanelLayout();
   applyWorkspaceLayout();
@@ -3132,6 +3456,15 @@ if (els.exportNativeMath) {
 }
 els.searchInput.addEventListener("input", debounce(safeLoadProblems));
 els.sourceFilter.addEventListener("change", safeLoadProblems);
+els.loadMoreProblemsButton?.addEventListener("click", () => {
+  setButtonBusy(els.loadMoreProblemsButton, true, "불러오는 중...");
+  loadProblems({ append: true })
+    .catch((error) => toast(`추가 문제를 불러오지 못했습니다: ${friendlyErrorMessage(error)}`))
+    .finally(() => {
+      setButtonBusy(els.loadMoreProblemsButton, false);
+      els.loadMoreProblemsButton.textContent = `문제 더 불러오기 (${state.problems.length}/${state.problemsTotal})`;
+    });
+});
 els.selectAllButton.addEventListener("click", () => {
   for (const problem of state.problems) addToBasket(problem);
   renderList();
@@ -3156,7 +3489,7 @@ els.basketList.addEventListener("dragleave", (event) => {
 document.addEventListener("dragend", () => {
   els.basketList.classList.remove("board-drag-over");
 });
-els.basketList.addEventListener("drop", (event) => {
+els.basketList.addEventListener("drop", async (event) => {
   els.basketList.classList.remove("board-drag-over");
   const problemId = Number(event.dataTransfer.getData("application/x-problem-id"));
   if (Number.isNaN(problemId) || problemId <= 0) return;
@@ -3164,10 +3497,8 @@ els.basketList.addEventListener("drop", (event) => {
   const dropped = state.problems.find((item) => item.id === problemId);
   if (!dropped) return;
   insertBasketProblemAt(dropped, state.basket.length);
-  state.activeId = dropped.id;
-  renderList();
   renderBasket();
-  renderEditor();
+  await selectProblem(dropped.id);
 });
 
 (async function init() {
@@ -3176,15 +3507,25 @@ els.basketList.addEventListener("drop", (event) => {
   setMobilePane(state.mobilePane);
   applyWorkspaceLayout();
   setSideMode(state.sideMode);
-  await loadExportTemplates();
+  const [templatesResult, problemsResult] = await Promise.allSettled([
+    loadExportTemplates(),
+    loadProblems(),
+    loadExportHistory({ throwOnError: true }),
+    loadAIStatus(),
+  ]);
+  if (templatesResult.status === "rejected") {
+    state.templates = [{ key: "basic", label: "기본 문항 모음", default_title: DEFAULT_EXPORT_TITLE, columns: 1 }];
+    els.exportTemplate.innerHTML = '<option value="basic">기본 문항 모음</option>';
+    toast(`양식 목록을 불러오지 못해 기본 양식으로 시작합니다: ${friendlyErrorMessage(templatesResult.reason)}`);
+  }
+  if (problemsResult.status === "rejected") renderProblemLoadError(problemsResult.reason);
+  await hydrateBasketProblems();
   syncExportTitleToTemplate();
   syncPaperPreviewMeta();
   syncExportOptions({ resetNativeMath: true });
-  await loadProblems();
-  await loadExportHistory();
-  await loadAIStatus();
+  renderBasket();
   window.requestAnimationFrame(() => {
-    state.paperBaseWidth = Math.max(400, els.paperStage.clientWidth - 32);
+    ensurePaperBaseWidth();
     updatePaperCanvasSize();
   });
 })().catch((error) => {

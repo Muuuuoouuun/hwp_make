@@ -705,17 +705,32 @@ def problems(
     source_type: str = "",
     subject: str = "",
     tag: str = "",
-    limit: int = Query(300, ge=1, le=1000),
+    limit: int = Query(100, ge=1, le=300),
+    offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
-    return {
-        "items": storage.list_problems(
-            query=q,
-            source_type=source_type,
-            subject=subject,
-            tag=tag,
-            limit=limit,
-        )
+    filters = {
+        "query": q,
+        "source_type": source_type,
+        "subject": subject,
+        "tag": tag,
     }
+    total = storage.count_problems(**filters)
+    items = storage.list_problems(**filters, limit=limit, offset=offset)
+    return {
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + len(items) < total,
+    }
+
+
+@app.get("/api/problems/{problem_id}")
+def get_problem(problem_id: int) -> dict[str, Any]:
+    try:
+        return {"item": storage.get_problem(problem_id)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Problem not found") from exc
 
 
 @app.post("/api/problems")

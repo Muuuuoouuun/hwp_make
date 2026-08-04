@@ -5,9 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>시험지 스튜디오 · HWP Make</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232f56c7'/%3E%3Cpath d='M4 5h8M4 8h8M4 11h5' stroke='white' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="/static/styles.css?v=24" />
+    <link rel="stylesheet" href="/static/styles.css?v=27" />
   </head>
   <body>
+    <a class="skip-link" href="#workspace">핵심 작업으로 건너뛰기</a>
     <main class="app-shell">
       <header class="topbar">
         <div class="brand-block">
@@ -51,22 +52,22 @@
         <button class="workflow-step" type="button" data-workflow-step="3" data-mobile-pane="preview" aria-pressed="false"><span>3</span><b>시험지 만들기</b><small id="flowBasketCount">0개</small></button>
       </section>
 
-      <section class="workspace" aria-label="문항 제작 작업공간">
+      <section id="workspace" class="workspace" aria-label="문항 제작 작업공간" tabindex="-1">
         <aside id="sourceWorkPane" class="work-pane source-pane" aria-label="자료와 문제 보관함">
           <div class="pane-tabs" role="tablist" aria-label="왼쪽 패널 전환">
-            <button class="pane-tab active" type="button" role="tab" data-side-mode="source" aria-selected="true" aria-controls="sourcePanel">자료 가져오기</button>
-            <button class="pane-tab" type="button" role="tab" data-side-mode="library" aria-selected="false" aria-controls="libraryPanel">문제 보관함</button>
+            <button id="sourceTab" class="pane-tab active" type="button" role="tab" data-side-mode="source" aria-selected="true" aria-controls="sourcePanel" tabindex="0">자료 가져오기</button>
+            <button id="libraryTab" class="pane-tab" type="button" role="tab" data-side-mode="library" aria-selected="false" aria-controls="libraryPanel" tabindex="-1">문제 보관함</button>
           </div>
 
-          <section id="sourcePanel" class="side-pane active" data-side-pane="source" role="tabpanel" aria-label="문제 가져오기">
+          <section id="sourcePanel" class="side-pane active" data-side-pane="source" role="tabpanel" aria-labelledby="sourceTab">
             <div class="pane-heading">
               <div><span class="section-index">01</span><h2>자료 추가</h2></div>
               <p>파일·텍스트·URL에서 문항을 가져옵니다.</p>
             </div>
             <div class="mode-tabs" role="tablist" aria-label="가져오기 방식">
-              <button class="mode-tab active" type="button" role="tab" data-input-mode="file" aria-selected="true">파일</button>
-              <button class="mode-tab" type="button" role="tab" data-input-mode="text" aria-selected="false">텍스트</button>
-              <button class="mode-tab" type="button" role="tab" data-input-mode="url" aria-selected="false">URL</button>
+              <button id="fileModeTab" class="mode-tab active" type="button" role="tab" data-input-mode="file" aria-selected="true" aria-controls="fileModePanel" tabindex="0">파일</button>
+              <button id="textModeTab" class="mode-tab" type="button" role="tab" data-input-mode="text" aria-selected="false" aria-controls="textModePanel" tabindex="-1">텍스트</button>
+              <button id="urlModeTab" class="mode-tab" type="button" role="tab" data-input-mode="url" aria-selected="false" aria-controls="urlModePanel" tabindex="-1">URL</button>
             </div>
 
             <div class="common-metadata field-group">
@@ -78,7 +79,7 @@
               </div>
             </div>
 
-            <div id="fileModePanel" class="input-mode-panel" data-input-panel="file">
+            <div id="fileModePanel" class="input-mode-panel" data-input-panel="file" role="tabpanel" aria-labelledby="fileModeTab">
               <label class="field-label" for="importKind">파일 종류</label>
               <select id="importKind">
                 <option value="auto">자동 감지</option><option value="pdf">PDF</option><option value="image">이미지</option>
@@ -90,30 +91,37 @@
                 <strong>파일 선택 또는 드래그&amp;드롭</strong>
                 <small id="fileName">HWP, HWPX, DOCX, PDF, 이미지, TXT</small>
               </label>
-              <input id="fileInput" class="visually-hidden" type="file" multiple />
+              <input id="fileInput" class="visually-hidden" type="file" multiple tabindex="-1" />
               <div class="import-actions">
                 <button id="importButton" type="button">가져와서 편집</button>
                 <button id="quickImportButton" class="primary" type="button">바로 만들기</button>
               </div>
               <button id="layoutExportButton" class="secondary-full" type="button">PDF 원본 좌표로 HWPX 복원</button>
+              <div id="importProgress" class="operation-progress hidden" role="status" aria-live="polite" aria-atomic="true">
+                <span id="importProgressText"></span>
+                <button id="cancelImportButton" class="danger ghost" type="button">취소</button>
+              </div>
               <label class="check-label layout-ai-option" title="PDF의 수식 이미지를 Gemini로 인식해 한컴 수식 입력을 보강합니다.">
                 <input id="layoutMathAi" type="checkbox" /> Gemini 수식 인식 사용
               </label>
             </div>
 
-            <div id="textModePanel" class="input-mode-panel hidden" data-input-panel="text">
-              <input id="manualTitle" type="text" placeholder="문항 제목" aria-label="문항 제목" />
+            <div id="textModePanel" class="input-mode-panel hidden" data-input-panel="text" role="tabpanel" aria-labelledby="textModeTab">
+              <label class="field-label" for="manualTitle">문항 제목</label>
+              <input id="manualTitle" type="text" placeholder="예: 이차방정식 기본 문제" />
               <div class="math-toolbar" aria-label="수식 삽입">
                 <button type="button" title="위첨자" data-math-target="manual" data-math-insert="x^2">x²</button><button type="button" title="아래첨자" data-math-target="manual" data-math-insert="x_{n}">xₙ</button>
                 <button type="button" title="분수" data-math-target="manual" data-math-insert="\frac{a}{b}">a/b</button><button type="button" title="루트" data-math-target="manual" data-math-insert="\sqrt{x}">√</button>
                 <button type="button" title="합 기호" data-math-target="manual" data-math-insert="\sum_{k=1}^{n}">Σ</button><button type="button" title="적분" data-math-target="manual" data-math-insert="\int_{0}^{1} dx">∫</button>
               </div>
+              <label class="field-label" for="manualStem">문제 본문</label>
               <textarea id="manualStem" rows="9" placeholder="문제 본문, 선지, 정답·해설을 붙여넣기"></textarea>
               <div class="import-actions"><button id="manualButton" type="button">가져와서 편집</button><button id="quickManualButton" class="primary" type="button">바로 만들기</button></div>
             </div>
 
-            <div id="urlModePanel" class="input-mode-panel hidden" data-input-panel="url">
-              <input id="collectUrl" type="url" placeholder="https:// 자료 페이지 주소" aria-label="수집할 URL" />
+            <div id="urlModePanel" class="input-mode-panel hidden" data-input-panel="url" role="tabpanel" aria-labelledby="urlModeTab">
+              <label class="field-label" for="collectUrl">자료 페이지 주소</label>
+              <input id="collectUrl" type="url" placeholder="https://example.com/problems" />
               <div class="import-actions"><button id="collectButton" type="button">가져와서 편집</button><button id="quickCollectButton" class="primary" type="button">바로 만들기</button></div>
             </div>
 
@@ -123,7 +131,7 @@
             </details>
           </section>
 
-          <section id="libraryPanel" class="side-pane hidden" data-side-pane="library" role="tabpanel" aria-label="문제 보관함">
+          <section id="libraryPanel" class="side-pane hidden" data-side-pane="library" role="tabpanel" aria-labelledby="libraryTab">
             <div class="pane-heading with-count">
               <div><span class="section-index">02</span><h2>문제 보관함</h2></div><span id="countBadge" class="count-label">0</span>
               <p>문항을 선택해 편집하고 시험지에 담습니다.</p>
@@ -139,6 +147,7 @@
             <div class="selection-summary"><span id="libraryProblemHint">검색 결과 0개</span><span id="libraryBasketHint">시험지 0개</span></div>
             <div class="bulk-row"><button id="selectAllButton">검색 결과 모두 담기</button><button id="clearSelectionButton">시험지 비우기</button></div>
             <div id="problemList" class="problem-list"></div>
+            <button id="loadMoreProblemsButton" class="secondary-full hidden" type="button">문제 더 불러오기</button>
           </section>
         </aside>
 
@@ -271,7 +280,11 @@
           </div>
           <footer class="preview-footer">
             <div class="merge-actions"><span id="selectedText">담은 문제 0개</span><div><button id="orderEditorButton" class="ghost mini-button" type="button" disabled>순서 편집</button><button id="basketClearButton" class="ghost mini-button" type="button">비우기</button></div></div>
-            <div class="export-actions"><button id="previewButton" type="button">실제 미리보기</button><button id="exportButton" class="primary" type="button">HWPX 만들기</button></div>
+            <div id="conversionStatus" class="conversion-status" role="status" aria-live="polite" aria-atomic="true" data-tone="idle">
+              <span class="conversion-status-dot" aria-hidden="true"></span>
+              <span id="conversionStatusText">시험지에 문항을 담으면 변환할 수 있습니다.</span>
+            </div>
+            <div class="export-actions"><button id="previewButton" type="button" aria-describedby="conversionStatus">실제 미리보기</button><button id="exportButton" class="primary" type="button" aria-describedby="conversionStatus">HWPX 만들기</button></div>
             <div class="preview-note visually-hidden">화면은 문항 순서와 양식을 빠르게 확인하는 작업 미리보기입니다. 실제 페이지 버튼에서 최종 HWPX 렌더를 확인하세요.</div>
           </footer>
         </section>
@@ -365,6 +378,6 @@
 
     <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
     <script src="/static/layout-planner.js?v=1"></script>
-    <script src="/static/app.js?v=25" type="module"></script>
+    <script src="/static/app.js?v=30" type="module"></script>
   </body>
 </html>
