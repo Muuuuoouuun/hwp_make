@@ -57,9 +57,20 @@ const state = {
   actualPreviewFit: true,
   actualPreviewNaturalWidth: 0,
   actualPreviewNaturalHeight: 0,
+  simpleConversionBusy: false,
 };
 
 const els = {
+  simpleConverter: document.querySelector("#simpleConverter"),
+  simpleFileInput: document.querySelector("#simpleFileInput"),
+  simpleDropzone: document.querySelector("#simpleDropzone"),
+  simpleSelectedFile: document.querySelector("#simpleSelectedFile"),
+  simpleFileName: document.querySelector("#simpleFileName"),
+  simpleFileMeta: document.querySelector("#simpleFileMeta"),
+  simpleFileRemove: document.querySelector("#simpleFileRemove"),
+  simpleConvertButton: document.querySelector("#simpleConvertButton"),
+  simpleConversionStatus: document.querySelector("#simpleConversionStatus"),
+  simpleConversionStatusText: document.querySelector("#simpleConversionStatusText"),
   statusText: document.querySelector("#statusText"),
   workspace: document.querySelector(".workspace"),
   appShell: document.querySelector(".app-shell"),
@@ -307,6 +318,9 @@ function setButtonBusy(button, busy, busyLabel = "처리 중...") {
 function setConversionStatus(message, tone = "idle") {
   if (els.conversionStatusText) els.conversionStatusText.textContent = message;
   if (els.conversionStatus) els.conversionStatus.dataset.tone = tone;
+  if (state.simpleConversionBusy && tone !== "idle") {
+    setSimpleConversionStatus(message, tone);
+  }
 }
 
 function syncConversionReadyStatus() {
@@ -2307,6 +2321,9 @@ function validateUploadSizes(files) {
 function setImportProgress(message = "", active = false) {
   if (els.importProgressText) els.importProgressText.textContent = message;
   els.importProgress?.classList.toggle("hidden", !active);
+  if (state.simpleConversionBusy && active && message) {
+    setSimpleConversionStatus(message, "working");
+  }
 }
 
 function confirmQuickReplace(quick) {
@@ -2318,13 +2335,13 @@ function isPdfFile(file) {
   return file?.type === "application/pdf" || /\.pdf$/i.test(file?.name || "");
 }
 
-async function importFiles({ quick = false } = {}) {
+async function importFiles({ quick = false, skipReplaceConfirm = false } = {}) {
   const files = Array.from(els.fileInput.files || []);
   if (!files.length) {
     toast("파일을 선택하세요.");
     return;
   }
-  if (!confirmQuickReplace(quick)) return;
+  if (!skipReplaceConfirm && !confirmQuickReplace(quick)) return false;
   if (!validateUploadSizes(files)) return;
   const controller = new AbortController();
   state.importController = controller;
@@ -2370,6 +2387,7 @@ async function importFiles({ quick = false } = {}) {
     );
     els.fileInput.value = "";
     els.fileName.textContent = "HWP, HWPX, DOCX, PDF, 이미지, TXT";
+    return Boolean(completed);
   } catch (error) {
     const message = friendlyErrorMessage(error);
     if (!created.length && message === "작업이 취소되었습니다.") {
@@ -2397,6 +2415,7 @@ async function importFiles({ quick = false } = {}) {
     } else {
       toast(created.length ? `가져오기가 중단됐습니다. ${created.length}개는 반영했습니다: ${message}` : `가져오기 실패: ${message}`);
     }
+    return false;
   } finally {
     state.importController = null;
     setImportProgress("", false);
@@ -2454,6 +2473,7 @@ async function exportPdfLayoutFiles() {
     }
     await loadExportHistory();
     toast(`${results.length}개 PDF를 원본 레이아웃 HWPX로 만들었습니다.`);
+    return results.length === pdfFiles.length;
   } catch (error) {
     const message = friendlyErrorMessage(error);
     if (!results.length && message === "작업이 취소되었습니다.") {
@@ -2477,6 +2497,7 @@ async function exportPdfLayoutFiles() {
     } else {
       toast(results.length ? `변환이 중단됐습니다. ${results.length}개 파일은 완료했습니다: ${message}` : `원본 레이아웃 변환 실패: ${message}`);
     }
+    return false;
   } finally {
     state.importController = null;
     setImportProgress("", false);
@@ -3124,6 +3145,102 @@ function showSelectedFiles() {
     : "HWP, HWPX, DOCX, PDF, 이미지, TXT";
 }
 
+function setSimpleConversionStatus(message, tone = "idle") {
+  if (els.simpleConversionStatusText) els.simpleConversionStatusText.textContent = message;
+  if (els.simpleConversionStatus) els.simpleConversionStatus.dataset.tone = tone;
+}
+
+function formatSimpleFileSize(bytes) {
+  const size = Number(bytes || 0);
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
+  return `${(size / (1024 * 1024)).toFixed(size >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+}
+
+function assignSingleFile(input, file) {
+  if (!input) return;
+  const transfer = new DataTransfer();
+  if (file) transfer.items.add(file);
+  input.files = transfer.files;
+}
+
+function simpleFileExtension(file) {
+  return (String(file?.name || "").split(".").pop() || "").toLowerCase();
+}
+
+function setSimpleFile(file, { syncInput = false } = {}) {
+  if (syncInput) assignSingleFile(els.simpleFileInput, file);
+  assignSingleFile(els.fileInput, file);
+
+  if (!file) {
+    els.simpleSelectedFile?.classList.add("hidden");
+    if (els.simpleFileName) els.simpleFileName.textContent = "";
+    if (els.simpleFileMeta) els.simpleFileMeta.textContent = "";
+    if (els.simpleConvertButton) els.simpleConvertButton.disabled = true;
+    setSimpleConversionStatus("변환할 파일을 선택해 주세요.");
+    return;
+  }
+
+  const extension = simpleFileExtension(file);
+  const supported = Boolean(EXT_KINDS[extension]);
+  const oversized = Number(file.size || 0) > MAX_CLIENT_UPLOAD_BYTES;
+  if (els.simpleFileName) els.simpleFileName.textContent = file.name;
+  if (els.simpleFileMeta) {
+    els.simpleFileMeta.textContent = `${extension ? extension.toUpperCase() : "파일"} · ${formatSimpleFileSize(file.size)}`;
+  }
+  els.simpleSelectedFile?.classList.remove("hidden");
+  if (els.simpleConvertButton) els.simpleConvertButton.disabled = !supported || oversized;
+
+  if (!supported) {
+    setSimpleConversionStatus("지원하지 않는 파일 형식입니다.", "error");
+  } else if (oversized) {
+    setSimpleConversionStatus("64MB 이하 파일만 변환할 수 있습니다.", "error");
+  } else {
+    setSimpleConversionStatus("파일이 준비되었습니다. 변환하기를 눌러 주세요.", "ready");
+  }
+}
+
+async function runSimpleConversion() {
+  const file = els.simpleFileInput?.files?.[0];
+  if (!file || state.simpleConversionBusy) return;
+  if (!EXT_KINDS[simpleFileExtension(file)] || !validateUploadSizes([file])) return;
+
+  assignSingleFile(els.fileInput, file);
+  els.importKind.value = "auto";
+  els.exportFormat.value = "hwpx";
+  els.exportTemplate.value = "basic";
+  els.exportTitle.value = file.name.replace(/\.[^.]+$/, "") || DEFAULT_EXPORT_TITLE;
+  if (els.exportNativeMath) els.exportNativeMath.checked = true;
+
+  state.simpleConversionBusy = true;
+  setButtonBusy(els.simpleConvertButton, true, "변환 중...");
+  els.simpleConvertButton.disabled = true;
+  els.simpleFileRemove.disabled = true;
+  els.simpleDropzone.setAttribute("aria-disabled", "true");
+  setSimpleConversionStatus(`${file.name} 업로드 중`, "working");
+
+  let completed = false;
+  try {
+    completed = isPdfFile(file)
+      ? await exportPdfLayoutFiles()
+      : await importFiles({ quick: true, skipReplaceConfirm: true });
+    setSimpleConversionStatus(
+      completed
+        ? "변환이 완료되었습니다. 다운로드를 확인해 주세요."
+        : "변환을 완료하지 못했습니다. 파일을 확인한 뒤 다시 시도해 주세요.",
+      completed ? "success" : "error",
+    );
+  } catch (error) {
+    setSimpleConversionStatus(`변환 실패 · ${friendlyErrorMessage(error)}`, "error");
+  } finally {
+    state.simpleConversionBusy = false;
+    setButtonBusy(els.simpleConvertButton, false);
+    els.simpleConvertButton.disabled = false;
+    els.simpleFileRemove.disabled = false;
+    els.simpleDropzone.removeAttribute("aria-disabled");
+  }
+}
+
 const EDITOR_MATH_FIELD_IDS = new Set(["editStem", "editChoices", "editAnswer", "editExplanation"]);
 
 function selectableSnippet(text, needle) {
@@ -3289,6 +3406,31 @@ els.inputModeButtons.forEach((button) => {
 });
 bindTablistKeyboard(els.sideSwitchButtons);
 bindTablistKeyboard(els.inputModeButtons);
+els.simpleFileInput?.addEventListener("change", () => {
+  setSimpleFile(els.simpleFileInput.files?.[0] || null);
+});
+els.simpleDropzone?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    if (!state.simpleConversionBusy) els.simpleFileInput.click();
+  }
+});
+els.simpleDropzone?.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  if (!state.simpleConversionBusy) els.simpleDropzone.classList.add("drag-over");
+});
+els.simpleDropzone?.addEventListener("dragleave", () => els.simpleDropzone.classList.remove("drag-over"));
+els.simpleDropzone?.addEventListener("drop", (event) => {
+  event.preventDefault();
+  els.simpleDropzone.classList.remove("drag-over");
+  if (state.simpleConversionBusy) return;
+  const files = Array.from(event.dataTransfer?.files || []);
+  if (!files.length) return;
+  setSimpleFile(files[0], { syncInput: true });
+  if (files.length > 1) setSimpleConversionStatus("한 번에 한 파일만 변환합니다. 첫 번째 파일을 선택했습니다.", "ready");
+});
+els.simpleFileRemove?.addEventListener("click", () => setSimpleFile(null, { syncInput: true }));
+els.simpleConvertButton?.addEventListener("click", runSimpleConversion);
 els.fileInput.addEventListener("change", showSelectedFiles);
 els.cancelImportButton?.addEventListener("click", () => state.importController?.abort());
 els.dropzone.addEventListener("keydown", (event) => {

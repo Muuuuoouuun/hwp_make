@@ -14,6 +14,25 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+// 단순 변환 모드는 기존 작업실을 제거하지 않고 첫 화면에서만 숨긴다.
+assert(/<body class="simple-converter-mode">/.test(html), "simple converter mode is not active");
+for (const id of [
+  "simpleConverter",
+  "simpleDropzone",
+  "simpleFileInput",
+  "simpleSelectedFile",
+  "simpleConvertButton",
+  "simpleConversionStatus",
+]) {
+  assert(html.includes(`id="${id}"`), `simple converter element missing: ${id}`);
+}
+assert(/id="simpleConversionStatus"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"/.test(html), "simple conversion live status missing");
+assert(css.includes("body.simple-converter-mode > .app-shell"), "legacy workspace is not visually preserved and hidden");
+assert(js.includes('els.simpleDropzone?.addEventListener("drop"'), "simple converter drag-and-drop wiring missing");
+assert(js.includes("async function runSimpleConversion()"), "simple conversion action missing");
+assert(js.includes("await exportPdfLayoutFiles()"), "PDF layout conversion is not wired to the simple screen");
+assert(js.includes("await importFiles({ quick: true, skipReplaceConfirm: true })"), "general HWPX conversion is not wired to the simple screen");
+
 // 빠른 건너뛰기와 모달 기본 계약.
 assert(/class="skip-link"\s+href="#workspace"/.test(html), "skip link missing");
 assert(/id="workspace"[^>]*tabindex="-1"/.test(html), "workspace skip target missing");
