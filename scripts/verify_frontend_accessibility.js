@@ -30,8 +30,8 @@ assert(/id="simpleConversionStatus"[^>]*role="status"[^>]*aria-live="polite"[^>]
 assert(css.includes("body.simple-converter-mode > .app-shell"), "legacy workspace is not visually preserved and hidden");
 assert(js.includes('els.simpleDropzone?.addEventListener("drop"'), "simple converter drag-and-drop wiring missing");
 assert(js.includes("async function runSimpleConversion()"), "simple conversion action missing");
-assert(js.includes("await exportPdfLayoutFiles()"), "PDF layout conversion is not wired to the simple screen");
-assert(js.includes("await importFiles({ quick: true, skipReplaceConfirm: true })"), "general HWPX conversion is not wired to the simple screen");
+assert(js.includes("await exportPdfLayoutFiles({"), "PDF layout conversion is not wired to the simple screen");
+assert(js.includes("await importFiles({"), "general HWPX conversion is not wired to the simple screen");
 
 // 빠른 건너뛰기와 모달 기본 계약.
 assert(/class="skip-link"\s+href="#workspace"/.test(html), "skip link missing");

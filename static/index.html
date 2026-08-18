@@ -5,15 +5,31 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>HWPX 변환 · HWP Make</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232f56c7'/%3E%3Cpath d='M4 5h8M4 8h8M4 11h5' stroke='white' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="/static/styles.css?v=28" />
+    <link rel="stylesheet" href="/static/styles.css?v=29" />
   </head>
   <body class="simple-converter-mode">
+    <script>
+      // 저장된 화면 모드(간단 변환/스튜디오)를 첫 페인트 전에 복원해 깜빡임을 막는다.
+      (function () {
+        try {
+          var fromUrl = new URLSearchParams(window.location.search).get("mode");
+          var saved = window.localStorage.getItem("hwpMakeUiMode");
+          var mode = fromUrl === "studio" || fromUrl === "simple" ? fromUrl : saved;
+          if (mode === "studio") document.body.classList.remove("simple-converter-mode");
+        } catch (error) {
+          /* localStorage 비활성 환경에서는 기본(간단 변환)으로 시작한다. */
+        }
+      })();
+    </script>
     <main id="simpleConverter" class="simple-converter" aria-labelledby="simpleConverterTitle">
       <header class="simple-header">
         <a class="simple-brand" href="/" aria-label="HWP Make 홈">
           <span class="simple-brand-mark" aria-hidden="true">H</span>
           <span>HWP MAKE</span>
         </a>
+        <button id="simpleStudioButton" class="simple-studio-button" type="button">
+          스튜디오에서 자세히 편집
+        </button>
       </header>
 
       <section class="simple-converter-card">
@@ -50,14 +66,33 @@
           </button>
         </div>
 
-        <button id="simpleConvertButton" class="simple-convert-button" type="button" aria-describedby="simpleConversionStatus" disabled>
-          변환하기
-        </button>
+        <label id="simpleMathAiOption" class="simple-option" title="Gemini API 키를 AI 설정에서 연결하면 사용할 수 있습니다.">
+          <input id="simpleMathAi" type="checkbox" disabled />
+          <span>PDF 수식을 Gemini AI로 인식</span>
+        </label>
+
+        <div class="simple-actions">
+          <button id="simpleConvertButton" class="simple-convert-button" type="button" aria-describedby="simpleConversionStatus" disabled>
+            변환하기
+          </button>
+          <button id="simpleCancelButton" class="simple-cancel-button hidden" type="button">
+            변환 취소
+          </button>
+        </div>
 
         <div id="simpleConversionStatus" class="simple-conversion-status" role="status" aria-live="polite" aria-atomic="true" data-tone="idle">
           <span class="simple-status-dot" aria-hidden="true"></span>
           <span id="simpleConversionStatusText">변환할 파일을 선택해 주세요.</span>
         </div>
+
+        <p id="simpleQualityNote" class="simple-quality hidden" aria-live="polite"></p>
+
+        <section class="simple-history" aria-labelledby="simpleHistoryTitle">
+          <h2 id="simpleHistoryTitle">최근 변환</h2>
+          <div id="simpleHistoryList" class="simple-history-list" aria-live="polite">
+            <p class="simple-history-empty">아직 변환한 파일이 없습니다.</p>
+          </div>
+        </section>
       </section>
 
       <footer class="simple-footer">파일당 최대 64MB · 변환이 완료되면 자동으로 다운로드됩니다.</footer>
@@ -89,6 +124,9 @@
             </button>
           </div>
           <span id="saveStatus" class="save-status" aria-live="polite">변경 없음</span>
+          <button id="simpleModeButton" class="utility-button" type="button" title="파일 하나를 바로 HWPX로 바꾸는 간단 화면으로 이동">
+            <span>간단 변환</span>
+          </button>
           <button id="shortcutHelpButton" class="utility-button" type="button" aria-haspopup="dialog" aria-keyshortcuts="?">
             <kbd>?</kbd><span>단축키</span>
           </button>
@@ -433,6 +471,6 @@
 
     <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
     <script src="/static/layout-planner.js?v=1"></script>
-    <script src="/static/app.js?v=31" type="module"></script>
+    <script src="/static/app.js?v=32" type="module"></script>
   </body>
 </html>

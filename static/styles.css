@@ -323,6 +323,7 @@ select { cursor: pointer; }
 .problem-title > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .source-pill, .problem-status, .content-badge { display: inline-flex; align-items: center; border-radius: 4px; font-size: 9px; font-weight: 700; }
 .source-pill { padding: 2px 5px; background: var(--surface-strong); color: var(--muted); }
+.source-pill.passage { background: var(--accent-soft); color: var(--accent); }
 .problem-meta, .problem-preview { margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .problem-action { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .problem-merge-btn, .problem-edit-btn { min-height: 26px; padding: 0 7px; font-size: 9px; }
@@ -661,6 +662,8 @@ body.simple-converter-mode > .skip-link,
 body.simple-converter-mode > .app-shell,
 body.simple-converter-mode > .modal,
 body.simple-converter-mode > .toast { display: none !important; }
+/* 스튜디오 모드에서는 간단 변환 화면을 숨긴다. 두 화면은 클래스 토글로 오간다. */
+body:not(.simple-converter-mode) .simple-converter { display: none !important; }
 
 .simple-converter {
   display: grid;
@@ -845,6 +848,96 @@ body.simple-converter-mode > .toast { display: none !important; }
 .simple-conversion-status[data-tone="error"] { color: #b02f40; }
 .simple-conversion-status[data-tone="error"] .simple-status-dot { background: #c33d4b; }
 @keyframes simple-pulse { 50% { box-shadow: 0 0 0 5px rgba(49, 90, 203, .12); } }
+.simple-studio-button {
+  min-height: 40px;
+  margin-left: auto;
+  padding: 0 16px;
+  border: 1px solid #d5dbe8;
+  border-radius: 9px;
+  background: #fff;
+  color: #33415c;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+  transition: border-color .18s var(--ease), background .18s var(--ease), color .18s var(--ease);
+}
+.simple-studio-button:hover { border-color: #315acb; background: #f0f4ff; color: #274cae; }
+.simple-studio-button:focus-visible { outline: 3px solid rgba(49, 90, 203, .16); outline-offset: 2px; border-color: #315acb; }
+.simple-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  margin-top: 16px;
+  color: #4d5a71;
+  font-size: 12px;
+  cursor: pointer;
+}
+.simple-option input { width: 15px; height: 15px; accent-color: #315acb; }
+.simple-option.disabled { color: #98a1b1; cursor: not-allowed; }
+.simple-option.disabled input { cursor: not-allowed; }
+.simple-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 10px;
+}
+.simple-actions .simple-convert-button { margin-top: 20px; }
+.simple-cancel-button {
+  min-height: 52px;
+  margin-top: 20px;
+  padding: 0 18px;
+  border: 1px solid #d5dbe8;
+  border-radius: 10px;
+  background: #fff;
+  color: #5a677d;
+  font-size: 13px;
+  font-weight: 750;
+  cursor: pointer;
+}
+.simple-cancel-button:hover { border-color: #b02f40; background: #fdf3f4; color: #b02f40; }
+.simple-cancel-button:focus-visible { outline: 3px solid rgba(176, 47, 64, .16); outline-offset: 2px; border-color: #b02f40; }
+.simple-cancel-button:disabled { border-color: #e2e6ef; color: #a3abba; background: #f6f7fa; cursor: default; }
+.simple-quality {
+  margin: 10px 0 0;
+  color: #1d6f4e;
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: center;
+}
+.simple-history { margin-top: 26px; padding-top: 18px; border-top: 1px solid #edf0f6; }
+.simple-history h2 {
+  margin: 0 0 10px;
+  color: #465066;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .04em;
+}
+.simple-history-empty { margin: 0; color: #939cad; font-size: 12px; }
+.simple-history-list { display: grid; gap: 6px; }
+.simple-history-row {
+  display: grid;
+  gap: 2px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid #e6eaf2;
+  border-radius: 10px;
+  background: #fafbfe;
+  color: inherit;
+  text-decoration: none;
+  transition: border-color .18s var(--ease), background .18s var(--ease);
+}
+.simple-history-row:hover { border-color: #315acb; background: #f0f4ff; }
+.simple-history-row:focus-visible { outline: 3px solid rgba(49, 90, 203, .16); outline-offset: 2px; border-color: #315acb; }
+.simple-history-name {
+  overflow: hidden;
+  color: #2b3650;
+  font-size: 12px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.simple-history-meta { color: #8791a2; font-size: 11px; }
 .simple-footer {
   align-self: end;
   padding: 20px 12px 26px;
@@ -860,6 +953,9 @@ body.simple-converter-mode > .toast { display: none !important; }
   .simple-heading { margin-bottom: 22px; }
   .simple-heading h1 { font-size: 26px; }
   .simple-dropzone { min-height: 184px; padding: 24px 16px; }
+  .simple-studio-button { min-height: 44px; }
+  .simple-actions { grid-template-columns: 1fr; gap: 0; }
+  .simple-cancel-button { min-height: 48px; margin-top: 10px; }
   .simple-convert-button { min-height: 50px; }
   .simple-footer { padding-bottom: 20px; }
 }

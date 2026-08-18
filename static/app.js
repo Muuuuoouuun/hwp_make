@@ -58,10 +58,18 @@ const state = {
   actualPreviewNaturalWidth: 0,
   actualPreviewNaturalHeight: 0,
   simpleConversionBusy: false,
+  simpleCancelRequested: false,
 };
 
 const els = {
   simpleConverter: document.querySelector("#simpleConverter"),
+  simpleStudioButton: document.querySelector("#simpleStudioButton"),
+  simpleModeButton: document.querySelector("#simpleModeButton"),
+  simpleMathAi: document.querySelector("#simpleMathAi"),
+  simpleMathAiOption: document.querySelector("#simpleMathAiOption"),
+  simpleCancelButton: document.querySelector("#simpleCancelButton"),
+  simpleQualityNote: document.querySelector("#simpleQualityNote"),
+  simpleHistoryList: document.querySelector("#simpleHistoryList"),
   simpleFileInput: document.querySelector("#simpleFileInput"),
   simpleDropzone: document.querySelector("#simpleDropzone"),
   simpleSelectedFile: document.querySelector("#simpleSelectedFile"),
@@ -703,7 +711,9 @@ function previewZoomPercent() {
 }
 
 function ensurePaperBaseWidth() {
-  if (!els.paperStage) return;
+  // 숨김 상태(clientWidth 0, 예: 간단 변환 모드)에서 측정하면 바닥값이 캐시로 굳으므로
+  // 실제로 보일 때까지 측정을 미룬다.
+  if (!els.paperStage || !els.paperStage.clientWidth) return;
   const mode = mobileWorkspaceActive() ? "mobile" : "desktop";
   if (!state.paperBaseWidth || state.paperViewportMode !== mode) {
     state.paperViewportMode = mode;
@@ -1566,7 +1576,24 @@ function applyOrderEditor() {
   toast("문항 순서를 적용했습니다.");
 }
 
-async function handleImportedProblems(created, { quick = false } = {}) {
+async function handleImportedProblems(
+  created,
+  { quick = false, preserveBasket = false, exportOverrides = null, existingProblems = [], exportSignal = null } = {},
+) {
+  if (quick && preserveBasket) {
+    // 간단 변환: 스튜디오에서 담아 둔 시험지 구성(basket)과 편집 상태를 건드리지 않고
+    // 방금 가져온 문항 + 같은 출처 재변환으로 건너뛴 기존 문항을 바로 내보낸다.
+    renderList();
+    const ids = [];
+    for (const problem of [...created, ...existingProblems]) {
+      if (problem?.id != null && !ids.includes(problem.id)) ids.push(problem.id);
+    }
+    if (!ids.length) {
+      toast("새로 가져온 문제가 없습니다.");
+      return false;
+    }
+    return exportSelected(ids, exportOverrides, { signal: exportSignal });
+  }
   if (!created.length) {
     renderList();
     renderBasket();
@@ -1851,6 +1878,7 @@ async function loadExportHistory({ throwOnError = false } = {}) {
 }
 
 function renderHistory() {
+  renderSimpleHistory();
   const items = state.exports || [];
   els.historyBadge.textContent = String(items.length);
   els.historyList.innerHTML = "";
@@ -1949,6 +1977,12 @@ function renderList() {
     sourcePill.className = "source-pill";
     sourcePill.textContent = sourceLabel(problem.source_type);
     title.append(titleText, sourcePill);
+    if (problem.problem_type === "passage") {
+      const passagePill = document.createElement("b");
+      passagePill.className = "source-pill passage";
+      passagePill.textContent = "지문";
+      title.append(passagePill);
+    }
 
     const meta = document.createElement("div");
     meta.className = "problem-meta";
@@ -2335,7 +2369,13 @@ function isPdfFile(file) {
   return file?.type === "application/pdf" || /\.pdf$/i.test(file?.name || "");
 }
 
-async function importFiles({ quick = false, skipReplaceConfirm = false } = {}) {
+async function importFiles({
+  quick = false,
+  skipReplaceConfirm = false,
+  preserveBasket = false,
+  autoKind = false,
+  exportOverrides = null,
+} = {}) {
   const files = Array.from(els.fileInput.files || []);
   if (!files.length) {
     toast("파일을 선택하세요.");
@@ -2351,10 +2391,14 @@ async function importFiles({ quick = false, skipReplaceConfirm = false } = {}) {
   let total = 0;
   const notices = [];
   const created = [];
+  const existing = [];
   try {
     for (const [index, file] of files.entries()) {
       setImportProgress(`${index + 1}/${files.length} · ${file.name} 읽는 중`, true);
-      const kind = kindForFile(file);
+      // autoKind(간단 변환)는 스튜디오의 형식 선택값을 읽지도 바꾸지도 않는다.
+      const kind = autoKind
+        ? EXT_KINDS[(file.name.split(".").pop() || "").toLowerCase()] || null
+        : kindForFile(file);
       if (!kind) {
         notices.push(`${file.name}: 지원하지 않는 형식이라 건너뜀`);
         continue;
@@ -2374,10 +2418,17 @@ async function importFiles({ quick = false, skipReplaceConfirm = false } = {}) {
       const resultCreated = result.created || [];
       total += resultCreated.length;
       created.push(...resultCreated);
+      existing.push(...(result.existing || []));
       notices.push(...(result.notices || []));
     }
     await loadProblems({ render: false });
-    const completed = await handleImportedProblems(created, { quick });
+    const completed = await handleImportedProblems(created, {
+      quick,
+      preserveBasket,
+      exportOverrides,
+      existingProblems: existing,
+      exportSignal: controller.signal,
+    });
     toast(
       quick && completed
         ? `${total}개 문항으로 시험지 파일을 만들었습니다.${notices.length ? ` ${notices[0]}` : ""}`
@@ -2401,10 +2452,12 @@ async function importFiles({ quick = false, skipReplaceConfirm = false } = {}) {
     if (created.length) {
       try {
         await loadProblems({ render: false });
-        addManyToBasket(created, { replace: quick });
-        renderBasket();
-        await selectProblem(created[0].id);
-        setSideMode("library");
+        if (!preserveBasket) {
+          addManyToBasket(created, { replace: quick });
+          renderBasket();
+          await selectProblem(created[0].id);
+          setSideMode("library");
+        }
       } catch (refreshError) {
         toast(`${created.length}개는 이미 가져왔지만 목록 새로고침에 실패했습니다: ${friendlyErrorMessage(refreshError)}`);
         return;
@@ -2417,14 +2470,15 @@ async function importFiles({ quick = false, skipReplaceConfirm = false } = {}) {
     }
     return false;
   } finally {
-    state.importController = null;
+    // 다른 실행이 이미 새 컨트롤러를 등록했다면(모드 전환 후 동시 실행) 건드리지 않는다.
+    if (state.importController === controller) state.importController = null;
     setImportProgress("", false);
     setButtonBusy(actionButton, false);
     setImportButtonsDisabled([els.importButton, els.quickImportButton, els.layoutExportButton], false);
   }
 }
 
-async function exportPdfLayoutFiles() {
+async function exportPdfLayoutFiles({ layoutMode = "coordinate", mathAi = null, collect = null } = {}) {
   const files = Array.from(els.fileInput.files || []);
   if (!files.length) {
     toast("PDF 파일을 선택하세요.");
@@ -2439,20 +2493,24 @@ async function exportPdfLayoutFiles() {
   const controller = new AbortController();
   state.importController = controller;
   const results = [];
+  // 간단 변환은 편집형 기본값인 structured 모드를 쓰고, 스튜디오의 원본 레이아웃
+  // 버튼은 기존처럼 coordinate(원본 좌표 충실) 모드를 유지한다.
+  const useMathAi = mathAi === null ? Boolean(els.layoutMathAi?.checked) : Boolean(mathAi);
 
   setButtonBusy(els.layoutExportButton, true, "원본 레이아웃 변환 중...");
   setImportButtonsDisabled([els.importButton, els.quickImportButton, els.layoutExportButton], true);
   try {
     for (const [index, file] of pdfFiles.entries()) {
-      setImportProgress(`${index + 1}/${pdfFiles.length} · ${file.name} 원본 좌표 변환 중`, true);
+      const progressLabel = layoutMode === "structured" ? "편집형 변환 중" : "원본 좌표 변환 중";
+      setImportProgress(`${index + 1}/${pdfFiles.length} · ${file.name} ${progressLabel}`, true);
       const payload = {
         filename: file.name,
         data_base64: await fileToBase64(file, { signal: controller.signal }),
         boxed_passages: true,
-        layout_mode: "coordinate",
+        layout_mode: layoutMode,
         native_math: true,
       };
-      if (els.layoutMathAi?.checked) {
+      if (useMathAi) {
         payload.math_ai_recognition = true;
         payload.math_ai_model = "gemini-3.5-flash";
       }
@@ -2462,6 +2520,7 @@ async function exportPdfLayoutFiles() {
         body: JSON.stringify(payload),
       });
       results.push(result);
+      if (collect) collect.push(result);
       if (result.export?.url) {
         const link = document.createElement("a");
         link.href = result.export.url;
@@ -2499,7 +2558,8 @@ async function exportPdfLayoutFiles() {
     }
     return false;
   } finally {
-    state.importController = null;
+    // 다른 실행이 이미 새 컨트롤러를 등록했다면(모드 전환 후 동시 실행) 건드리지 않는다.
+    if (state.importController === controller) state.importController = null;
     setImportProgress("", false);
     setButtonBusy(els.layoutExportButton, false);
     setImportButtonsDisabled([els.importButton, els.quickImportButton, els.layoutExportButton], false);
@@ -2603,7 +2663,7 @@ async function deleteActive() {
   }
 }
 
-async function exportSelected(idsOverride = null) {
+async function exportSelected(idsOverride = null, overrides = null, { signal = null } = {}) {
   const ids = Array.isArray(idsOverride) ? idsOverride : state.basket.map((entry) => entry.id);
   if (!ids.length) {
     toast("먼저 시험지에 넣을 문제를 담으세요.");
@@ -2613,9 +2673,19 @@ async function exportSelected(idsOverride = null) {
     toast("편집 중인 문항을 저장하지 못해 내보내기를 중단했습니다.");
     return false;
   }
-  setWorkflowStep(3);
-  if (mobileWorkspaceActive()) setMobilePane("preview", { focus: true });
-  const format = String(els.exportFormat.value || "hwpx").toUpperCase();
+  if (!overrides) {
+    // 간단 변환(overrides)에서는 숨겨진 스튜디오의 워크플로 단계·모바일 pane을 건드리지 않는다.
+    setWorkflowStep(3);
+    if (mobileWorkspaceActive()) setMobilePane("preview", { focus: true });
+  }
+  // overrides가 오면(간단 변환) 스튜디오 폼 상태를 읽거나 바꾸지 않고 그대로 사용한다.
+  const exportTitle = overrides?.title ?? (els.exportTitle.value.trim() || DEFAULT_EXPORT_TITLE);
+  const exportFormat = overrides?.format ?? els.exportFormat.value;
+  const templateKey = overrides?.templateKey ?? (els.exportTemplate.value || "basic");
+  const includeAnswerSheet = overrides?.includeAnswerSheet ?? els.exportAnswerSheet.checked;
+  const nativeMath =
+    exportFormat === "hwpx" && Boolean(overrides?.nativeMath ?? els.exportNativeMath?.checked);
+  const format = String(exportFormat || "hwpx").toUpperCase();
   state.conversionBusy = true;
   setButtonBusy(els.exportButton, true, `${format} 변환 중...`);
   setConversionStatus(`문항 ${ids.length}개를 ${format} 파일로 변환하고 있습니다.`, "working");
@@ -2627,13 +2697,14 @@ async function exportSelected(idsOverride = null) {
       response = await fetch("/api/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: signal || undefined,
         body: JSON.stringify({
           ids,
-          title: els.exportTitle.value.trim() || DEFAULT_EXPORT_TITLE,
-          format: els.exportFormat.value,
-          template_key: els.exportTemplate.value || "basic",
-          include_answer_sheet: els.exportAnswerSheet.checked,
-          native_math: els.exportFormat.value === "hwpx" && Boolean(els.exportNativeMath?.checked),
+          title: exportTitle,
+          format: exportFormat,
+          template_key: templateKey,
+          include_answer_sheet: includeAnswerSheet,
+          native_math: nativeMath,
         }),
       });
     } catch (error) {
@@ -2643,7 +2714,7 @@ async function exportSelected(idsOverride = null) {
     const blob = await response.blob();
     const disposition = response.headers.get("content-disposition") || "";
     const match = disposition.match(/filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/);
-    const fallback = `${els.exportTitle.value || DEFAULT_EXPORT_TITLE}.${els.exportFormat.value}`;
+    const fallback = `${exportTitle}.${exportFormat}`;
     const filename = decodeURIComponent(match?.[1] || match?.[2] || fallback);
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -2868,6 +2939,16 @@ function renderAIStatus() {
     if (!mathReady) els.layoutMathAi.checked = false;
     els.layoutMathAi.closest("label")?.classList.toggle("disabled", !mathReady);
     els.layoutMathAi.closest("label")?.setAttribute("title", mathReady ? "PDF 수식 이미지를 Gemini로 인식합니다." : "Gemini API 키를 AI 설정에서 연결하면 사용할 수 있습니다.");
+  }
+  if (els.simpleMathAi) {
+    const mathReady = Boolean(status.features?.mathRecognition?.available);
+    els.simpleMathAi.disabled = !mathReady;
+    if (!mathReady) els.simpleMathAi.checked = false;
+    els.simpleMathAiOption?.classList.toggle("disabled", !mathReady);
+    els.simpleMathAiOption?.setAttribute(
+      "title",
+      mathReady ? "PDF 수식 이미지를 Gemini로 인식합니다." : "Gemini API 키를 AI 설정에서 연결하면 사용할 수 있습니다.",
+    );
   }
   if (els.geminiKeyStatus) els.geminiKeyStatus.textContent = settings.hasGeminiApiKey ? `설정됨 (${settings.geminiApiKeyPreview || "보안 저장"})` : "설정되지 않음";
   if (els.openAiKeyStatus) els.openAiKeyStatus.textContent = settings.hasOpenAiApiKey ? `설정됨 (${settings.openAiApiKeyPreview || "보안 저장"})` : "설정되지 않음";
@@ -3169,8 +3250,9 @@ function simpleFileExtension(file) {
 }
 
 function setSimpleFile(file, { syncInput = false } = {}) {
+  // 스튜디오의 파일 선택(els.fileInput)은 여기서 건드리지 않는다.
+  // 변환 실행 시점(runSimpleConversion)에만 잠시 대입하고 끝나면 복원한다.
   if (syncInput) assignSingleFile(els.simpleFileInput, file);
-  assignSingleFile(els.fileInput, file);
 
   if (!file) {
     els.simpleSelectedFile?.classList.add("hidden");
@@ -3200,44 +3282,176 @@ function setSimpleFile(file, { syncInput = false } = {}) {
   }
 }
 
+function setSimpleQualityNote(message) {
+  if (!els.simpleQualityNote) return;
+  els.simpleQualityNote.textContent = message || "";
+  els.simpleQualityNote.classList.toggle("hidden", !message);
+}
+
+function showSimpleQuality(results) {
+  const scored = (results || [])
+    .map((result) => ({
+      score: Number(result?.quality?.objective_score),
+      target: Number(result?.quality?.objective_score_target),
+    }))
+    .filter((entry) => Number.isFinite(entry.score));
+  if (!scored.length) {
+    setSimpleQualityNote("");
+    return;
+  }
+  const worst = Math.min(...scored.map((entry) => entry.score));
+  const target = scored.find((entry) => Number.isFinite(entry.target))?.target;
+  const targetText = Number.isFinite(target) ? ` · 목표 ${target}점` : "";
+  setSimpleQualityNote(`변환 품질 ${worst.toFixed(1)}점${targetText} · 세부 검수와 편집은 스튜디오에서 할 수 있습니다.`);
+}
+
+function renderSimpleHistory() {
+  if (!els.simpleHistoryList) return;
+  els.simpleHistoryList.replaceChildren();
+  const appendEmpty = (text) => {
+    const empty = document.createElement("p");
+    empty.className = "simple-history-empty";
+    empty.textContent = text;
+    els.simpleHistoryList.append(empty);
+  };
+  if (state.exportsError) {
+    appendEmpty("기록을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.");
+    return;
+  }
+  // 간단 화면은 변환 산출물만 보여준다. run 폴더의 원본 PDF 사본 등은 제외.
+  const items = (state.exports || [])
+    .filter((item) => ["hwpx", "docx"].includes(String(item.format || "").toLowerCase()))
+    .slice(0, 5);
+  if (!items.length) {
+    appendEmpty("아직 변환한 파일이 없습니다.");
+    return;
+  }
+  for (const item of items) {
+    const link = document.createElement("a");
+    link.className = "simple-history-row";
+    link.href = item.url;
+    link.download = item.display_name || item.name;
+    link.title = item.name;
+    const name = document.createElement("span");
+    name.className = "simple-history-name";
+    name.textContent = item.display_name || item.name;
+    const meta = document.createElement("span");
+    meta.className = "simple-history-meta";
+    meta.textContent = `${(item.format || "").toUpperCase()} · ${humanSize(item.size)} · ${formatExportTime(item.modified)}`;
+    link.append(name, meta);
+    els.simpleHistoryList.append(link);
+  }
+}
+
+const UI_MODE_STORAGE_KEY = "hwpMakeUiMode";
+
+function applyUiMode(mode, { focus = false } = {}) {
+  const simple = mode !== "studio";
+  document.body.classList.toggle("simple-converter-mode", simple);
+  try {
+    localStorage.setItem(UI_MODE_STORAGE_KEY, simple ? "simple" : "studio");
+  } catch (error) {
+    // localStorage 비활성(사생활 모드 등)이면 이번 세션에서만 모드가 유지된다.
+  }
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set("mode", simple ? "simple" : "studio");
+    window.history.replaceState(null, "", url);
+  } catch (error) {
+    // URL 갱신 실패는 화면 전환 동작에 영향이 없다.
+  }
+  if (!simple) {
+    // 간단 화면 아래에 숨겨져 있는 동안 측정하지 못한 패널/용지 크기를 다시 계산한다.
+    // 숨김 상태에서 굳은 캐시가 남지 않도록 기준 폭 캐시부터 비운다.
+    state.paperBaseWidth = 0;
+    state.paperViewportMode = null;
+    window.requestAnimationFrame(() => {
+      applyWorkspaceLayout();
+      ensurePaperBaseWidth();
+      updatePaperCanvasSize();
+    });
+  }
+  if (focus) {
+    const target = simple ? els.simpleDropzone : document.querySelector("#workspace");
+    target?.focus?.();
+  }
+}
+
 async function runSimpleConversion() {
   const file = els.simpleFileInput?.files?.[0];
   if (!file || state.simpleConversionBusy) return;
+  if (state.importController) {
+    setSimpleConversionStatus("다른 변환이 아직 진행 중입니다. 완료된 뒤 다시 시도해 주세요.", "error");
+    return;
+  }
   if (!EXT_KINDS[simpleFileExtension(file)] || !validateUploadSizes([file])) return;
 
+  // 스튜디오에서 골라 둔 파일 선택을 잠시 대체했다가 변환이 끝나면 복원한다.
+  const studioFiles = Array.from(els.fileInput?.files || []);
   assignSingleFile(els.fileInput, file);
-  els.importKind.value = "auto";
-  els.exportFormat.value = "hwpx";
-  els.exportTemplate.value = "basic";
-  els.exportTitle.value = file.name.replace(/\.[^.]+$/, "") || DEFAULT_EXPORT_TITLE;
-  if (els.exportNativeMath) els.exportNativeMath.checked = true;
 
   state.simpleConversionBusy = true;
+  state.simpleCancelRequested = false;
   setButtonBusy(els.simpleConvertButton, true, "변환 중...");
   els.simpleConvertButton.disabled = true;
   els.simpleFileRemove.disabled = true;
   els.simpleDropzone.setAttribute("aria-disabled", "true");
+  els.simpleCancelButton?.classList.remove("hidden");
+  if (els.simpleCancelButton) els.simpleCancelButton.disabled = false;
+  setSimpleQualityNote("");
   setSimpleConversionStatus(`${file.name} 업로드 중`, "working");
 
   let completed = false;
+  const pdfResults = [];
   try {
     completed = isPdfFile(file)
-      ? await exportPdfLayoutFiles()
-      : await importFiles({ quick: true, skipReplaceConfirm: true });
-    setSimpleConversionStatus(
-      completed
-        ? "변환이 완료되었습니다. 다운로드를 확인해 주세요."
-        : "변환을 완료하지 못했습니다. 파일을 확인한 뒤 다시 시도해 주세요.",
-      completed ? "success" : "error",
-    );
+      ? await exportPdfLayoutFiles({
+          layoutMode: "structured",
+          mathAi: Boolean(els.simpleMathAi?.checked && !els.simpleMathAi?.disabled),
+          collect: pdfResults,
+        })
+      : await importFiles({
+          quick: true,
+          skipReplaceConfirm: true,
+          preserveBasket: true,
+          autoKind: true,
+          exportOverrides: {
+            title: file.name.replace(/\.[^.]+$/, "") || DEFAULT_EXPORT_TITLE,
+            format: "hwpx",
+            templateKey: "basic",
+            includeAnswerSheet: false,
+            nativeMath: true,
+          },
+        });
+    if (state.simpleCancelRequested && !completed) {
+      setSimpleConversionStatus("변환을 취소했습니다.", "idle");
+    } else {
+      setSimpleConversionStatus(
+        completed
+          ? "변환이 완료되었습니다. 다운로드를 확인해 주세요."
+          : "변환을 완료하지 못했습니다. 파일을 확인한 뒤 다시 시도해 주세요.",
+        completed ? "success" : "error",
+      );
+    }
+    if (completed) showSimpleQuality(pdfResults);
   } catch (error) {
     setSimpleConversionStatus(`변환 실패 · ${friendlyErrorMessage(error)}`, "error");
   } finally {
     state.simpleConversionBusy = false;
+    state.simpleCancelRequested = false;
     setButtonBusy(els.simpleConvertButton, false);
     els.simpleConvertButton.disabled = false;
     els.simpleFileRemove.disabled = false;
     els.simpleDropzone.removeAttribute("aria-disabled");
+    if (els.fileInput) {
+      const restore = new DataTransfer();
+      for (const studioFile of studioFiles) restore.items.add(studioFile);
+      els.fileInput.files = restore.files;
+      showSelectedFiles();
+    }
+    // 포커스를 쥔 채 사라지면 키보드 초점이 body로 떨어지므로 먼저 옮긴다.
+    if (document.activeElement === els.simpleCancelButton) els.simpleConvertButton?.focus();
+    els.simpleCancelButton?.classList.add("hidden");
   }
 }
 
@@ -3431,6 +3645,15 @@ els.simpleDropzone?.addEventListener("drop", (event) => {
 });
 els.simpleFileRemove?.addEventListener("click", () => setSimpleFile(null, { syncInput: true }));
 els.simpleConvertButton?.addEventListener("click", runSimpleConversion);
+els.simpleCancelButton?.addEventListener("click", () => {
+  if (!state.simpleConversionBusy) return;
+  state.simpleCancelRequested = true;
+  els.simpleCancelButton.disabled = true;
+  setSimpleConversionStatus("변환을 취소하는 중입니다...", "working");
+  state.importController?.abort();
+});
+els.simpleStudioButton?.addEventListener("click", () => applyUiMode("studio", { focus: true }));
+els.simpleModeButton?.addEventListener("click", () => applyUiMode("simple", { focus: true }));
 els.fileInput.addEventListener("change", showSelectedFiles);
 els.cancelImportButton?.addEventListener("click", () => state.importController?.abort());
 els.dropzone.addEventListener("keydown", (event) => {
@@ -3454,7 +3677,7 @@ els.dropzone.addEventListener("drop", (event) => {
 });
 els.importButton.addEventListener("click", () => importFiles({ quick: false }));
 els.quickImportButton.addEventListener("click", () => importFiles({ quick: true }));
-els.layoutExportButton.addEventListener("click", exportPdfLayoutFiles);
+els.layoutExportButton.addEventListener("click", () => exportPdfLayoutFiles());
 els.collectButton.addEventListener("click", () => collectFromUrl({ quick: false }));
 els.quickCollectButton.addEventListener("click", () => collectFromUrl({ quick: true }));
 els.collectUrl.addEventListener("keydown", (event) => {
