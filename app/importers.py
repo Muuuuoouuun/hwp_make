@@ -90,12 +90,16 @@ PDF_FORM_LABEL_RE = re.compile(r"\(?\s*(?:홀수형|짝수형|미적분|확률�
 
 
 class _Sink:
-    """가져오기 중 문항을 만들며 중복은 건너뛰고 그 수를 센다."""
+    """가져오기 중 문항을 만들며 중복은 건너뛰고 그 수를 센다.
 
-    __slots__ = ("created", "skipped", "_seen")
+    같은 출처 재가져오기로 건너뛴 문항은 existing에 모아, 호출자가
+    "이미 있는 문항으로 다시 내보내기" 같은 멱등 동작을 만들 수 있게 한다."""
+
+    __slots__ = ("created", "existing", "skipped", "_seen")
 
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
+        self.existing: list[dict[str, Any]] = []
         self.skipped = 0
         self._seen: set[str] = set()
 
@@ -103,6 +107,12 @@ class _Sink:
         problem = storage.create_problem_unique(data, self._seen)
         if problem is None:
             self.skipped += 1
+            duplicate = storage.find_existing_problem(data)
+            if duplicate is not None:
+                known_ids = {item["id"] for item in self.created}
+                known_ids.update(item["id"] for item in self.existing)
+                if duplicate["id"] not in known_ids:
+                    self.existing.append(duplicate)
         else:
             self.created.append(problem)
         return problem
@@ -438,7 +448,7 @@ def _import_pdf_recognized(
         notices.append(f"시험지 제목 감지: {result.exam_title}")
     notices.extend(result.notices)
     notices.extend(_dedup_notices(sink))
-    return {"created": sink.created, "notices": notices, "exam_title": getattr(result, "exam_title", "")}
+    return {"created": sink.created, "existing": sink.existing, "notices": notices, "exam_title": getattr(result, "exam_title", "")}
 
 
 def _legacy_import_pdf(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -517,7 +527,7 @@ def _legacy_import_pdf(filename: str, payload: bytes, metadata: dict[str, Any]) 
                 "stem": "스캔 PDF이거나 텍스트를 추출하지 못했습니다. 이미지로 등록하거나 본문을 직접 입력하세요.",
             }
         )
-    return {"created": sink.created, "notices": notices}
+    return {"created": sink.created, "existing": sink.existing, "notices": notices}
 
 
 def import_image(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -560,7 +570,12 @@ def import_image(filename: str, payload: bytes, metadata: dict[str, Any]) -> dic
     }
     problem = storage.create_problem_unique(data) if has_real_text else storage.create_problem(data)
     if problem is None:
-        return {"created": [], "notices": ["이미 같은 본문의 문항이 있어 건너뛰었습니다.", *notices]}
+        duplicate = storage.find_existing_problem(data)
+        return {
+            "created": [],
+            "existing": [duplicate] if duplicate else [],
+            "notices": ["이미 같은 본문의 문항이 있어 건너뛰었습니다.", *notices],
+        }
     if width and height:
         notices.append(f"이미지 크기: {width}x{height}")
     return {"created": [problem], "notices": notices}
@@ -580,7 +595,7 @@ def import_text(
     sink = _create_from_chunks(chunks, source_type, filename, metadata)
     notices = [f"{len(sink.created)}개 문항을 텍스트에서 가져왔습니다."]
     notices.extend(_dedup_notices(sink))
-    return {"created": sink.created, "notices": notices}
+    return {"created": sink.created, "existing": sink.existing, "notices": notices}
 
 
 FIELD_ALIASES = {
@@ -1710,6 +1725,7 @@ def import_csv(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[
             sink.add({**metadata, **problem_data})
     return {
         "created": sink.created,
+        "existing": sink.existing,
         "notices": [f"{len(sink.created)}개 문항을 가져왔습니다.", *_dedup_notices(sink)],
     }
 
@@ -1758,7 +1774,7 @@ def import_sqlite(filename: str, payload: bytes, metadata: dict[str, Any]) -> di
     if not sink.created:
         notices.append("가져올 수 있는 question/stem/body/title 컬럼을 찾지 못했습니다.")
     notices.extend(_dedup_notices(sink))
-    return {"created": sink.created, "notices": notices}
+    return {"created": sink.created, "existing": sink.existing, "notices": notices}
 
 
 QUESTION_LINE_RE = re.compile(r"^\s*(?:문제\s*)?(\d{1,3})\s*[\.\)]")
@@ -2139,7 +2155,7 @@ def import_docx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
     if image_count:
         notices.append(f"이미지 {image_count}개를 함께 가져왔습니다.")
     notices.extend(_dedup_notices(sink))
-    return {"created": sink.created, "notices": notices}
+    return {"created": sink.created, "existing": sink.existing, "notices": notices}
 
 
 def _local_name(element: Any) -> str:
@@ -2286,7 +2302,7 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
     if image_count:
         notices.append(f"이미지 {image_count}개를 함께 가져왔습니다.")
     notices.extend(_dedup_notices(sink))
-    return {"created": sink.created, "notices": notices}
+    return {"created": sink.created, "existing": sink.existing, "notices": notices}
 
 
 # --- HWP(5.0 바이너리) 텍스트 추출 -------------------------------------------
@@ -2401,6 +2417,8 @@ def _import_hwp_via_ir(
                     "choices": [],
                     "image_paths": prob.get("image_paths", []),
                     "tables": [[[body.strip()]]] if body.strip() else [],
+                    # 공유 지문 1차 분리: 목록/집계에서 문항과 구분되는 행 타입.
+                    "problem_type": "passage",
                 }
             )
             continue
@@ -2448,7 +2466,7 @@ def _import_hwp_via_ir(
             f"후행 출처 마커 {trailing_source_count}개와 출제의도 {intent_count}개를 문항 메타데이터로 보존했습니다."
         )
     notices.extend(_dedup_notices(sink))
-    return {"created": sink.created, "notices": notices}
+    return {"created": sink.created, "existing": sink.existing, "notices": notices}
 
 
 def import_hwp(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -2539,4 +2557,4 @@ def import_hwp(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[
             notices.append(notice)
     sink = _create_from_chunks(chunks, "hwp", filename, metadata)
     notices.extend(_dedup_notices(sink))
-    return {"created": sink.created, "notices": notices}
+    return {"created": sink.created, "existing": sink.existing, "notices": notices}

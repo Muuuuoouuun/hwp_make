@@ -46,6 +46,19 @@ _failures: list[str] = []
 HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
 HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 
+# 계약 핀: structured writer도 math AI 플래그를 받아야 한다. (간단 변환 화면이
+# structured 모드로 math_ai_recognition을 보내는데, 시그니처에서 빠지면 조용한
+# no-op 토글이 된다 — 2026-08-18 리뷰에서 발견된 회귀.)
+import inspect  # noqa: E402
+
+from app import pdf_layout_writer as _plw  # noqa: E402
+
+_structured_params = inspect.signature(_plw.write_pdf_structured_hwpx).parameters
+for _param in ("math_ai_recognition", "math_ai_model"):
+    if _param not in _structured_params:
+        print(f"FAIL: write_pdf_structured_hwpx signature is missing {_param}")
+        raise SystemExit(1)
+
 
 def check(name: str, condition: bool, detail: str = "") -> None:
     status = "PASS" if condition else "FAIL"

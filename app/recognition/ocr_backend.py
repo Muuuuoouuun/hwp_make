@@ -774,7 +774,8 @@ def build_ocr_backend(name: str = "auto") -> OCRBackend:
     # separate fake "problems" downstream.
     print(
         "[ocr_backend] WARNING: 'auto' resolved to NoOcrBackend — no OCR engine "
-        "is available. Set GEMINI_API_KEY (in .env.local or the user settings UI) "
+        "is available. Set the GEMINI_API_KEY environment variable or save a "
+        "Gemini key in the in-app AI settings (stored in data/user_settings.json), "
         "or install paddleocr / tesseract. Problem-number detection will be "
         "disabled and every detected band will become its own pseudo-problem.",
         flush=True,

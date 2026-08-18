@@ -9892,6 +9892,8 @@ def write_pdf_structured_hwpx(
     template_key: str | None = None,
     native_math: bool = True,
     high_fidelity_math: bool = True,
+    math_ai_recognition: bool = False,
+    math_ai_model: str | None = None,
 ) -> dict[str, Any]:
     """Write a paragraph/table HWPX with deterministic native-math recovery.
 
@@ -10363,7 +10365,8 @@ def write_pdf_structured_hwpx(
                 0.30 if "english" in resolved_template else 0.42
             ),
             force_grayscale_overlays=True,
-            math_ai_recognition=False,
+            math_ai_recognition=math_ai_recognition,
+            math_ai_model=math_ai_model,
         )
         visual_text_mode = True
     elif resolved_template == "kice_math" and native_math and high_fidelity_math:
@@ -10387,7 +10390,8 @@ def write_pdf_structured_hwpx(
             foreground_overlay_right_pad=22.0,
             positioned_native_math=True,
             force_grayscale_overlays=True,
-            math_ai_recognition=False,
+            math_ai_recognition=math_ai_recognition,
+            math_ai_model=math_ai_model,
         )
         visual_math_mode = True
     elif resolved_template == "kice_math" and native_math:

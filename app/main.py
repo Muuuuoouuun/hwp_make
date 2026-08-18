@@ -97,6 +97,8 @@ class ProblemPayload(BaseModel):
     explanation: str = Field(default="", max_length=2_000_000)
     image_paths: list[str] = Field(default_factory=list, max_length=100)
     tables: list[list[list[str]]] = Field(default_factory=list, max_length=100)
+    # 공유 지문 1차 분리: 지문 행은 'passage'로 표시한다(기본은 일반 문항).
+    problem_type: Literal["question", "passage"] = "question"
 
 
 class ImportPayload(BaseModel):
@@ -850,6 +852,8 @@ def export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
                         output_path,
                         max_pages=payload.max_pages,
                         native_math=payload.native_math,
+                        math_ai_recognition=payload.math_ai_recognition,
+                        math_ai_model=payload.math_ai_model,
                     )
                 else:
                     stats = pdf_layout_writer.write_pdf_layout_hwpx(

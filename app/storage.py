@@ -58,6 +58,7 @@ def init_db() -> None:
                 image_paths_json TEXT NOT NULL DEFAULT '[]',
                 tables_json TEXT NOT NULL DEFAULT '[]',
                 layout_json TEXT NOT NULL DEFAULT '{}',
+                problem_type TEXT NOT NULL DEFAULT 'question',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -71,6 +72,11 @@ def init_db() -> None:
             conn.execute("ALTER TABLE problems ADD COLUMN layout_json TEXT NOT NULL DEFAULT '{}'")
         if "content_hash" not in columns:
             conn.execute("ALTER TABLE problems ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''")
+        # 공유 지문(shared passage) 1차 분리: 문항/지문 행 구분 타입.
+        if "problem_type" not in columns:
+            conn.execute(
+                "ALTER TABLE problems ADD COLUMN problem_type TEXT NOT NULL DEFAULT 'question'"
+            )
         # Backfill only legacy rows. Re-hashing every row (and reading every
         # referenced image) on each process start made startup grow with the
         # entire library size even though normal writes already maintain the hash.
@@ -97,6 +103,15 @@ def init_db() -> None:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# 공유 지문 1차 분리에서 허용하는 행 타입. 알 수 없는 값은 기존 동작('question')으로 접는다.
+PROBLEM_TYPES = ("question", "passage")
+
+
+def normalize_problem_type(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in PROBLEM_TYPES else "question"
 
 
 def _as_choice_list(value: Any) -> list[str]:
@@ -304,6 +319,7 @@ def create_problem(data: dict[str, Any]) -> dict[str, Any]:
         "image_paths_json": _json_list(data.get("image_paths")),
         "tables_json": _json_list(data.get("tables")),
         "layout_json": _json_object(data.get("layout")),
+        "problem_type": normalize_problem_type(data.get("problem_type")),
         "content_hash": _content_hash(data),
         "created_at": stamp,
         "updated_at": stamp,
@@ -314,12 +330,12 @@ def create_problem(data: dict[str, Any]) -> dict[str, Any]:
             INSERT INTO problems (
                 source_type, source_name, source_page, number, subject, unit, tags,
                 title, stem, choices_json, answer, explanation, image_paths_json,
-                tables_json, layout_json, content_hash, created_at, updated_at
+                tables_json, layout_json, problem_type, content_hash, created_at, updated_at
             )
             VALUES (
                 :source_type, :source_name, :source_page, :number, :subject, :unit, :tags,
                 :title, :stem, :choices_json, :answer, :explanation, :image_paths_json,
-                :tables_json, :layout_json, :content_hash, :created_at, :updated_at
+                :tables_json, :layout_json, :problem_type, :content_hash, :created_at, :updated_at
             )
             """,
             values,
@@ -331,9 +347,12 @@ def create_problem(data: dict[str, Any]) -> dict[str, Any]:
 def create_problem_unique(
     data: dict[str, Any], seen: set[str] | None = None
 ) -> dict[str, Any] | None:
-    """중복(동일 콘텐츠 해시)이면 만들지 않고 None을 돌려준다.
+    """중복이면 만들지 않고 None을 돌려준다.
 
     seen에는 이번 가져오기 안에서 이미 만든 해시를 모아 한 파일 내 중복도 막는다.
+    DB 중복 검사는 콘텐츠 해시 + 같은 출처(source_name)일 때만 적용한다:
+    같은 출처 재가져오기는 멱등하게 건너뛰고, 다른 출처의 동일 문구는 새 문항으로 허용한다
+    (수동 입력 등 source_name이 빈 문자열인 경우는 빈 문자열끼리 일치해 기존 차단 유지).
     식별 텍스트가 없는(빈 해시) 문항은 항상 새로 만든다(이미지 전용 등)."""
     data = _normalize_problem_data(data)
     digest = _content_hash(data)
@@ -357,6 +376,7 @@ def create_problem_unique(
         "image_paths_json": _json_list(data.get("image_paths")),
         "tables_json": _json_list(data.get("tables")),
         "layout_json": _json_object(data.get("layout")),
+        "problem_type": normalize_problem_type(data.get("problem_type")),
         "content_hash": digest,
         "created_at": stamp,
         "updated_at": stamp,
@@ -368,7 +388,8 @@ def create_problem_unique(
         conn.execute("BEGIN IMMEDIATE")
         if digest:
             row = conn.execute(
-                "SELECT 1 FROM problems WHERE content_hash = ? LIMIT 1", (digest,)
+                "SELECT 1 FROM problems WHERE content_hash = ? AND source_name = ? LIMIT 1",
+                (digest, values["source_name"]),
             ).fetchone()
             if row is not None:
                 conn.rollback()
@@ -378,12 +399,12 @@ def create_problem_unique(
             INSERT INTO problems (
                 source_type, source_name, source_page, number, subject, unit, tags,
                 title, stem, choices_json, answer, explanation, image_paths_json,
-                tables_json, layout_json, content_hash, created_at, updated_at
+                tables_json, layout_json, problem_type, content_hash, created_at, updated_at
             )
             VALUES (
                 :source_type, :source_name, :source_page, :number, :subject, :unit, :tags,
                 :title, :stem, :choices_json, :answer, :explanation, :image_paths_json,
-                :tables_json, :layout_json, :content_hash, :created_at, :updated_at
+                :tables_json, :layout_json, :problem_type, :content_hash, :created_at, :updated_at
             )
             """,
             values,
@@ -393,6 +414,23 @@ def create_problem_unique(
     if digest and seen is not None:
         seen.add(digest)
     return get_problem(problem_id)
+
+
+def find_existing_problem(data: dict[str, Any]) -> dict[str, Any] | None:
+    """create_problem_unique가 중복으로 건너뛴 데이터의 기존 문항을 돌려준다.
+
+    같은 출처(content_hash + source_name) 재가져오기에서 건너뛴 문항을 다시
+    내보내기 대상으로 재사용할 수 있게 한다. 식별 텍스트가 없으면 None."""
+    data = _normalize_problem_data(data)
+    digest = _content_hash(data)
+    if not digest:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM problems WHERE content_hash = ? AND source_name = ? ORDER BY id LIMIT 1",
+            (digest, data.get("source_name") or ""),
+        ).fetchone()
+    return row_to_problem(row) if row else None
 
 
 def get_problem(problem_id: int) -> dict[str, Any]:
@@ -436,6 +474,9 @@ def update_problem(problem_id: int, data: dict[str, Any]) -> dict[str, Any]:
     if "layout" in data:
         assignments.append("layout_json = :layout_json")
         values["layout_json"] = _json_object(data.get("layout"))
+    if "problem_type" in data:
+        assignments.append("problem_type = :problem_type")
+        values["problem_type"] = normalize_problem_type(data.get("problem_type"))
     if any(key in data for key in ("stem", "choices", "answer", "image_paths", "tables")):
         current = get_problem(problem_id)
         assignments.append("content_hash = :content_hash")

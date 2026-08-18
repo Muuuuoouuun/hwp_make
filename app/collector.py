@@ -214,4 +214,4 @@ def collect_url(url: str, metadata: dict[str, Any]) -> dict[str, Any]:
         )
     notices.extend(importers._dedup_notices(sink))
     notices.insert(0, f"'{base_title}'에서 {len(sink.created)}개 문항을 수집했습니다.")
-    return {"created": sink.created, "notices": notices}
+    return {"created": sink.created, "existing": sink.existing, "notices": notices}

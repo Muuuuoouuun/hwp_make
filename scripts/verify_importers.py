@@ -1551,6 +1551,32 @@ print("CSV intra-file dedup:", len(result["created"]), "created")
 if len(result["created"]) != 2:
     failures.append(f"Dedup: intra-file expected 2 unique, got {len(result['created'])}")
 
+# 5b-2) 중복 판정 범위: 같은 출처 재가져오기는 건너뛰고, 다른 출처의 동일 본문은 새 문항으로 허용
+scope_csv = "번호,문제,정답\n1,출처범위질문은?,정답C\n".encode("utf-8-sig")
+result = importers.import_csv("scope_a.csv", scope_csv, {})
+if len(result["created"]) != 1:
+    failures.append(f"출처 범위: 최초 가져오기는 1개 생성이어야 하는데 {len(result['created'])}개")
+scope_first_id = result["created"][0]["id"] if result["created"] else None
+result = importers.import_csv("scope_a.csv", scope_csv, {})
+print("CSV 같은 출처 재가져오기:", len(result["created"]), "created;", result["notices"])
+if result["created"]:
+    failures.append("출처 범위: 같은 출처(scope_a.csv) 재가져오기는 중복으로 건너뛰어야 한다")
+if not any("건너뛰" in notice for notice in result["notices"]):
+    failures.append("출처 범위: 같은 출처 재가져오기에서 건너뜀 안내가 없다")
+# 건너뛴 문항은 existing으로 되돌려 재변환(재내보내기)이 멱등하게 성공할 수 있어야 한다.
+existing = result.get("existing") or []
+print("CSV 재가져오기 existing 재사용:", [item["id"] for item in existing])
+if len(existing) != 1 or (scope_first_id is not None and existing[0]["id"] != scope_first_id):
+    failures.append(
+        f"출처 범위: 재가져오기 existing은 기존 문항 1개(id={scope_first_id})여야 하는데 {[item.get('id') for item in existing]}"
+    )
+result = importers.import_csv("scope_b.csv", scope_csv, {})
+print("CSV 다른 출처 동일 본문:", len(result["created"]), "created")
+if len(result["created"]) != 1:
+    failures.append(
+        f"출처 범위: 다른 출처(scope_b.csv)의 동일 본문은 새 문항이어야 하는데 {len(result['created'])}개 생성"
+    )
+
 # 5c) HWP IR marker/choice/image sync regression.
 original_ordered_stream = importers_hwp_ir._ordered_stream
 try:
@@ -1602,6 +1628,66 @@ else:
         failures.append(f"HWP IR sync: final problem image/cutoff failed: {synced[2]}")
     if any("\uc815\ub2f5" in str(problem.get("tables") or "") for problem in synced):
         failures.append(f"HWP IR sync: answer section leaked into problems: {synced}")
+
+# 5d) problem_type \ub77c\uc6b4\ub4dc\ud2b8\ub9bd: \uae30\ubcf8\uac12 'question', \uba85\uc2dc \ud0dc\uae45 'passage', \uc54c \uc218 \uc5c6\ub294 \uac12 \ubc29\uc5b4.
+reset_problems()
+default_typed = storage.create_problem(
+    {"source_type": "manual", "title": "\ud0c0\uc785 \uae30\ubcf8\uac12", "stem": "1. \uae30\ubcf8 \ubb38\ud56d\uc758 \ubcf8\ubb38\uc774\ub2e4."}
+)
+if default_typed.get("problem_type") != "question":
+    failures.append(
+        f"problem_type roundtrip: default should be 'question', got {default_typed.get('problem_type')!r}"
+    )
+tagged_passage = storage.create_problem(
+    {
+        "source_type": "manual",
+        "title": "\uc9c0\ubb38 \ud589",
+        "stem": "[1~3] \ub2e4\uc74c \uae00\uc744 \uc77d\uace0 \ubb3c\uc74c\uc5d0 \ub2f5\ud558\uc2dc\uc624.",
+        "problem_type": "passage",
+    }
+)
+if storage.get_problem(tagged_passage["id"]).get("problem_type") != "passage":
+    failures.append("problem_type roundtrip: 'passage' tag was not persisted on create\u2192get")
+invalid_typed = storage.create_problem(
+    {"source_type": "manual", "title": "\ud0c0\uc785 \ubc29\uc5b4", "stem": "2. \uc798\ubabb\ub41c \ud0c0\uc785 \ubb38\ud56d\uc774\ub2e4.", "problem_type": "essay"}
+)
+if invalid_typed.get("problem_type") != "question":
+    failures.append(
+        f"problem_type roundtrip: unknown type should fall back to 'question', got {invalid_typed.get('problem_type')!r}"
+    )
+retagged = storage.update_problem(default_typed["id"], {"problem_type": "passage"})
+if retagged.get("problem_type") != "passage":
+    failures.append("problem_type roundtrip: update to 'passage' was not persisted")
+
+# 5e) HWP IR \uacf5\uc720 \uc9c0\ubb38 \uac00\uc838\uc624\uae30: \uc9c0\ubb38 \ud589\uc740 'passage', \ubb38\ud56d \ud589\uc740 'question'\uc73c\ub85c \uc800\uc7a5\ub3fc\uc57c \ud55c\ub2e4.
+reset_problems()
+passage_original_stream = importers_hwp_ir._ordered_stream
+try:
+
+    def fake_passage_stream(payload, filename, save_image):
+        return [
+            ("text", "[1~2] \ub2e4\uc74c \uae00\uc744 \uc77d\uace0 \ubb3c\uc74c\uc5d0 \ub2f5\ud558\uc2dc\uc624."),
+            ("text", "\ub0af\uc120 \ub3c4\uc2dc\uc758 \uace8\ubaa9\uc5d0\uc11c \ud654\uc790\ub294 \uc624\ub798\ub41c \uc57d\uc18d\uc744 \ub5a0\uc62c\ub9b0\ub2e4."),
+            ("text", "1. \uc717\uae00\uc758 \uc11c\uc220\uc0c1 \ud2b9\uc9d5\uc73c\ub85c \uac00\uc7a5 \uc801\uc808\ud55c \uac83\uc740?"),
+            ("text", "\u2460 \uac11 \u2461 \uc744 \u2462 \ubcd1 \u2463 \uc815 \u2464 \ubb34"),
+            ("text", "2. \uc717\uae00\uc758 \ud654\uc790\uc5d0 \ub300\ud55c \uc774\ud574\ub85c \uc801\uc808\ud558\uc9c0 \uc54a\uc740 \uac83\uc740?"),
+            ("text", "\u2460 \uac00 \u2461 \ub098 \u2462 \ub2e4 \u2463 \ub77c \u2464 \ub9c8"),
+        ]
+
+    importers_hwp_ir._ordered_stream = fake_passage_stream
+    passage_import = importers._import_hwp_via_ir("korean_passage.hwp", b"", {})
+finally:
+    importers_hwp_ir._ordered_stream = passage_original_stream
+
+passage_created = (passage_import or {}).get("created") or []
+passage_rows = [item for item in passage_created if item.get("problem_type") == "passage"]
+question_rows = [item for item in passage_created if item.get("problem_type") == "question"]
+print("HWP IR passage typing:", len(passage_rows), "passage /", len(question_rows), "question rows")
+if len(passage_rows) != 1 or "\uc9c0\ubb38" not in str(passage_rows[0].get("title") or ""):
+    failures.append(f"HWP IR passage typing: expected one tagged passage row, got {passage_created!r}")
+if len(question_rows) != 2:
+    failures.append(f"HWP IR passage typing: question rows lost their default type: {passage_created!r}")
+reset_problems()
 
 print()
 if failures:
