@@ -1,6 +1,6 @@
 # 현재 자체 평가
 
-측정일: 2026-08-04
+측정일: 2026-08-18
 
 이 문서는 기능 존재 여부가 아니라 현재 머신의 자동 검증과 로컬 실물 샘플 결과를 기준으로 제품 상태를 나눈다. 시장 제품과 비교한 점수가 아니라 다음 개발 순서를 결정하기 위한 내부 기준이다.
 
@@ -35,7 +35,7 @@
 
 ### 문서 변환 엔진 전체 범위의 별도 결론
 
-현재 단계는 **수학 시험지 중심의 내부 베타**다. 제어된 로컬 샘플에서는 문항 싱크, 네이티브 수식, HWPX 재열기, overflow 방지가 강하다. 반면 모든 실물 PDF에 구조 placeholder가 남고, 스캔/OCR 환경이 준비되지 않았으며, 실제 브라우저 사용자 흐름과 다양한 한글 설치 환경을 자동 검증하지 못한다. 따라서 출시 후보나 범용 문서 변환기로 판정하지 않는다.
+현재 단계는 **수학 시험지 중심의 내부 베타**다. 제어된 로컬 샘플에서는 문항 싱크, 네이티브 수식, HWPX 재열기, overflow 방지가 강하다. 실물 수학 PDF 4부의 수식 2D 구조 placeholder는 0이 되었지만(2026-08-04), 새 샘플에 대한 구조 복원 일반화는 남아 있고, 스캔/OCR 환경이 준비되지 않았으며, 실제 브라우저 사용자 흐름과 다양한 한글 설치 환경을 자동 검증하지 못한다. 따라서 출시 후보나 범용 문서 변환기로 판정하지 않는다.
 
 2026년 6월 고1 전과목 PDF와 사용자 제공 HWP를 추가로 검증한 결과는 `docs/full_subject_qa_2026_06.md`를 따른다. P0 개선 후 PDF는 실제 문항 190개를 과분할 없이 정확히 인식하며, 국어 14쪽 공유 지문은 39번에 편집 텍스트로 연결된다. 개인 수학 HWP도 30문항, 21선택+9단답, native equation 250개로 복원되고 전체 렌더 QA를 통과한다.
 
@@ -52,8 +52,8 @@ UI 문항 이동·배치 회귀는 `docs/ui_reorder_layout_assessment_2026_07.md
 | 실물 수학 PDF | 4부, 184문항 | 정기 회귀 샘플 있음 |
 | 편집 텍스트가 있는 PDF 문항 | 181/184 (98.4%) | 강함 |
 | PDF 출력 네이티브 수식 | 1,060개 | malformed 0, object issue 0 |
-| PDF 구조 placeholder | 48개 | 네 샘플 모두 review 필요 |
-| placeholder 유형 | fraction 13, cases/grouping 13, script/adjacent 9, root 7, vector 6 | 현재 P0 |
+| PDF 구조 placeholder | 0개 (실물 수학 PDF 4부 전부) | 2026-08-04 잔여 2건 해소로 달성, 2026-08-18 게이트 재확인 |
+| 수식 구조 일반화 과제 | mixed fraction, root index/radicand, super/subscript, cases, bbox-vector base 추론 | 새 샘플 일반화·fixture 승격 대기. 실측 근거(2026-08-18): 25수능 수학 PDF structured 변환(AI 인식 off)이 objective 91.3/96, 수식 높이 부족 1,009건 |
 | PDF 렌더 | 68페이지 | overflow 0, column crossing 0 |
 | HyhwpEQ PUA 복원 | 실물 PDF 47부에서 92.1% | 1차 문자 복원 강함, 2D 구조 복원은 미완 |
 | 편집 HWP 샘플 | 4부, 184문항, 수식 1,784개 | sync 실패 0, overflow 0 |
@@ -63,7 +63,8 @@ UI 문항 이동·배치 회귀는 `docs/ui_reorder_layout_assessment_2026_07.md
 | 레이아웃 품질 개선 후 변환 | 21.687초/6과목(1회 합계), 머리말 52/52 | 최초 기준 대비 90.0% 단축, overflow·단 침범 0 |
 | UI 이동·배치 스트레스 | 8문항 UI, 6문항 출력 fixture 정·역방향 | 버튼·드래그·실제 내보내기, overflow·단 침범 0 |
 | 개인 수학 HWP | 30문항, 수식 250개, 9쪽 | 21선택+9단답, overflow·단 침범 0 |
-| 통합 자동 관문 | 2026-08-04 재실행 36 PASS, 10 SKIP, 0 FAIL | 그린, SKIP은 외부·개인 실물 샘플 또는 사전 생성 패키지 부재 |
+| 통합 자동 관문 | 2026-08-18 재실행 37 PASS, 10 SKIP, 0 FAIL (대상 47개, 간단 변환 핀 신설 포함) | 그린, SKIP은 외부·개인 실물 샘플 또는 사전 생성 패키지 부재 |
+| e2e 베이스라인 | e2e_verify.py 베이스라인 일치, 25수능 국어 수식 18개 핀 갱신 | 무회귀 |
 
 ## 세부 항목별 상태
 
@@ -72,7 +73,7 @@ UI 문항 이동·배치 회귀는 `docs/ui_reorder_layout_assessment_2026_07.md
 | 입력 형식 지원 | 부분 완료 | PDF, HWP/HWPX, DOCX, 이미지, 텍스트, CSV, SQLite import 경로와 roundtrip 회귀가 있다. | 형식별 손실률과 실패 메시지를 실물 fixture로 고정한다. |
 | 문항 분리와 번호 싱크 | 검증됨 | 기존 46문항 수학 샘플과 개인 30문항 HWP가 각각 정확한 inventory를 유지한다. 고1 전과목 PDF도 45/30/45/20/25/25로 정확하다. | 새로운 출판사·학년 샘플을 추가하고 shared passage inventory를 일반 문제 수와 분리한다. |
 | 수식 문자 복원 | 검증됨 | PUA 복원율 92.1%, 그리스문자·연산자·기본 수식 회귀가 통과한다. | 매핑되지 않은 PUA를 샘플별로 계속 축소한다. |
-| 수식 2D 구조 복원 | 부분 완료 | 선택지 분수, 단순 stem 분수, log base, 확정 vector residue는 복원한다. 네이티브 수식 객체는 정상이다. | 남은 48개 mixed fraction, root, 첨자, cases, bbox-vector를 최소 fixture와 함께 복원한다. |
+| 수식 2D 구조 복원 | 부분 완료 | 선택지 분수, 단순 stem 분수, log base, 확정 vector residue를 복원하고, 실물 수학 PDF 4부의 구조 placeholder는 0이다(2026-08-04). 네이티브 수식 객체는 정상이다. | mixed fraction, root index/radicand, super/subscript, cases, bbox-vector base 추론을 새 샘플로 일반화하고 fixture로 승격한다. |
 | HWP/HWPX 재가공 | 검증됨 | HWP 4부 184문항과 수식 1,784개에서 재열기, sync, 렌더 관문이 통과한다. | 다른 제작 버전·보호 문서·손상 문서 호환 범위를 별도 기록한다. |
 | PDF 원본 레이아웃 HWPX | 부분 완료 | 원본 좌우 본문 레일 추정, 매 페이지 머리말, 머리말 3열·본문 2열 표 분리, 중앙 구분선과 지역 이미지가 연결되어 있다. 전과목 52쪽 전체 시각 비교에서 overflow·단 침범 0이고 한국사 자료 박스를 보존한다. | 다른 출판사·학년·용지 규격을 추가해 named profile의 일반화 범위를 검증한다. |
 | 타이포그래피 | 부분 완료 | 문제은행 writer는 95/165 계열 검증을 유지하고, PDF flow writer는 원본 글자 크기·장평 86·자간 -5·150% 줄간격과 머리말 좌/중/우 정렬을 검증한다. | 실제 한글 렌더에서 대체 폰트 여부와 과목별 profile을 비교한다. |
@@ -81,14 +82,14 @@ UI 문항 이동·배치 회귀는 `docs/ui_reorder_layout_assessment_2026_07.md
 | 미리보기 | 부분 완료 | rhwp 기반 렌더가 동작하고 수식 가시성 회귀가 있다. | 현재 안내처럼 다단 문서를 1단으로 보여 주는 차이를 줄인다. |
 | 웹 UI 작업 흐름 | 검증됨 | 390·768·1440px 실제 브라우저에서 루트 overflow 0, CTA 노출, 키보드 탭·모달, 실제 HWPX 미리보기·내보내기 완료를 확인했다. 자동저장 경쟁, 독립 초기화, 업로드 취소·부분 완료, 205개 페이지네이션을 회귀핀으로 고정했다. | 실제 브라우저 axe/비동기 경쟁 CI와 Firefox/WebKit 교차 검증을 추가한다. |
 | 스캔/OCR | 취약 | PaddleOCR, Tesseract, Gemini backend 코드는 있으나 현재 실행은 `NoOcrBackend` 경고를 낸다. | 최소 한 OCR backend를 설치·설정하고 스캔 시험지 fixture의 번호 인식과 신뢰도 fallback을 검증한다. |
-| 자동 회귀와 재현성 | 부분 완료 | 최신 통합 관문 46개 대상 중 36 PASS, 10 SKIP, 0 FAIL이다. 실물/합성 렌더, UI 배치, API 하드닝, 205개 페이지네이션, 프런트 접근성·레이아웃·수식 관문을 포함한다. | 외부·개인 실물 샘플 및 사전 생성 패키지가 필요한 10개 SKIP을 재현 가능한 fixture로 전환하고 실패 artifact를 보존한다. |
+| 자동 회귀와 재현성 | 부분 완료 | 최신 통합 관문 47개 대상 중 37 PASS, 10 SKIP, 0 FAIL이다. 실물/합성 렌더, UI 배치, API 하드닝, 205개 페이지네이션, 프런트 접근성·레이아웃·수식·간단 변환 관문을 포함한다. | 외부·개인 실물 샘플 및 사전 생성 패키지가 필요한 10개 SKIP을 재현 가능한 fixture로 전환하고 실패 artifact를 보존한다. |
 | 배포·운영 | 취약 | 로컬 PowerShell 실행과 환경 변수 기반 데이터 경로는 있다. | 고정 의존성, 설치/업데이트 방식, 백업/복구, 큰 파일 제한, 지원 환경 표를 마련한다. |
 
 ## 다음 개발 순서
 
 1. **shared passage 모델 분리**: 국어 HWP의 45문항과 11지문을 DB·UI·writer에서 서로 다른 타입으로 관리한다.
 2. **중복 판정 범위 수정**: 같은 import 내부 중복은 막고, 서로 다른 시험의 동일 문구는 자동 삭제하지 않는다.
-3. **잔여 수식 48개 축소**: 각 유형의 실제 사례를 최소 synthetic fixture로 승격한 뒤 bbox와 텍스트가 함께 확정되는 규칙만 추가한다.
+3. **잔여 수식 축소(완료)와 구조 복원 일반화**: 실물 수학 PDF 4부의 구조 placeholder 0을 달성했다(2026-08-04). 다음은 mixed fraction, root index/radicand, super/subscript, cases, bbox-vector base 추론을 새 샘플로 일반화하고 각 지원 사례를 fixture로 승격하는 것이다.
 4. **문항 단위 inventory 완성**: source page/column/number/choice/image fallback을 문항별 JSON과 HTML review에 표시한다.
 5. **레이아웃 profile 확장**: 이번 전과목 52쪽 기준을 fixture로 유지하고 다른 출판사·학년·용지 규격에서도 본문 레일과 머리말 탐지를 검증한다.
 6. **사용자 경로·OCR 검증**: 실제 브라우저 E2E와 기본 OCR backend 지원선을 확정한다.

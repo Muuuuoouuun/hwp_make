@@ -1,0 +1,35 @@
+# 생성일: 2026-08-18
+# 재현용 스냅샷입니다. requirements.txt가 원본이며, 이 파일은 현재 머신에서
+# 설치·검증된 정확한 버전을 고정 기록한 것입니다 (pip freeze에서 직접 의존성과
+# 핵심 전이 의존성만 추림). 동일 환경 재현: python -m pip install -r requirements.lock.txt
+#
+# --- 직접 의존성 (requirements.txt 순서) ---
+fastapi==0.136.1
+uvicorn==0.46.0
+pypdf==6.12.2
+pillow==12.1.1
+numpy==2.4.4
+python-docx==1.2.0
+lxml==6.1.1
+httpx==0.28.1
+reportlab==4.5.0
+olefile==0.47
+rhwp-python==0.7.0
+PyMuPDF==1.27.2.2
+#
+# --- 핵심 전이 의존성 ---
+annotated-doc==0.0.4        # fastapi
+annotated-types==0.7.0      # pydantic
+anyio==4.12.1               # starlette, httpx
+certifi==2026.2.25          # httpx, httpcore
+charset-normalizer==3.4.6   # reportlab
+click==8.3.3                # uvicorn
+colorama==0.4.6             # click (Windows)
+h11==0.16.0                 # uvicorn, httpcore
+httpcore==1.0.9             # httpx
+idna==3.11                  # httpx, anyio
+pydantic==2.12.5            # fastapi, rhwp-python
+pydantic_core==2.41.5       # pydantic
+starlette==1.0.0            # fastapi
+typing-inspection==0.4.2    # fastapi, pydantic
+typing_extensions==4.15.0   # fastapi, pydantic, python-docx

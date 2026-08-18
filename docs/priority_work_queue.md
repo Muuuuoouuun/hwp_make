@@ -1,6 +1,6 @@
 # Priority Work Queue
 
-Updated: 2026-07-09
+Updated: 2026-08-18
 
 Goal: produce KICE/school-exam HWPX output that preserves question sync, native math equations, typography, and layout without overlaps. Direct `.hwp` output remains a Hancom/COM conversion concern after HWPX quality is stable.
 
@@ -42,7 +42,7 @@ Canonical references:
 
 ## P0 - Current Blocking Gates
 
-1. Reduce remaining real-PDF math placeholders.
+1. Reduce remaining real-PDF math placeholders. COMPLETED for the four local real math PDFs (0 placeholders); remaining scope is generalization.
    - Current status: raw PDF character/span geometry is preserved in `pdf_line_chars` and `pdf_line_spans`.
    - Current status: imported problem layout metadata carries `pdf_lines` with line text, bbox, char geometry, and span geometry.
    - Current status: real PDF QA separates actual output residuals in `placeholder_reports` from source-PDF structure hints in `source_placeholder_hint_reports`.
@@ -51,10 +51,11 @@ Canonical references:
    - Current status: char-bbox stem fraction repair converts high-confidence stacked fractions, including `y=\frac{3}{x-1}`-style curves and `\frac{x2}{9}-\frac{y2}{16}`-style conics.
    - Current status: log-base placeholder repair converts high-confidence `log3□a`-style PDF residue into `\log_{3}a` before `□x` can be misread as an overline.
    - Current status: split vector residue cleanup removes a `□⃗` line only when the following line is already a confirmed `\vec{...}` token.
-   - Current local baseline: the four-sample math PDF set reports 48 total `stem□` placeholders, down from 66 before this repair series, with malformed equation count 0 and render overflow 0.
-   - Current residual type counts after classifier cleanup: fraction 13, root 7, vector/arrow 6, cases/grouping 13, adjacent script/structure 9. Source-PDF `□` hints remain available separately for bbox-driven reconstruction.
-   - Next action: classify the residual placeholders by structure type, then implement only high-confidence mixed fraction, root, script, case, and bbox-vector repairs.
-   - Done when: remaining `□` counts are explained by type, and supported structural cases convert to native equations with regression fixtures.
+   - Completed 2026-08-04 (commit edd3ef4): the four-sample local real math PDF set reports 0 structure placeholders, down from 48 at the previous baseline (66 before the repair series), with malformed equation count 0 and render overflow 0. Source-PDF `□` hints remain available separately for bbox-driven reconstruction.
+   - Re-confirmed 2026-08-18: `python scripts/run_all_verify.py` is ALL GREEN (37 PASS, 10 SKIP, 0 FAIL over 47 targets, including the new simple-converter pin); `e2e_verify.py` matches its baseline (no regression) and the 25-CSAT Korean 18-equation pin is refreshed.
+   - Measured generalization gap (2026-08-18): a real 25-CSAT math PDF converted through the structured route without AI math recognition scored objective 91.3 vs target 96, and `verify_native_math_layout_heights.py` reported 1,009 equation-height shortages on that output. This is the concrete evidence for the generalization work below; the height gate scans `data/exports/pdf_layout/**/*_structured_native.hwpx`, so ad-hoc test conversions left in that folder will fail the gate.
+   - Next action: generalize the structure repairs beyond the four local samples — mixed fraction, root index/radicand, superscript/subscript, cases, and bbox-based vector base inference — against new samples, and promote each supported case into regression fixtures.
+   - Done when: new real samples convert supported structural cases to native equations with structure placeholders at 0, and each generalized repair rule has a regression fixture.
 
 2. Keep question sync as a non-negotiable gate.
    - Current status: HWP sample QA keeps 46-question sync and overflow 0.

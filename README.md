@@ -26,6 +26,8 @@ pip install -r requirements.txt
 .\run_local.ps1
 ```
 
+검증된 환경을 그대로 재현하려면 `pip install -r requirements.lock.txt`를 사용하세요 (버전 고정 스냅샷, 원본은 `requirements.txt`).
+
 브라우저에서 `http://127.0.0.1:8787`을 엽니다.
 
 ## 현재 사용 경로
