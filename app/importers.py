@@ -147,7 +147,9 @@ def decode_base64(data: str) -> bytes:
 def save_upload(filename: str, payload: bytes) -> str:
     storage.ensure_dirs()
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = storage.UPLOAD_DIR / f"{stamp}_{uuid.uuid4().hex[:8]}_{safe_filename(filename)}"
+    directory = storage.upload_directory()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{stamp}_{uuid.uuid4().hex[:8]}_{safe_filename(filename)}"
     path.write_bytes(payload)
     return path.relative_to(storage.DATA_DIR).as_posix()
 

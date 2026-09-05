@@ -66,12 +66,12 @@ assert(js.includes("document.activeElement === els.simpleCancelButton"), "cancel
 assert(html.includes('id="simpleCancelButton"'), "simple cancel button missing");
 assert(js.includes("state.simpleCancelRequested = true"), "cancel request flag missing");
 assert(js.includes("state.importController?.abort()"), "cancel is not wired to the abort controller");
-assert(js.includes('setSimpleConversionStatus("변환을 취소했습니다."'), "cancel completion message missing");
+assert(js.includes('setSimpleConversionStatus("대기를 중단했습니다. 서버에서 생성이 계속될 수'), "cancel semantics must distinguish stopping the wait from stopping server work");
 // 취소는 내보내기(2단계) fetch까지 닿아야 한다: signal 스레딩.
 assert(js.includes("exportSignal: controller.signal"), "export phase is not cancellable (signal not threaded)");
 assert(js.includes("signal: signal || undefined"), "exportSelected fetch ignores the abort signal");
 assert(html.includes('id="simpleQualityNote"'), "quality note element missing");
-assert(js.includes("quality?.objective_score"), "objective score is not surfaced");
+assert(js.includes("quality.objective_score"), "objective score is not surfaced");
 assert(html.includes('id="simpleHistoryList"'), "recent conversion history list missing");
 assert(js.includes("function renderSimpleHistory()"), "renderSimpleHistory missing");
 assert(/function renderHistory\(\) \{\s*\n\s*renderSimpleHistory\(\);/.test(js), "history refresh does not update the simple screen");

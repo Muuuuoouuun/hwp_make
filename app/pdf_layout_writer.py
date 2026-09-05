@@ -9894,11 +9894,13 @@ def write_pdf_structured_hwpx(
     high_fidelity_math: bool = True,
     math_ai_recognition: bool = False,
     math_ai_model: str | None = None,
+    variant_policy: str = "all",
 ) -> dict[str, Any]:
-    """Write a paragraph/table HWPX with deterministic native-math recovery.
+    """Write editable HWPX with deterministic math recovery.
 
-    Source figures may remain embedded pictures, but problem text and equations
-    are never replaced with page or formula screenshots.
+    The high-fidelity path combines editable text/equations with regional
+    visual overlays. Pure reflow is available via high_fidelity_math=False.
+    All source forms are retained unless variant_policy='first' is requested.
     """
     from . import hwpx_writer_v2, importers
     from .pdf_math_geometry import repair_problem_math_layout
@@ -9916,12 +9918,14 @@ def write_pdf_structured_hwpx(
 
     # Some supplied exam PDFs concatenate odd/even forms. Their question
     # numbers restart halfway through and nearly every stem is duplicated.
-    # Keep the first complete form so the editable output does not grow extra
-    # near-duplicate pages from small segmentation differences in the second.
+    # Preserve every form unless the caller explicitly requests the first one.
+    # Detection alone must never silently discard a user's source pages.
+    if variant_policy not in {"all", "first"}:
+        raise ValueError("variant_policy must be 'all' or 'first'")
     variant_page_limit: int | None = None
     variant_overlap_ratio = 0.0
     total_recognized_pages = int(getattr(recognized, "page_count", 0) or 0)
-    if total_recognized_pages >= 8 and total_recognized_pages % 2 == 0:
+    if variant_policy == "first" and total_recognized_pages >= 8 and total_recognized_pages % 2 == 0:
         half_pages = total_recognized_pages // 2
 
         def variant_key(problem: Any) -> tuple[str, str] | None:
@@ -9958,7 +9962,7 @@ def write_pdf_structured_hwpx(
             variant_page_limit = half_pages
 
     items: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[int, str, str, tuple[str, ...]]] = set()
     duplicate_count = 0
     figure_count = 0
     unreliable_count = 0
@@ -10036,7 +10040,7 @@ def write_pdf_structured_hwpx(
             repair_totals[key] += int(repair_stats.get(key) or 0)
 
         number = str(getattr(problem, "number", "") or "")
-        duplicate_key = (number, re.sub(r"\s+", "", stem)[:240])
+        duplicate_key = (page_number, number, re.sub(r"\s+", "", stem), tuple(choices))
         if duplicate_key in seen:
             duplicate_count += 1
             continue
@@ -10518,6 +10522,8 @@ def write_pdf_structured_hwpx(
         "duplicate_problem_count": 0,
         "deduplicated_problem_count": duplicate_count + variant_duplicate_problem_count,
         "variant_page_limit": variant_page_limit,
+        "variant_policy": variant_policy,
+        "original_source_pages": total_recognized_pages,
         "variant_overlap_ratio": round(variant_overlap_ratio, 4),
         "variant_duplicate_problem_count": variant_duplicate_problem_count,
         "unreliable_text_problems": unreliable_count,

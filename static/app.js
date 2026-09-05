@@ -1,3 +1,5 @@
+import { initSimpleHelp } from "./simple-help.js";
+
 const DEFAULT_EXPORT_TITLE = "새 시험지";
 const WORKSPACE_LAYOUT_KEY = "hwp-make:workspace-layout-v2";
 const PREVIEW_ZOOM_MIN = 0.5;
@@ -59,6 +61,9 @@ const state = {
   actualPreviewNaturalHeight: 0,
   simpleConversionBusy: false,
   simpleCancelRequested: false,
+  simpleFailure: "",
+  simpleNotices: [],
+  simpleLastArtifact: null,
 };
 
 const els = {
@@ -69,6 +74,7 @@ const els = {
   simpleMathAiOption: document.querySelector("#simpleMathAiOption"),
   simpleCancelButton: document.querySelector("#simpleCancelButton"),
   simpleQualityNote: document.querySelector("#simpleQualityNote"),
+  simpleResultActions: document.querySelector("#simpleResultActions"),
   simpleHistoryList: document.querySelector("#simpleHistoryList"),
   simpleFileInput: document.querySelector("#simpleFileInput"),
   simpleDropzone: document.querySelector("#simpleDropzone"),
@@ -275,7 +281,8 @@ function friendlyErrorMessage(error) {
   }
   try {
     const parsed = JSON.parse(raw);
-    return String(parsed?.detail || parsed?.message || raw);
+    const detail = parsed?.detail;
+    return String((typeof detail === "object" ? detail?.message : detail) || parsed?.message || raw);
   } catch {
     return raw;
   }
@@ -283,13 +290,20 @@ function friendlyErrorMessage(error) {
 
 async function responseError(response) {
   let message = response.statusText || `HTTP ${response.status}`;
+  let detail = null;
   try {
     const text = await response.text();
-    if (text) message = text;
+    if (text) {
+      message = text;
+      try { detail = JSON.parse(text)?.detail ?? null; } catch { /* Plain HTTP error. */ }
+    }
   } catch {
     // Keep the HTTP status text when the body cannot be read.
   }
-  return new Error(friendlyErrorMessage(message));
+  const error = new Error(friendlyErrorMessage(message));
+  error.status = response.status;
+  error.detail = detail;
+  return error;
 }
 
 async function api(path, options = {}) {
@@ -327,6 +341,7 @@ function setConversionStatus(message, tone = "idle") {
   if (els.conversionStatusText) els.conversionStatusText.textContent = message;
   if (els.conversionStatus) els.conversionStatus.dataset.tone = tone;
   if (state.simpleConversionBusy && tone !== "idle") {
+    if (tone === "error") state.simpleFailure = message;
     setSimpleConversionStatus(message, tone);
   }
 }
@@ -439,8 +454,8 @@ function syncExportOptions({ resetNativeMath = false } = {}) {
     if (!state.conversionBusy) els.exportButton.textContent = `${isHwpx ? "HWPX" : "DOCX"} 만들기`;
   }
   if (els.previewButton && !state.conversionBusy) {
-    els.previewButton.textContent = isHwpx ? "실제 미리보기" : "HWPX 기준 미리보기";
-    els.previewButton.setAttribute("aria-label", isHwpx ? "실제 HWPX 페이지 미리보기" : "DOCX 내보내기 전 HWPX 기준 레이아웃 미리보기");
+    els.previewButton.textContent = isHwpx ? "HWPX 렌더 보기" : "HWPX 기준 보기";
+    els.previewButton.setAttribute("aria-label", isHwpx ? "HWPX 렌더 미리보기" : "DOCX 내보내기 전 HWPX 기준 레이아웃 미리보기");
   }
   syncConversionReadyStatus();
 }
@@ -454,7 +469,7 @@ function syncTemplatePreview() {
   if (els.paperTemplateLabel) els.paperTemplateLabel.textContent = template.label || "문항 모음";
   if (els.paperColumnLabel) els.paperColumnLabel.textContent = `${columns}단`;
   if (els.paperLayoutHint) {
-    els.paperLayoutHint.textContent = `선택한 양식은 ${columns}단으로 출력되며, 실제 열 넘김은 문항 높이에 따라 결정됩니다.`;
+    els.paperLayoutHint.textContent = `구성 목록 · 출력은 ${columns}단 양식입니다. 이 목록의 위치는 출력 배치가 아닙니다.`;
   }
   renderBasket();
 }
@@ -715,10 +730,8 @@ function ensurePaperBaseWidth() {
   // 실제로 보일 때까지 측정을 미룬다.
   if (!els.paperStage || !els.paperStage.clientWidth) return;
   const mode = mobileWorkspaceActive() ? "mobile" : "desktop";
-  if (!state.paperBaseWidth || state.paperViewportMode !== mode) {
-    state.paperViewportMode = mode;
-    state.paperBaseWidth = Math.max(mode === "mobile" ? 400 : 320, els.paperStage.clientWidth - 32);
-  }
+  state.paperViewportMode = mode;
+  state.paperBaseWidth = Math.max(260, els.paperStage.clientWidth - 20);
 }
 
 function updatePaperCanvasSize({ preserveCenter = false } = {}) {
@@ -750,7 +763,7 @@ function updatePaperCanvasSize({ preserveCenter = false } = {}) {
     els.zoomLabel.textContent = `${percent}%`;
     els.zoomLabel.setAttribute("aria-label", `시험지 배율 ${percent}%, 눌러 100%로 초기화`);
   }
-  stage.setAttribute("aria-label", `시험지 작업 캔버스, 현재 배율 ${percent}%. Space를 누른 채 드래그하여 이동합니다.`);
+  stage.setAttribute("aria-label", `시험지 구성 목록, 현재 배율 ${percent}%. Space를 누른 채 드래그하여 이동합니다.`);
 }
 
 function setPreviewZoom(nextZoom, { announce = true, fit = false } = {}) {
@@ -765,10 +778,8 @@ function fitPreviewToStage({ announce = true } = {}) {
   if (!els.paperStage || !els.paperSheet || state.panelLayout.previewCollapsed) return;
   ensurePaperBaseWidth();
   els.paperSheet.style.setProperty("--paper-base-width", `${state.paperBaseWidth}px`);
-  const baseHeight = Math.max(520, els.paperSheet.offsetHeight);
-  const widthScale = (els.paperStage.clientWidth - 32) / state.paperBaseWidth;
-  const heightScale = (els.paperStage.clientHeight - 32) / baseHeight;
-  setPreviewZoom(Math.min(1, widthScale, heightScale), { announce, fit: true });
+  const widthScale = (els.paperStage.clientWidth - 20) / state.paperBaseWidth;
+  setPreviewZoom(Math.min(1, widthScale), { announce, fit: true });
   els.paperStage.scrollTo?.({ left: 0, top: 0, behavior: "auto" });
 }
 
@@ -838,6 +849,7 @@ function syncModalState() {
   const inactive = visibleModals().length > 0;
   els.appShell.inert = inactive;
   els.appShell.toggleAttribute("inert", inactive);
+  if (els.simpleConverter) els.simpleConverter.inert = inactive;
   document.documentElement.classList.toggle("modal-open", inactive);
 }
 
@@ -914,6 +926,15 @@ function commandOpenFile() {
 
 function handleGlobalKeydown(event) {
   if (event.isComposing || event.keyCode === 229 || event.getModifierState?.("AltGraph")) return;
+  if (document.body.classList.contains("simple-converter-mode") && !visibleModals().length) {
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "o") {
+      event.preventDefault();
+      if (!event.repeat && !state.simpleConversionBusy) els.simpleFileInput?.click();
+    } else if (event.key === "?" && !event.repeat && !editableTarget(event.target)) {
+      document.querySelector("#simpleHelpButton")?.click();
+    }
+    return;
+  }
   const modal = visibleModals().pop();
   if (modal) {
     if (event.key === "Escape") {
@@ -1689,6 +1710,10 @@ function createLayoutRiskBadge(placement) {
   return badge;
 }
 
+function basketHasUnavailableProblems() {
+  return state.basket.some((entry) => entry.availability || !resolveBasketProblem(entry));
+}
+
 function renderBasket() {
   persistBasket();
   const count = state.basket.length;
@@ -1699,16 +1724,35 @@ function renderBasket() {
   syncPaperPreviewMeta();
   if (els.basketClearButton) els.basketClearButton.disabled = !state.basket.length;
   if (els.orderEditorButton) els.orderEditorButton.disabled = !state.basket.length;
-  if (els.previewButton) els.previewButton.disabled = !count || state.conversionBusy;
-  if (els.exportButton) els.exportButton.disabled = !count || state.conversionBusy;
+  const unavailable = basketHasUnavailableProblems();
+  if (els.previewButton) els.previewButton.disabled = !count || state.conversionBusy || unavailable;
+  if (els.exportButton) els.exportButton.disabled = !count || state.conversionBusy || unavailable;
   syncConversionReadyStatus();
   els.basketList.innerHTML = "";
+  if (unavailable) {
+    const notice = document.createElement("div");
+    notice.className = "inline-error basket-recovery";
+    notice.setAttribute("role", "status");
+    const text = document.createElement("span");
+    text.textContent = "확인할 수 없는 문항이 있습니다. 다시 확인하거나 해당 문항을 제거한 뒤 만들어 주세요.";
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.textContent = "문항 다시 확인";
+    retry.addEventListener("click", async () => {
+      retry.disabled = true;
+      retry.textContent = "확인 중…";
+      await hydrateBasketProblems({ revalidate: true });
+      renderBasket();
+    });
+    notice.append(text, retry);
+    els.basketList.append(notice);
+  }
   const layoutPlan = computeLayoutPlan();
   renderLayoutPlanSummary(layoutPlan);
   if (!state.basket.length) {
     const empty = document.createElement("div");
     empty.className = "basket-empty";
-    empty.textContent = "가운데 목록에서 담기 버튼을 누르면 시험지에 들어갈 문제가 여기에 쌓입니다.";
+    empty.textContent = "왼쪽 문제 보관함에서 문항을 담으면 이곳에서 순서를 정할 수 있습니다.";
     els.basketList.append(empty);
     window.requestAnimationFrame(() => updatePaperCanvasSize());
     return;
@@ -1720,6 +1764,7 @@ function renderBasket() {
 
     const row = document.createElement("div");
     row.className = `basket-row ${index % 2 === 0 ? "left-slot" : "right-slot"}`;
+    row.classList.toggle("unavailable", Boolean(entry.availability || !problem));
     row.draggable = true;
     row.dataset.index = index;
     row.tabIndex = 0;
@@ -1744,7 +1789,11 @@ function renderBasket() {
 
     const position = document.createElement("span");
     position.className = "basket-position";
-    position.textContent = `${index + 1}번째 문항 · 실제 열 위치는 페이지 렌더에서 확정`;
+    position.textContent = entry.availability === "missing"
+      ? "삭제되었거나 찾을 수 없는 문항 · 목록에서 제거해 주세요"
+      : entry.availability || !problem
+        ? "문항을 불러오지 못했습니다 · 다시 확인해 주세요"
+        : `${index + 1}번째 문항 · 순서대로 출력됩니다`;
 
     body.append(label, snippet, position);
     const placement = layoutPlan?.placements?.[index];
@@ -1838,7 +1887,12 @@ function renderBasket() {
       if (!Number.isNaN(from) && from !== index) moveBasketItem(from, index);
     });
 
-    row.append(handle, body, up, down, remove);
+    up.disabled = index === 0;
+    down.disabled = index === state.basket.length - 1;
+    const actions = document.createElement("span");
+    actions.className = "basket-row-actions";
+    actions.append(up, down, remove);
+    row.append(handle, body, actions);
     els.basketList.append(row);
   });
   window.requestAnimationFrame(() => updatePaperCanvasSize());
@@ -2201,16 +2255,27 @@ async function flushActiveDraft({ quiet = false } = {}) {
   return true;
 }
 
-async function hydrateBasketProblems() {
-  const missingIds = [...new Set(state.basket.map((entry) => entry.id).filter((id) => !state.problemById.has(id)))];
+async function hydrateBasketProblems({ revalidate = true } = {}) {
+  const missingIds = [...new Set(state.basket.map((entry) => entry.id).filter((id) => revalidate || !state.problemById.has(id)))];
   if (!missingIds.length) return;
   for (let offset = 0; offset < missingIds.length; offset += 100) {
     const batch = missingIds.slice(offset, offset + 100);
     const settled = await Promise.allSettled(batch.map((id) => api(`/api/problems/${id}`)));
-    settled.forEach((result) => {
-      if (result.status !== "fulfilled") return;
+    settled.forEach((result, index) => {
+      const id = batch[index];
+      const entry = state.basket.find((item) => item.id === id);
+      if (!entry) return;
+      if (result.status !== "fulfilled") {
+        entry.availability = result.reason?.status === 404 ? "missing" : "retry";
+        return;
+      }
       const problem = result.value?.item || result.value;
-      if (problem?.id) state.problemById.set(problem.id, problem);
+      if (problem?.id === id) {
+        state.problemById.set(problem.id, problem);
+        delete entry.availability;
+      } else {
+        entry.availability = "retry";
+      }
     });
   }
 }
@@ -2421,6 +2486,7 @@ async function importFiles({
       existing.push(...(result.existing || []));
       notices.push(...(result.notices || []));
     }
+    if (state.simpleConversionBusy) state.simpleNotices = notices;
     await loadProblems({ render: false });
     const completed = await handleImportedProblems(created, {
       quick,
@@ -2441,6 +2507,7 @@ async function importFiles({
     return Boolean(completed);
   } catch (error) {
     const message = friendlyErrorMessage(error);
+    if (state.simpleConversionBusy) state.simpleFailure = `${message}${created.length ? ` · ${created.length}개 문항은 이미 가져왔습니다.` : ""}`;
     if (!created.length && message === "작업이 취소되었습니다.") {
       try {
         await loadProblems();
@@ -2508,6 +2575,7 @@ async function exportPdfLayoutFiles({ layoutMode = "coordinate", mathAi = null, 
         data_base64: await fileToBase64(file, { signal: controller.signal }),
         boxed_passages: true,
         layout_mode: layoutMode,
+        variant_policy: "all",
         native_math: true,
       };
       if (useMathAi) {
@@ -2519,6 +2587,7 @@ async function exportPdfLayoutFiles({ layoutMode = "coordinate", mathAi = null, 
         signal: controller.signal,
         body: JSON.stringify(payload),
       });
+      if (!result.export?.url) throw new Error("생성 파일의 다운로드 주소가 없습니다. 최근 변환을 새로고침해 확인해 주세요.");
       results.push(result);
       if (collect) collect.push(result);
       if (result.export?.url) {
@@ -2535,6 +2604,7 @@ async function exportPdfLayoutFiles({ layoutMode = "coordinate", mathAi = null, 
     return results.length === pdfFiles.length;
   } catch (error) {
     const message = friendlyErrorMessage(error);
+    if (state.simpleConversionBusy) state.simpleFailure = `${message}${results.length ? ` · ${results.length}개 파일은 이미 생성되었습니다.` : ""}`;
     if (!results.length && message === "작업이 취소되었습니다.") {
       try {
         await loadExportHistory();
@@ -2664,6 +2734,10 @@ async function deleteActive() {
 }
 
 async function exportSelected(idsOverride = null, overrides = null, { signal = null } = {}) {
+  if (!idsOverride && basketHasUnavailableProblems()) {
+    toast("확인하지 못한 문항이 있습니다. 시험지 목록에서 다시 확인해 주세요.");
+    return false;
+  }
   const ids = Array.isArray(idsOverride) ? idsOverride : state.basket.map((entry) => entry.id);
   if (!ids.length) {
     toast("먼저 시험지에 넣을 문제를 담으세요.");
@@ -2723,25 +2797,37 @@ async function exportSelected(idsOverride = null, overrides = null, { signal = n
     document.body.append(link);
     link.click();
     link.remove();
-    URL.revokeObjectURL(url);
+    if (!state.simpleConversionBusy) URL.revokeObjectURL(url);
     await loadExportHistory();
+    if (state.simpleConversionBusy) {
+      state.simpleDownloadUrl = url;
+      state.simpleLastArtifact = state.exports.find((item) => item.name === filename || item.display_name === filename)
+        || { name: filename, url, format: exportFormat, size: blob.size };
+    }
     setConversionStatus(`${format} 변환 완료 · ${filename} 다운로드를 시작했습니다.`, "success");
     toast(`${ids.length}개 문항을 내보냈습니다.`);
     return true;
   } catch (error) {
     const message = friendlyErrorMessage(error);
     setConversionStatus(`${format} 변환 실패 · ${message}`, "error");
+    if (error.detail?.code === "missing_problems") {
+      await hydrateBasketProblems({ revalidate: true });
+      renderBasket();
+      setConversionStatus(`${format} 변환 실패 · ${message}`, "error");
+    }
     toast(`내보내기 실패: ${message}`);
     return false;
   } finally {
     state.conversionBusy = false;
     setButtonBusy(els.exportButton, false);
-    els.previewButton.disabled = !state.basket.length;
-    els.exportButton.disabled = !state.basket.length;
+    els.previewButton.disabled = !state.basket.length || basketHasUnavailableProblems();
+    els.exportButton.disabled = !state.basket.length || basketHasUnavailableProblems();
   }
 }
 
 function renderActualPreviewThumbs() {
+  const widthFit = document.getElementById("actualPreviewWidthFit");
+  if (widthFit) widthFit.onclick = fitActualPreviewWidth;
   els.previewThumbs.replaceChildren();
   state.actualPreviewPages.forEach((src, index) => {
     const button = document.createElement("button");
@@ -2814,6 +2900,12 @@ function fitActualPreview() {
   setActualPreviewZoom(zoom, { fit: true, center: true });
 }
 
+function fitActualPreviewWidth() {
+  if (!(state.actualPreviewNaturalWidth > 0)) return;
+  const widthScale = (els.actualPreviewStage.clientWidth - 44) / state.actualPreviewNaturalWidth;
+  setActualPreviewZoom(widthScale, { fit: false, center: true });
+}
+
 function setActualPreviewPage(index, { focusStage = false } = {}) {
   const count = state.actualPreviewPages.length;
   if (!count) return;
@@ -2825,11 +2917,11 @@ function setActualPreviewPage(index, { focusStage = false } = {}) {
   updateActualPreviewControls();
   els.actualPreviewViewport.style.width = "1px";
   els.actualPreviewViewport.style.height = "1px";
-  els.actualPreviewImage.alt = `실제 출력 미리보기 ${state.actualPreviewPageIndex + 1}쪽`;
+  els.actualPreviewImage.alt = `HWPX 렌더 미리보기 ${state.actualPreviewPageIndex + 1}쪽`;
   els.actualPreviewImage.onload = () => {
     state.actualPreviewNaturalWidth = els.actualPreviewImage.naturalWidth;
     state.actualPreviewNaturalHeight = els.actualPreviewImage.naturalHeight;
-    window.requestAnimationFrame(() => fitActualPreview());
+    window.requestAnimationFrame(() => fitActualPreviewWidth());
   };
   els.actualPreviewImage.src = state.actualPreviewPages[state.actualPreviewPageIndex];
   if (els.actualPreviewImage.complete && els.actualPreviewImage.naturalWidth) els.actualPreviewImage.onload();
@@ -2850,6 +2942,12 @@ function resetActualPreview() {
 }
 
 async function previewExport() {
+  if (state.conversionBusy) return;
+  if (basketHasUnavailableProblems()) {
+    renderBasket();
+    toast("확인할 수 없는 문항을 다시 확인하거나 제거해 주세요.");
+    return;
+  }
   const ids = state.basket.map((entry) => entry.id);
   if (!ids.length) {
     toast("먼저 시험지에 넣을 문제를 담으세요.");
@@ -2862,7 +2960,7 @@ async function previewExport() {
   setWorkflowStep(3);
   if (mobileWorkspaceActive()) setMobilePane("preview", { focus: true });
   const selectedFormat = String(els.exportFormat.value || "hwpx").toLowerCase();
-  const previewBasis = selectedFormat === "docx" ? "DOCX 내보내기 전 HWPX 기준 레이아웃" : "실제 HWPX 출력";
+  const previewBasis = selectedFormat === "docx" ? "DOCX 내보내기 전 HWPX 기준 레이아웃" : "HWPX 렌더";
   state.conversionBusy = true;
   setButtonBusy(els.previewButton, true, "페이지 생성 중...");
   setConversionStatus(`${previewBasis} 페이지를 생성하고 있습니다.`, "working");
@@ -2882,9 +2980,10 @@ async function previewExport() {
     });
     resetActualPreview();
     state.actualPreviewPages = asArray(result.pages).filter(Boolean);
+    if (!state.actualPreviewPages.length) throw new Error("표시할 페이지가 없습니다. 문항을 확인한 뒤 다시 시도해 주세요.");
     const notes = [];
     if (selectedFormat === "docx") notes.push("DOCX와 글꼴·줄바꿈이 달라질 수 있는 HWPX 기준 레이아웃");
-    if (result.truncated) notes.push(`전체 ${result.page_count}쪽 중 ${state.actualPreviewPages.length}쪽만 표시`);
+    if (result.truncated) notes.push(`렌더 기준 ${result.page_count}쪽 중 앞 ${state.actualPreviewPages.length}쪽만 표시`);
     if (result.note) notes.push(result.note);
     if (!notes.length) notes.push(`렌더된 ${state.actualPreviewPages.length}쪽`);
     els.previewNote.textContent = notes.join(" · ");
@@ -2893,13 +2992,17 @@ async function previewExport() {
     setActualPreviewPage(0);
   } catch (error) {
     const message = friendlyErrorMessage(error);
-    setConversionStatus(`실제 미리보기 실패 · ${message}`, "error");
+    if (error.status === 409) {
+      await hydrateBasketProblems({ revalidate: true });
+      renderBasket();
+    }
+    setConversionStatus(`HWPX 렌더 실패 · ${message}`, "error");
     toast(`미리보기 실패: ${message}`);
   } finally {
     state.conversionBusy = false;
     setButtonBusy(els.previewButton, false);
-    els.previewButton.disabled = !state.basket.length;
-    els.exportButton.disabled = !state.basket.length;
+    els.previewButton.disabled = !state.basket.length || basketHasUnavailableProblems();
+    els.exportButton.disabled = !state.basket.length || basketHasUnavailableProblems();
   }
 }
 
@@ -3250,9 +3353,12 @@ function simpleFileExtension(file) {
 }
 
 function setSimpleFile(file, { syncInput = false } = {}) {
+  if (state.simpleConversionBusy) return;
+  clearSimpleResult();
   // 스튜디오의 파일 선택(els.fileInput)은 여기서 건드리지 않는다.
   // 변환 실행 시점(runSimpleConversion)에만 잠시 대입하고 끝나면 복원한다.
   if (syncInput) assignSingleFile(els.simpleFileInput, file);
+  els.simpleMathAiOption?.classList.toggle("hidden", !isPdfFile(file));
 
   if (!file) {
     els.simpleSelectedFile?.classList.add("hidden");
@@ -3289,20 +3395,103 @@ function setSimpleQualityNote(message) {
 }
 
 function showSimpleQuality(results) {
-  const scored = (results || [])
-    .map((result) => ({
-      score: Number(result?.quality?.objective_score),
-      target: Number(result?.quality?.objective_score_target),
-    }))
-    .filter((entry) => Number.isFinite(entry.score));
-  if (!scored.length) {
-    setSimpleQualityNote("");
-    return;
+  const notes = [...state.simpleNotices];
+  for (const result of results || []) notes.push(...simpleQualityMessages(result));
+  setSimpleQualityNote([...new Set(notes)].join(" · "));
+}
+
+function simpleQualityMessages(result) {
+  const quality = result?.quality || {};
+  const messages = [];
+  const score = quality.objective_score;
+  const target = quality.objective_score_target;
+  if (score != null && Number.isFinite(Number(score))) {
+    messages.push(`자동 점검 ${Number(score).toFixed(1)}점${target != null ? ` / 목표 ${target}점` : ""}`);
+    if (target != null && Number(score) < Number(target)) messages.push("목표 미달 · 결과 검수가 필요합니다");
   }
-  const worst = Math.min(...scored.map((entry) => entry.score));
-  const target = scored.find((entry) => Number.isFinite(entry.target))?.target;
-  const targetText = Number.isFinite(target) ? ` · 목표 ${target}점` : "";
-  setSimpleQualityNote(`변환 품질 ${worst.toFixed(1)}점${targetText} · 세부 검수와 편집은 스튜디오에서 할 수 있습니다.`);
+  if (result?.fidelity?.available === false || quality.visual_sync_ratio == null) messages.push("시각 일치 미검증");
+  if (quality.full_page_raster_fallback || Number(quality.full_page_images) > 0) messages.push("일부 페이지는 이미지로 보존되어 글자 편집이 제한됩니다");
+  if (quality.meets_editable_text_target === false) messages.push("편집 가능한 텍스트 비율 확인 필요");
+  if (quality.limited_by_max_pages) messages.push("일부 페이지만 변환되었습니다");
+  if (result?.scope?.includes_entire_source === false) messages.push(`원본 ${result.scope.original_page_count}쪽 중 ${result.scope.selected_page_count}쪽을 변환했습니다`);
+  if (quality.visual_sync_requires_human_review || quality.visual_review_flags?.length) messages.push("원본과 결과의 수식·줄바꿈을 확인해 주세요");
+  return messages;
+}
+
+function clearSimpleResult() {
+  if (state.simpleDownloadUrl) URL.revokeObjectURL(state.simpleDownloadUrl);
+  state.simpleDownloadUrl = null;
+  state.simpleLastArtifact = null;
+  state.simpleFailure = "";
+  state.simpleNotices = [];
+  setSimpleQualityNote("");
+  els.simpleResultActions?.replaceChildren();
+  els.simpleResultActions?.classList.add("hidden");
+}
+
+function simpleArtifactLink(label, item, { download = false } = {}) {
+  if (!item?.url) return null;
+  const link = document.createElement("a");
+  link.textContent = label;
+  link.href = item.url;
+  if (download) link.download = item.display_name || item.name || "";
+  else { link.target = "_blank"; link.rel = "noopener"; }
+  return link;
+}
+
+function appendSimpleArtifactActions(container, artifact, metadata = {}) {
+  const links = [
+    simpleArtifactLink("다시 받기", artifact, { download: true }),
+    simpleArtifactLink("원본 PDF", metadata.source?.copy || metadata.source),
+  ].filter(Boolean);
+  container.append(...links);
+  appendSimpleReview(container, metadata);
+}
+
+function appendSimpleReview(container, metadata = {}) {
+  if (!metadata.quality && !metadata.scope && !metadata.run?.report && !metadata.report) return;
+  const details = document.createElement("details");
+  details.className = "simple-review-details";
+  const summary = document.createElement("summary");
+  summary.textContent = "검수 내용";
+  const list = document.createElement("dl");
+  const quality = metadata.quality || {};
+  const scope = metadata.scope || {};
+  const count = value => value != null && Number.isFinite(Number(value)) ? Number(value) : null;
+  const problemCount = count(metadata.summary?.output_problem_count ?? metadata.stats?.output_problem_count ?? quality.score_components?.balance?.output_problem_count);
+  const originalPages = count(scope.original_page_count);
+  const selectedPages = count(scope.selected_page_count);
+  const outputPages = count(metadata.summary?.output_page_count ?? metadata.fidelity?.hwpx_page_count);
+  const coverage = count(quality.editable_text_coverage_ratio);
+  const rows = [
+    ["인식 문항", problemCount == null ? "문항 수 미측정" : `${problemCount}개`],
+    ["원본 범위", originalPages == null ? "쪽수 미측정" : `${originalPages}쪽${selectedPages != null ? ` 중 ${selectedPages}쪽 변환` : ""}`],
+    ["출력 쪽수", outputPages == null ? "한글에서 확인 필요" : `${outputPages}쪽`],
+    ["편집 가능한 텍스트", coverage == null ? "미측정" : `${(coverage * 100).toFixed(1)}%`],
+    ["검수 상태", simpleQualityMessages(metadata).join(" · ") || "한글에서 원본과 비교해 주세요"],
+  ];
+  for (const [label, value] of rows) {
+    const term = document.createElement("dt"); term.textContent = label;
+    const description = document.createElement("dd"); description.textContent = value;
+    list.append(term, description);
+  }
+  details.append(summary, list);
+  const report = simpleArtifactLink("상세 기록(JSON)", metadata.run?.report || metadata.report);
+  if (report) details.append(report);
+  container.append(details);
+}
+
+function showSimpleResult(results) {
+  if (!els.simpleResultActions) return;
+  els.simpleResultActions.replaceChildren();
+  const result = results?.[results.length - 1];
+  const artifact = result?.export || state.simpleLastArtifact;
+  if (!artifact) return;
+  appendSimpleArtifactActions(els.simpleResultActions, artifact, result || artifact.conversion || {});
+  const note = document.createElement("small");
+  note.textContent = "내려받은 HWPX는 한글에서 열어 검수·편집할 수 있습니다.";
+  els.simpleResultActions.append(note);
+  els.simpleResultActions.classList.remove("hidden");
 }
 
 function renderSimpleHistory() {
@@ -3314,8 +3503,20 @@ function renderSimpleHistory() {
     empty.textContent = text;
     els.simpleHistoryList.append(empty);
   };
+  const appendRefresh = () => {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "retry-inline";
+    retry.textContent = "다시 불러오기";
+    retry.addEventListener("click", async () => {
+      retry.disabled = true;
+      await loadExportHistory();
+    });
+    els.simpleHistoryList.append(retry);
+  };
   if (state.exportsError) {
-    appendEmpty("기록을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.");
+    appendEmpty(`기록을 불러오지 못했습니다. ${state.exportsError}`);
+    appendRefresh();
     return;
   }
   // 간단 화면은 변환 산출물만 보여준다. run 폴더의 원본 PDF 사본 등은 제외.
@@ -3324,9 +3525,12 @@ function renderSimpleHistory() {
     .slice(0, 5);
   if (!items.length) {
     appendEmpty("아직 변환한 파일이 없습니다.");
+    appendRefresh();
     return;
   }
   for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "simple-history-item";
     const link = document.createElement("a");
     link.className = "simple-history-row";
     link.href = item.url;
@@ -3339,13 +3543,21 @@ function renderSimpleHistory() {
     meta.className = "simple-history-meta";
     meta.textContent = `${(item.format || "").toUpperCase()} · ${humanSize(item.size)} · ${formatExportTime(item.modified)}`;
     link.append(name, meta);
-    els.simpleHistoryList.append(link);
+    row.append(link);
+    const actions = document.createElement("div");
+    actions.className = "simple-history-actions";
+    appendSimpleArtifactActions(actions, item, item.conversion || {});
+    row.append(actions);
+    els.simpleHistoryList.append(row);
   }
+  appendRefresh();
 }
 
 const UI_MODE_STORAGE_KEY = "hwpMakeUiMode";
 
 function applyUiMode(mode, { focus = false } = {}) {
+  if (state.simpleConversionBusy) return;
+  for (const modal of visibleModals()) closeModal(modal);
   const simple = mode !== "studio";
   document.body.classList.toggle("simple-converter-mode", simple);
   try {
@@ -3385,6 +3597,7 @@ async function runSimpleConversion() {
     return;
   }
   if (!EXT_KINDS[simpleFileExtension(file)] || !validateUploadSizes([file])) return;
+  clearSimpleResult();
 
   // 스튜디오에서 골라 둔 파일 선택을 잠시 대체했다가 변환이 끝나면 복원한다.
   const studioFiles = Array.from(els.fileInput?.files || []);
@@ -3395,6 +3608,8 @@ async function runSimpleConversion() {
   setButtonBusy(els.simpleConvertButton, true, "변환 중...");
   els.simpleConvertButton.disabled = true;
   els.simpleFileRemove.disabled = true;
+  els.simpleFileInput.disabled = true;
+  if (els.simpleStudioButton) els.simpleStudioButton.disabled = true;
   els.simpleDropzone.setAttribute("aria-disabled", "true");
   els.simpleCancelButton?.classList.remove("hidden");
   if (els.simpleCancelButton) els.simpleCancelButton.disabled = false;
@@ -3424,16 +3639,19 @@ async function runSimpleConversion() {
           },
         });
     if (state.simpleCancelRequested && !completed) {
-      setSimpleConversionStatus("변환을 취소했습니다.", "idle");
+      setSimpleConversionStatus("대기를 중단했습니다. 서버에서 생성이 계속될 수 있으니 최근 변환을 다시 불러와 확인해 주세요.", "idle");
     } else {
       setSimpleConversionStatus(
         completed
-          ? "변환이 완료되었습니다. 다운로드를 확인해 주세요."
-          : "변환을 완료하지 못했습니다. 파일을 확인한 뒤 다시 시도해 주세요.",
+          ? `${file.name} 생성 완료 · 다운로드를 시작했습니다.`
+          : state.simpleFailure || "문항을 인식하지 못했거나 파일 생성이 완료되지 않았습니다. 파일 내용을 확인한 뒤 다시 시도해 주세요.",
         completed ? "success" : "error",
       );
     }
-    if (completed) showSimpleQuality(pdfResults);
+    if (completed) {
+      showSimpleQuality(pdfResults);
+      showSimpleResult(pdfResults);
+    }
   } catch (error) {
     setSimpleConversionStatus(`변환 실패 · ${friendlyErrorMessage(error)}`, "error");
   } finally {
@@ -3442,6 +3660,8 @@ async function runSimpleConversion() {
     setButtonBusy(els.simpleConvertButton, false);
     els.simpleConvertButton.disabled = false;
     els.simpleFileRemove.disabled = false;
+    els.simpleFileInput.disabled = false;
+    if (els.simpleStudioButton) els.simpleStudioButton.disabled = false;
     els.simpleDropzone.removeAttribute("aria-disabled");
     if (els.fileInput) {
       const restore = new DataTransfer();
@@ -3629,6 +3849,9 @@ els.simpleDropzone?.addEventListener("keydown", (event) => {
     if (!state.simpleConversionBusy) els.simpleFileInput.click();
   }
 });
+els.simpleDropzone?.addEventListener("click", (event) => {
+  if (state.simpleConversionBusy) event.preventDefault();
+});
 els.simpleDropzone?.addEventListener("dragover", (event) => {
   event.preventDefault();
   if (!state.simpleConversionBusy) els.simpleDropzone.classList.add("drag-over");
@@ -3641,7 +3864,7 @@ els.simpleDropzone?.addEventListener("drop", (event) => {
   const files = Array.from(event.dataTransfer?.files || []);
   if (!files.length) return;
   setSimpleFile(files[0], { syncInput: true });
-  if (files.length > 1) setSimpleConversionStatus("한 번에 한 파일만 변환합니다. 첫 번째 파일을 선택했습니다.", "ready");
+  if (files.length > 1 && !els.simpleConvertButton.disabled) setSimpleConversionStatus("한 번에 한 파일만 변환합니다. 첫 번째 파일을 선택했습니다.", "ready");
 });
 els.simpleFileRemove?.addEventListener("click", () => setSimpleFile(null, { syncInput: true }));
 els.simpleConvertButton?.addEventListener("click", runSimpleConversion);
@@ -3649,7 +3872,7 @@ els.simpleCancelButton?.addEventListener("click", () => {
   if (!state.simpleConversionBusy) return;
   state.simpleCancelRequested = true;
   els.simpleCancelButton.disabled = true;
-  setSimpleConversionStatus("변환을 취소하는 중입니다...", "working");
+  setSimpleConversionStatus("대기를 중단하는 중입니다...", "working");
   state.importController?.abort();
 });
 els.simpleStudioButton?.addEventListener("click", () => applyUiMode("studio", { focus: true }));
@@ -3797,7 +4020,7 @@ window.addEventListener("blur", () => {
   els.paperStage?.classList.remove("pan-ready", "panning");
 });
 window.addEventListener("beforeunload", (event) => {
-  if (!state.draftDirty && !state.savingDraft) return;
+  if (!state.draftDirty && !state.savingDraft && !state.simpleConversionBusy && !state.importController && !state.conversionBusy) return;
   event.preventDefault();
   event.returnValue = "";
 });
@@ -3867,6 +4090,8 @@ els.basketList.addEventListener("drop", async (event) => {
 });
 
 (async function init() {
+  initSimpleHelp({ openSettings: openAISettings });
+  els.simpleMathAiOption?.classList.toggle("hidden", !isPdfFile(els.simpleFileInput?.files?.[0]));
   state.basket = restoreBasket();
   restoreWorkspaceLayout();
   setMobilePane(state.mobilePane);

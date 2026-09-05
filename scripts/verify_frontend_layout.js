@@ -61,7 +61,7 @@ assert(oneColumn.placements.every((item) => item.start.column === 1), "single-co
 // 로드되고, app.js 의 renderBasket() 흐름이 planLayout 을 호출해 "예상 배치·경계 경고"
 // (요약 줄 · 문항 배지 · 분할 경고 목록)를 실제로 렌더링하는지 고정한다.
 const indexHtml = fs.readFileSync(path.join(root, "static", "index.html"), "utf8");
-const appJs = fs.readFileSync(path.join(root, "static", "app.js"), "utf8");
+const appJs = fs.readFileSync(path.join(root, "static", "app.js"), "utf8").replace(/\r\n/g, "\n");
 
 assert(
   /<script src="\/static\/layout-planner\.js\?v=\d+"><\/script>/.test(indexHtml),
@@ -99,7 +99,7 @@ assert(
 // syncTemplatePreview() (export template change) funnel through it.
 const renderBasketStart = appJs.indexOf("function renderBasket(");
 assert(renderBasketStart >= 0, "renderBasket() not found in app.js");
-const renderBasketBody = appJs.slice(renderBasketStart, renderBasketStart + 1000);
+const renderBasketBody = appJs.slice(renderBasketStart, appJs.indexOf("\n}\n", renderBasketStart) + 3);
 assert(renderBasketBody.includes("computeLayoutPlan()"), "renderBasket() does not compute the layout plan");
 assert(
   renderBasketBody.includes("renderLayoutPlanSummary(layoutPlan)"),

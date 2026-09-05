@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>HWPX 변환 · HWP Make</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232f56c7'/%3E%3Cpath d='M4 5h8M4 8h8M4 11h5' stroke='white' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="/static/styles.css?v=29" />
+    <link rel="stylesheet" href="/static/styles.css?v=30" />
   </head>
   <body class="simple-converter-mode">
     <script>
@@ -27,9 +27,10 @@
           <span class="simple-brand-mark" aria-hidden="true">H</span>
           <span>HWP MAKE</span>
         </a>
-        <button id="simpleStudioButton" class="simple-studio-button" type="button">
-          스튜디오에서 자세히 편집
-        </button>
+        <div class="simple-header-actions">
+          <button id="simpleHelpButton" class="simple-help-button" type="button" data-ai-help aria-controls="aiHelpPopover" aria-expanded="false" aria-haspopup="dialog">도움말</button>
+          <button id="simpleStudioButton" class="simple-studio-button" type="button">스튜디오 열기</button>
+        </div>
       </header>
 
       <section class="simple-converter-card">
@@ -43,7 +44,7 @@
             <svg viewBox="0 0 24 24"><path d="M12 16V5m0 0L7.5 9.5M12 5l4.5 4.5M5 15.5v2.25A2.25 2.25 0 0 0 7.25 20h9.5A2.25 2.25 0 0 0 19 17.75V15.5" /></svg>
           </span>
           <strong>파일을 클릭하거나 여기로 드래그하세요</strong>
-          <span>PDF, HWP, HWPX, DOCX, 이미지, TXT</span>
+          <span>PDF, HWP, HWPX, DOCX, 이미지, TXT · 최대 64MB</span>
         </label>
         <input
           id="simpleFileInput"
@@ -86,6 +87,7 @@
         </div>
 
         <p id="simpleQualityNote" class="simple-quality hidden" aria-live="polite"></p>
+        <div id="simpleResultActions" class="simple-result-actions hidden" aria-label="변환 결과 확인"></div>
 
         <section class="simple-history" aria-labelledby="simpleHistoryTitle">
           <h2 id="simpleHistoryTitle">최근 변환</h2>
@@ -95,7 +97,7 @@
         </section>
       </section>
 
-      <footer class="simple-footer">파일당 최대 64MB · 변환이 완료되면 자동으로 다운로드됩니다.</footer>
+      <footer class="simple-footer">변환 후 다운로드가 시작됩니다. 최근 변환에서 다시 받을 수 있습니다.</footer>
     </main>
 
     <a class="skip-link" href="#workspace">핵심 작업으로 건너뛰기</a>
@@ -186,10 +188,12 @@
               </label>
               <input id="fileInput" class="visually-hidden" type="file" multiple tabindex="-1" />
               <div class="import-actions">
-                <button id="importButton" type="button">가져와서 편집</button>
-                <button id="quickImportButton" class="primary" type="button">바로 만들기</button>
+                <button id="importButton" type="button" aria-describedby="studioImportHelp">가져와서 편집</button>
+                <button id="quickImportButton" class="primary" type="button" aria-describedby="studioImportHelp">문항으로 바로 만들기</button>
               </div>
-              <button id="layoutExportButton" class="secondary-full" type="button">PDF 원본 좌표로 HWPX 복원</button>
+              <p id="studioImportHelp" class="import-route-help">편집은 보관함에 추가합니다. 바로 만들기는 가져온 문항으로 새 시험지를 만듭니다.</p>
+              <button id="layoutExportButton" class="secondary-full" type="button" aria-describedby="studioLayoutHelp">PDF 배치 유지해 HWPX 만들기</button>
+              <p id="studioLayoutHelp" class="import-route-help">PDF의 원래 배치를 유지합니다. 문항을 골라 재구성하려면 위의 편집을 이용하세요.</p>
               <div id="importProgress" class="operation-progress hidden" role="status" aria-live="polite" aria-atomic="true">
                 <span id="importProgressText"></span>
                 <button id="cancelImportButton" class="danger ghost" type="button">취소</button>
@@ -197,6 +201,7 @@
               <label class="check-label layout-ai-option" title="PDF의 수식 이미지를 Gemini로 인식해 한컴 수식 입력을 보강합니다.">
                 <input id="layoutMathAi" type="checkbox" /> Gemini 수식 인식 사용
               </label>
+              <button id="studioHelpButton" class="ghost mini-button" type="button" data-ai-help aria-controls="aiHelpPopover" aria-expanded="false" aria-haspopup="dialog">AI 도움말</button>
             </div>
 
             <div id="textModePanel" class="input-mode-panel hidden" data-input-panel="text" role="tabpanel" aria-labelledby="textModeTab">
@@ -209,13 +214,15 @@
               </div>
               <label class="field-label" for="manualStem">문제 본문</label>
               <textarea id="manualStem" rows="9" placeholder="문제 본문, 선지, 정답·해설을 붙여넣기"></textarea>
-              <div class="import-actions"><button id="manualButton" type="button">가져와서 편집</button><button id="quickManualButton" class="primary" type="button">바로 만들기</button></div>
+              <div class="import-actions"><button id="manualButton" type="button">가져와서 편집</button><button id="quickManualButton" class="primary" type="button">문항으로 바로 만들기</button></div>
+              <p class="import-route-help">편집은 보관함에 추가합니다. 바로 만들기는 입력한 문항으로 새 시험지를 만듭니다.</p>
             </div>
 
             <div id="urlModePanel" class="input-mode-panel hidden" data-input-panel="url" role="tabpanel" aria-labelledby="urlModeTab">
               <label class="field-label" for="collectUrl">자료 페이지 주소</label>
               <input id="collectUrl" type="url" placeholder="https://example.com/problems" />
-              <div class="import-actions"><button id="collectButton" type="button">가져와서 편집</button><button id="quickCollectButton" class="primary" type="button">바로 만들기</button></div>
+              <div class="import-actions"><button id="collectButton" type="button">가져와서 편집</button><button id="quickCollectButton" class="primary" type="button">문항으로 바로 만들기</button></div>
+              <p class="import-route-help">편집은 보관함에 추가합니다. 바로 만들기는 수집한 문항으로 새 시험지를 만듭니다.</p>
             </div>
 
             <details class="history-details">
@@ -325,9 +332,9 @@
           <span class="divider-grip" aria-hidden="true"></span>
         </div>
 
-        <section id="previewWorkPane" class="work-pane preview-pane" aria-label="시험지 미리보기와 내보내기">
+        <section id="previewWorkPane" class="work-pane preview-pane" aria-label="시험지 구성 목록과 내보내기">
           <div class="pane-titlebar">
-            <div><span class="section-index">03</span><h2>시험지 미리보기</h2><span id="layoutPlanSummary" class="pane-context" title="내보내기 전 추정치"></span></div>
+            <div><span class="section-index">03</span><h2>시험지 구성</h2><span id="layoutPlanSummary" class="pane-context" title="내보내기 전 추정치"></span></div>
             <div class="preview-title-actions">
               <div class="zoom-toolbar" role="toolbar" aria-label="시험지 확대와 이동">
                 <button id="zoomOutButton" type="button" title="축소 (-)" aria-label="시험지 축소" aria-keyshortcuts="-">
@@ -377,8 +384,8 @@
               <span class="conversion-status-dot" aria-hidden="true"></span>
               <span id="conversionStatusText">시험지에 문항을 담으면 변환할 수 있습니다.</span>
             </div>
-            <div class="export-actions"><button id="previewButton" type="button" aria-describedby="conversionStatus">실제 미리보기</button><button id="exportButton" class="primary" type="button" aria-describedby="conversionStatus">HWPX 만들기</button></div>
-            <div class="preview-note visually-hidden">화면은 문항 순서와 양식을 빠르게 확인하는 작업 미리보기입니다. 실제 페이지 버튼에서 최종 HWPX 렌더를 확인하세요.</div>
+            <div class="export-actions"><button id="previewButton" type="button" aria-describedby="conversionStatus">HWPX 렌더 보기</button><button id="exportButton" class="primary" type="button" aria-describedby="conversionStatus">HWPX 만들기</button></div>
+            <div class="preview-note">위 목록은 문항 순서입니다. 페이지 모양은 HWPX 렌더 보기에서 확인하세요.</div>
           </footer>
         </section>
       </section>
@@ -386,7 +393,7 @@
 
     <div id="previewModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="previewModalTitle">
       <div class="preview-dialog">
-        <div class="modal-head"><div><h2 id="previewModalTitle">실제 페이지 미리보기</h2><span id="previewNote" class="hint"></span></div><button id="previewClose" type="button">닫기</button></div>
+        <div class="modal-head"><div><h2 id="previewModalTitle">HWPX 렌더 미리보기</h2><span id="previewNote" class="hint"></span></div><button id="previewClose" type="button">닫기</button></div>
         <div class="actual-preview-toolbar" role="toolbar" aria-label="실제 페이지 미리보기 도구">
           <div class="actual-preview-pages-control">
             <button id="actualPreviewPrev" type="button" aria-label="이전 페이지">‹</button>
@@ -398,11 +405,12 @@
             <button id="actualPreviewZoomLabel" type="button" aria-label="실제 페이지 100%로 초기화">100%</button>
             <button id="actualPreviewZoomIn" type="button" aria-label="실제 페이지 확대">＋</button>
             <button id="actualPreviewFit" type="button">화면 맞춤</button>
+            <button id="actualPreviewWidthFit" type="button">너비 맞춤</button>
           </div>
         </div>
         <div class="actual-preview-layout">
           <nav id="previewThumbs" class="preview-thumbs" aria-label="미리보기 페이지 목록"></nav>
-          <div id="actualPreviewStage" class="actual-preview-stage" tabindex="0" aria-label="실제 출력 페이지">
+          <div id="actualPreviewStage" class="actual-preview-stage" tabindex="0" aria-label="HWPX 렌더 페이지">
             <div id="actualPreviewViewport" class="actual-preview-viewport">
               <img id="actualPreviewImage" alt="" />
             </div>
@@ -469,8 +477,13 @@
       </div>
     </div>
 
+    <div id="aiHelpPopover" class="ai-help-popover" role="dialog" aria-labelledby="aiHelpTitle" aria-describedby="aiHelpDescription" hidden>
+      <div class="ai-help-heading"><strong id="aiHelpTitle">AI는 필요할 때만</strong><button id="aiHelpClose" type="button" aria-label="도움말 닫기">닫기</button></div>
+      <p id="aiHelpDescription">AI 없이도 변환할 수 있어요. PDF 수식 인식이 필요할 때만 Gemini 키를 연결하세요.</p>
+      <button id="aiHelpSettings" class="ai-help-settings" type="button">AI 연결 설정</button>
+    </div>
     <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
     <script src="/static/layout-planner.js?v=1"></script>
-    <script src="/static/app.js?v=32" type="module"></script>
+    <script src="/static/app.js?v=33" type="module"></script>
   </body>
 </html>

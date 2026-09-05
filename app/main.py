@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import threading
+import tempfile
 import zipfile
 from contextlib import contextmanager
 from datetime import datetime
@@ -117,6 +118,7 @@ class PdfLayoutExportPayload(BaseModel):
     native_math: bool = True
     math_ai_recognition: bool | None = None
     math_ai_model: str | None = None
+    variant_policy: Literal["all", "first"] = "all"
 
 
 class TextInputPayload(BaseModel):
@@ -169,7 +171,7 @@ def _validated_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
 @contextmanager
 def _conversion_slot():
     if not _CONVERSION_SLOTS.acquire(blocking=False):
-        raise HTTPException(status_code=429, detail="변환 작업이 많습니다. 잠시 후 다시 시도하세요.")
+        raise HTTPException(status_code=429, detail="변환 작업이 많습니다. 잠시 후 다시 시도하세요.", headers={"Retry-After": "2"})
     try:
         yield
     finally:
@@ -202,6 +204,22 @@ def _get_template_or_400(template_key: str) -> exam_templates.ExamTemplate:
     if template_key not in exam_templates.TEMPLATE_MAP:
         raise HTTPException(status_code=400, detail="Unknown export template")
     return exam_templates.get_template(template_key)
+
+
+def _selected_problems_or_409(ids: list[int]) -> list[dict[str, Any]]:
+    problems = storage.get_problems_by_ids(ids)
+    found = {problem["id"] for problem in problems}
+    missing = list(dict.fromkeys(problem_id for problem_id in ids if problem_id not in found))
+    if missing:
+        raise HTTPException(status_code=409, detail={
+            "code": "missing_problems",
+            "message": "선택한 문항 중 삭제되었거나 찾을 수 없는 문항이 있습니다. 목록을 새로고침한 뒤 다시 선택해 주세요.",
+            "missing_ids": missing,
+        })
+    if len(set(ids)) != len(ids):
+        raise HTTPException(status_code=400, detail="같은 문항을 중복으로 선택할 수 없습니다.")
+    return problems
+
 
 
 def _effective_native_math(payload: ExportPayload, template: exam_templates.ExamTemplate) -> bool:
@@ -768,6 +786,7 @@ def attach_image(problem_id: int, payload: AttachImagePayload) -> dict[str, Any]
         data = _decode_upload(payload.data_base64)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     rel_path = importers._save_image_bytes(payload.filename, data)
     if rel_path is None:
         raise HTTPException(status_code=400, detail="이미지 파일이 아닙니다.")
@@ -803,8 +822,57 @@ def import_file(payload: ImportPayload) -> dict[str, Any]:
     return {"ok": True, **result}
 
 
+def _pdf_export_scope(source_path: Path, stats: dict[str, Any], payload: PdfLayoutExportPayload) -> dict[str, Any]:
+    import fitz
+
+    with fitz.open(source_path) as document:
+        original_pages = len(document)
+    selected_pages = min(original_pages, payload.max_pages or original_pages)
+    if payload.variant_policy == "first" and stats.get("variant_page_limit"):
+        selected_pages = min(selected_pages, int(stats["variant_page_limit"]))
+    return {
+        "variant_policy": payload.variant_policy,
+        "original_page_count": original_pages,
+        "selected_page_count": selected_pages,
+        "selected_page_numbers": list(range(1, selected_pages + 1)),
+        "excluded_page_count": original_pages - selected_pages,
+        "includes_entire_source": selected_pages == original_pages,
+        "variant_selection_applied": bool(stats.get("variant_page_limit")),
+    }
+
+
+def _pdf_export_fidelity(source_path: Path, output_path: Path, render_dir: Path,
+                         stats: dict[str, Any], payload: PdfLayoutExportPayload,
+                         scope: dict[str, Any]) -> dict[str, Any]:
+    kwargs = {
+        "max_pages": int(stats.get("pages") or 1), "target_sync_ratio": 0.94,
+        "allow_truncated_by_max_pages": payload.max_pages is not None, "artifact_mode": "failures",
+    }
+    if scope["variant_selection_applied"]:
+        # Compare the explicitly selected form, while retaining the untouched
+        # original and its excluded-page inventory in the conversion report.
+        import fitz
+
+        with tempfile.TemporaryDirectory(prefix="hwpmake_comparison_") as temporary:
+            selected_path = Path(temporary) / "selected_source.pdf"
+            with fitz.open(source_path) as source, fitz.open() as selected:
+                selected.insert_pdf(source, from_page=0, to_page=int(scope["selected_page_count"]) - 1)
+                selected.save(selected_path)
+            result = pdf_layout_fidelity.analyze_pdf_hwpx_fidelity(selected_path, output_path, render_dir, **kwargs)
+    else:
+        result = pdf_layout_fidelity.analyze_pdf_hwpx_fidelity(source_path, output_path, render_dir, **kwargs)
+    result["source_scope"] = scope
+    return result
+
+
 @app.post("/api/pdf-layout-export")
 def export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
+    # Admit before saving files, and retain admission through rendering/reporting.
+    with _conversion_slot():
+        return _export_pdf_layout(payload)
+
+
+def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
     """Create an editable HWPX that follows the original PDF page layout."""
     try:
         data = _decode_upload(payload.data_base64)
@@ -814,6 +882,8 @@ def export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"PDF 데이터 디코딩 실패: {exc}") from exc
     if not data.startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail="PDF 파일만 원본 레이아웃 HWPX로 만들 수 있습니다.")
+    if payload.variant_policy == "first" and payload.layout_mode != "structured":
+        raise HTTPException(status_code=400, detail="첫 유형 선택은 문항 구조 변환에서만 사용할 수 있습니다.")
 
     storage.ensure_dirs()
     rel_path = importers.save_upload(payload.filename, data)
@@ -825,6 +895,7 @@ def export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
         # 실패한 변환의 부분 산출물(run_dir 전체)을 exports/에 남기지 않는다.
         if output_path is not None:
             output_path.unlink(missing_ok=True)
+        source_path.unlink(missing_ok=True)
         if run_dir is None:
             return
         shutil.rmtree(run_dir, ignore_errors=True)
@@ -845,7 +916,7 @@ def export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
             source_copy.write_bytes(data)
             output_suffix = "structured_native" if payload.layout_mode == "structured" else "original_layout"
             output_path = _unique_path_in_dir(run_dir, f"{source_stem}_{output_suffix}.hwpx")
-            with _conversion_slot():
+            with storage.scoped_upload_directory(run_dir / "assets"):
                 if payload.layout_mode == "structured":
                     stats = pdf_layout_writer.write_pdf_structured_hwpx(
                         source_path,
@@ -854,6 +925,7 @@ def export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
                         native_math=payload.native_math,
                         math_ai_recognition=payload.math_ai_recognition,
                         math_ai_model=payload.math_ai_model,
+                        variant_policy=payload.variant_policy,
                     )
                 else:
                     stats = pdf_layout_writer.write_pdf_layout_hwpx(
@@ -867,6 +939,9 @@ def export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
                         math_ai_recognition=payload.math_ai_recognition,
                         math_ai_model=payload.math_ai_model,
                     )
+    except HTTPException:
+        _cleanup_failed_run()
+        raise
     except ValueError as exc:
         _cleanup_failed_run()
         raise HTTPException(status_code=400, detail=f"PDF 레이아웃 변환 실패: {exc}") from exc
@@ -874,114 +949,122 @@ def export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
         _cleanup_failed_run()
         raise HTTPException(status_code=500, detail=f"PDF 레이아웃 HWPX 생성 중 오류가 발생했습니다: {exc}") from exc
 
-    assert output_path is not None
+    try:
+        assert output_path is not None
 
-    render_dir = run_dir / "fidelity_renders"
-    structured_visual_math = stats.get("layout_mode") == "structured_math_visual_overlay"
-    if payload.layout_mode == "structured" and not structured_visual_math:
-        fidelity = {
-            "available": False,
-            "skipped": True,
-            "reason": "structured reflow is scored by editable structure and native-math coverage",
-            "pdf_page_count": int(stats.get("source_pages") or stats.get("pages") or 0),
-            "hwpx_page_count": None,
-            "review_flags": [],
+        render_dir = run_dir / "fidelity_renders"
+        scope = _pdf_export_scope(source_copy, stats, payload)
+        structured_visual_math = stats.get("layout_mode") == "structured_math_visual_overlay"
+        if payload.layout_mode == "structured" and not structured_visual_math:
+            fidelity = {
+                "available": False,
+                "skipped": True,
+                "reason": "structured reflow is scored by editable structure and native-math coverage",
+                "pdf_page_count": int(stats.get("source_pages") or stats.get("pages") or 0),
+                "hwpx_page_count": None,
+                "review_flags": [],
+            }
+        else:
+            fidelity = _pdf_export_fidelity(source_copy, output_path, render_dir, stats, payload, scope)
+            _attach_fidelity_artifact_refs(fidelity, render_dir)
+        style_profile = pdf_layout_writer.inspect_layout_template_profile(output_path)
+        open_safety = _inspect_hwpx_open_safety(output_path)
+        visual_sync_ratio = fidelity.get("overall_sync_ratio")
+        whole_page_visual_sync_ratio = fidelity.get("overall_whole_page_sync_ratio")
+        layout_view_sync_ratio = fidelity.get("overall_layout_view_sync_ratio")
+        meets_visual_target = (
+            bool(fidelity.get("meets_visual_similarity_target")) if fidelity.get("available") else None
+        )
+        meets_whole_page_visual_target = (
+            bool(fidelity.get("meets_whole_page_sync_target")) if fidelity.get("available") else None
+        )
+        meets_layout_view_target = (
+            bool(fidelity.get("meets_layout_view_sync_target")) if fidelity.get("available") else None
+        )
+        full_page_raster_fallback = bool(stats.get("full_page_raster_fallback"))
+        quality = {
+            "target_sync_ratio": 0.94,
+            "editable_text_coverage_ratio": stats.get("editable_text_coverage_ratio"),
+            "meets_editable_text_target": float(stats.get("editable_text_coverage_ratio") or 0.0) >= 0.9,
+            "visual_sync_ratio": visual_sync_ratio,
+            "whole_page_visual_sync_ratio": whole_page_visual_sync_ratio,
+            "layout_view_sync_ratio": layout_view_sync_ratio,
+            "meets_visual_sync_target": meets_visual_target,
+            "meets_whole_page_sync_target": meets_whole_page_visual_target,
+            "meets_layout_view_sync_target": meets_layout_view_target,
+            "visual_review_flags": fidelity.get("review_flags") or [],
+            "limited_by_max_pages": bool(fidelity.get("limited_by_max_pages")),
+            "full_page_raster_fallback": full_page_raster_fallback,
+            "full_page_images": int(stats.get("full_page_images") or 0),
+            "visual_sync_requires_human_review": (
+                payload.layout_mode == "coordinate" or structured_visual_math
+            ),
         }
-    else:
-        fidelity = pdf_layout_fidelity.analyze_pdf_hwpx_fidelity(
-            source_copy,
-            output_path,
-            render_dir,
-            max_pages=int(stats.get("pages") or 1),
-            target_sync_ratio=0.94,
-            allow_truncated_by_max_pages=payload.max_pages is not None,
-            artifact_mode="failures",
+        quality.update(
+            _pdf_layout_objective_score(
+                stats=stats,
+                fidelity=fidelity,
+                style_profile=style_profile,
+                open_safety=open_safety,
+            )
         )
-        _attach_fidelity_artifact_refs(fidelity, render_dir)
-    style_profile = pdf_layout_writer.inspect_layout_template_profile(output_path)
-    open_safety = _inspect_hwpx_open_safety(output_path)
-    visual_sync_ratio = fidelity.get("overall_sync_ratio")
-    whole_page_visual_sync_ratio = fidelity.get("overall_whole_page_sync_ratio")
-    layout_view_sync_ratio = fidelity.get("overall_layout_view_sync_ratio")
-    meets_visual_target = (
-        bool(fidelity.get("meets_visual_similarity_target")) if fidelity.get("available") else None
-    )
-    meets_whole_page_visual_target = (
-        bool(fidelity.get("meets_whole_page_sync_target")) if fidelity.get("available") else None
-    )
-    meets_layout_view_target = (
-        bool(fidelity.get("meets_layout_view_sync_target")) if fidelity.get("available") else None
-    )
-    full_page_raster_fallback = bool(stats.get("full_page_raster_fallback"))
-    quality = {
-        "target_sync_ratio": 0.94,
-        "editable_text_coverage_ratio": stats.get("editable_text_coverage_ratio"),
-        "meets_editable_text_target": float(stats.get("editable_text_coverage_ratio") or 0.0) >= 0.9,
-        "visual_sync_ratio": visual_sync_ratio,
-        "whole_page_visual_sync_ratio": whole_page_visual_sync_ratio,
-        "layout_view_sync_ratio": layout_view_sync_ratio,
-        "meets_visual_sync_target": meets_visual_target,
-        "meets_whole_page_sync_target": meets_whole_page_visual_target,
-        "meets_layout_view_sync_target": meets_layout_view_target,
-        "visual_review_flags": fidelity.get("review_flags") or [],
-        "limited_by_max_pages": bool(fidelity.get("limited_by_max_pages")),
-        "full_page_raster_fallback": full_page_raster_fallback,
-        "full_page_images": int(stats.get("full_page_images") or 0),
-        "visual_sync_requires_human_review": (
-            payload.layout_mode == "coordinate" or structured_visual_math
-        ),
-    }
-    quality.update(
-        _pdf_layout_objective_score(
-            stats=stats,
-            fidelity=fidelity,
-            style_profile=style_profile,
-            open_safety=open_safety,
-        )
-    )
-    report_path = _unique_path_in_dir(run_dir, "layout_report.json")
-    report = {
-        "mode": f"pdf_{payload.layout_mode}_hwpx",
-        "source": {"name": payload.filename, "upload_path": rel_path},
-        "export": _export_file_item(output_path),
-        "stats": stats,
-        "quality": quality,
-        "fidelity": fidelity,
-        "style_profile": style_profile,
-        "open_safety": open_safety,
-        "notes": [
-            "editable_text_coverage_ratio tracks text-line preservation, not pixel-perfect visual similarity.",
-            "layout_view_sync_ratio is the primary 94-point whole-page margin/spacing/scale signal.",
-            "objective_score_target is 98 and combines source page/column fidelity, exam margins and spacing, editable structure, native math coverage, completeness, paging, and editor-open safety.",
-            "page_physical_size_ok requires a portrait KICE-style physical page setup; A3-like KICE math sheets are emitted as B4_114 for B4 114% print output.",
-            "whole_page_visual_sync_ratio compares raw full-page luminance and remains a strict renderer-difference diagnostic.",
-            "visual_sync_ratio compares rendered PDF and HWPX content crops; foreground_overlap_ratio is a stricter text-position diagnostic.",
-            "Use rendered HWPX review or Hancom open check for final acceptance.",
-            "API render artifacts are saved for pages below the target; full audit runs may use artifact_mode='all'.",
-        ],
-    }
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        report_path = _unique_path_in_dir(run_dir, "layout_report.json")
+        report = {
+            "mode": f"pdf_{payload.layout_mode}_hwpx",
+            "source": {"name": payload.filename, "upload_path": rel_path, "copy": _export_file_item(source_copy)},
+            "scope": scope,
+            "export": _export_file_item(output_path),
+            "stats": stats,
+            "quality": quality,
+            "fidelity": fidelity,
+            "style_profile": style_profile,
+            "open_safety": open_safety,
+            "notes": [
+                "editable_text_coverage_ratio tracks text-line preservation, not pixel-perfect visual similarity.",
+                "layout_view_sync_ratio is the primary 94-point whole-page margin/spacing/scale signal.",
+                f"objective_score_target is {quality.get('objective_score_target')} and combines source page/column fidelity, exam margins and spacing, editable structure, native math coverage, completeness, paging, and editor-open safety.",
+                "page_physical_size_ok requires a portrait KICE-style physical page setup; A3-like KICE math sheets are emitted as B4_114 for B4 114% print output.",
+                "whole_page_visual_sync_ratio compares raw full-page luminance and remains a strict renderer-difference diagnostic.",
+                "visual_sync_ratio compares rendered PDF and HWPX content crops; foreground_overlap_ratio is a stricter text-position diagnostic.",
+                "Use rendered HWPX review or Hancom open check for final acceptance.",
+                "API render artifacts are saved for pages below the target; full audit runs may use artifact_mode='all'.",
+            ],
+        }
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    return {
-        "ok": True,
-        "mode": f"pdf_{payload.layout_mode}_hwpx",
-        "source": {"name": payload.filename, "path": rel_path, "copy": _export_file_item(source_copy)},
-        "export": _export_file_item(output_path),
-        "run": {
-            "folder": run_dir.resolve().relative_to(storage.EXPORT_DIR.resolve()).as_posix(),
-            "report": _export_file_item(report_path),
-        },
-        "stats": stats,
-        "quality": quality,
-        "fidelity": fidelity,
-        "style_profile": style_profile,
-        "open_safety": open_safety,
-        "notices": [
-            "텍스트는 편집 가능한 문단/표로 넣고 수식은 한글 네이티브 수식 개체로 생성했습니다."
-            if payload.layout_mode == "structured"
-            else "텍스트는 원본 좌표를 따르는 편집 가능한 개체로 넣었습니다."
-        ],
-    }
+        return {
+            "ok": True,
+            "mode": f"pdf_{payload.layout_mode}_hwpx",
+            "source": {"name": payload.filename, "path": rel_path, "copy": _export_file_item(source_copy)},
+            "scope": scope,
+            "export": _export_file_item(output_path),
+            "run": {
+                "folder": run_dir.resolve().relative_to(storage.EXPORT_DIR.resolve()).as_posix(),
+                "report": _export_file_item(report_path),
+            },
+            "stats": stats,
+            "quality": quality,
+            "fidelity": fidelity,
+            "style_profile": style_profile,
+            "open_safety": open_safety,
+            "notices": ([
+                f"원본 {scope['original_page_count']}쪽 중 1–{scope['selected_page_count']}쪽을 선택해 변환했습니다. 제외된 {scope['excluded_page_count']}쪽은 원본 PDF에 보존됩니다."
+            ] if not scope["includes_entire_source"] else []) + ([
+                "첫 유형을 확정할 수 없어 전체 선택 범위를 보존했습니다."
+            ] if payload.variant_policy == "first" and not scope["variant_selection_applied"] else []) + [
+                "텍스트를 편집 가능한 HWPX로 생성했습니다."
+                if not full_page_raster_fallback
+                else "일부 페이지를 이미지로 보존했습니다. 편집 가능한 텍스트 범위를 검수해 주세요."
+            ] + ([f"편집 가능한 수식 {int(stats.get('native_equations') or 0)}개를 생성했습니다."]
+                 if int(stats.get("native_equations") or 0) else []),
+        }
+
+    except HTTPException:
+        _cleanup_failed_run()
+        raise
+    except Exception as exc:
+        _cleanup_failed_run()
+        raise HTTPException(status_code=500, detail="PDF 결과 검증 중 오류가 발생했습니다. 다시 시도해 주세요.") from exc
 
 
 @app.post("/api/import-text")
@@ -1010,12 +1093,10 @@ def collect(payload: CollectPayload) -> dict[str, Any]:
 
 @app.post("/api/preview")
 def preview_export(payload: ExportPayload) -> dict[str, Any]:
+    template = _get_template_or_400(payload.template_key)
+    problems = _selected_problems_or_409(payload.ids)
     if not preview.available():
         raise HTTPException(status_code=501, detail="미리보기 엔진(rhwp-python)이 설치되어 있지 않습니다.")
-    template = _get_template_or_400(payload.template_key)
-    problems = storage.get_problems_by_ids(payload.ids)
-    if not problems:
-        raise HTTPException(status_code=400, detail="No problems selected")
     title = exam_templates.resolve_export_title(payload.title, template)
     native_math = _effective_native_math(payload, template)
     try:
@@ -1027,19 +1108,19 @@ def preview_export(payload: ExportPayload) -> dict[str, Any]:
                 include_answer_sheet=payload.include_answer_sheet,
                 native_math=native_math,
             )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"미리보기 실패: {exc}") from exc
     if template.columns > 1:
-        result["note"] = "미리보기 엔진이 다단 배치를 아직 1단으로 보여줍니다. 실제 한글에서는 설정된 단 수로 표시됩니다."
+        result.setdefault("note", "미리보기 엔진이 다단 배치를 아직 1단으로 보여줍니다. 실제 한글에서는 설정된 단 수로 표시됩니다.")
     return result
 
 
 @app.post("/api/export")
 def export(payload: ExportPayload) -> FileResponse:
     template = _get_template_or_400(payload.template_key)
-    problems = storage.get_problems_by_ids(payload.ids)
-    if not problems:
-        raise HTTPException(status_code=400, detail="No problems selected")
+    problems = _selected_problems_or_409(payload.ids)
     storage.ensure_dirs()
     title = exam_templates.resolve_export_title(payload.title, template)
     native_math = _effective_native_math(payload, template)
@@ -1048,27 +1129,30 @@ def export(payload: ExportPayload) -> FileResponse:
         # 이름 선정부터 writer 완료까지 직렬화해 같은 초의 동시 변환이 서로의
         # 산출물을 덮어쓰지 않게 한다. 로컬 문서 변환은 원래 CPU-bound라 이 제한이
         # 메모리 급증과 SQLite/파일 경합도 함께 막는다.
-        with _EXPORT_LOCK:
+        with _conversion_slot(), _EXPORT_LOCK:
             path = _unique_export_path(_safe_export_name(title, payload.format))
             filename = path.name
-            with _conversion_slot():
-                if payload.format == "docx":
-                    docx_writer.write_docx(
-                        path, title, problems, template.key, include_answer_sheet=payload.include_answer_sheet
-                    )
-                    media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                else:
-                    # v2(vendored python-hwpx) 만 실제 한컴에서 열린다. v1(hwpx_writer)은 version.xml
-                    # 등 패키지 스켈레톤이 비표준이라 한컴이 "파일 손상"으로 거부한다(실제 뷰어 확인).
-                    hwpx_writer_v2.write_hwpx(
-                        path,
-                        title,
-                        problems,
-                        template.key,
-                        include_answer_sheet=payload.include_answer_sheet,
-                        native_math=native_math,
-                    )
-                    media_type = "application/hwp+zip"
+            if payload.format == "docx":
+                docx_writer.write_docx(
+                    path, title, problems, template.key, include_answer_sheet=payload.include_answer_sheet
+                )
+                media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            else:
+                # v2(vendored python-hwpx) 만 실제 한컴에서 열린다. v1(hwpx_writer)은 version.xml
+                # 등 패키지 스켈레톤이 비표준이라 한컴이 "파일 손상"으로 거부한다(실제 뷰어 확인).
+                hwpx_writer_v2.write_hwpx(
+                    path,
+                    title,
+                    problems,
+                    template.key,
+                    include_answer_sheet=payload.include_answer_sheet,
+                    native_math=native_math,
+                )
+                media_type = "application/hwp+zip"
+    except HTTPException:
+        if path is not None:
+            path.unlink(missing_ok=True)
+        raise
     except Exception as exc:  # noqa: BLE001 - 작성기 오류를 500으로 감싼다
         if path is not None:
             path.unlink(missing_ok=True)

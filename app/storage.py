@@ -5,6 +5,8 @@ import json
 import os
 import re
 import sqlite3
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,23 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 EXPORT_DIR = DATA_DIR / "exports"
 DB_PATH = DATA_DIR / "problems.sqlite3"
 IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+_SCOPED_UPLOAD_DIR: ContextVar[Path | None] = ContextVar("conversion_upload_dir", default=None)
+
+
+def upload_directory() -> Path:
+    return _SCOPED_UPLOAD_DIR.get() or UPLOAD_DIR
+
+
+@contextmanager
+def scoped_upload_directory(directory: Path):
+    resolved = directory.resolve()
+    if not resolved.is_relative_to(DATA_DIR):
+        raise ValueError("Conversion assets must stay inside the data directory")
+    token = _SCOPED_UPLOAD_DIR.set(resolved)
+    try:
+        yield
+    finally:
+        _SCOPED_UPLOAD_DIR.reset(token)
 
 
 def ensure_dirs() -> None:
@@ -227,8 +246,8 @@ def _image_fingerprints(value: Any) -> list[str]:
     return fingerprints
 
 
-def _content_hash(data: dict[str, Any]) -> str:
-    """본문·선지·정답·표·이미지를 정규화한 콘텐츠 지문."""
+def _content_hash(data: dict[str, Any], *, legacy_casefold: bool = False) -> str:
+    """Case-sensitive content identity; unprefixed v1 hashes remain readable."""
     normalized_data = _normalize_problem_data(data)
     parts = [str(normalized_data.get("stem") or "")]
     parts.extend(_as_choice_list(normalized_data.get("choices")))
@@ -237,10 +256,33 @@ def _content_hash(data: dict[str, Any]) -> str:
     if tables:
         parts.append(json.dumps(tables, ensure_ascii=False, sort_keys=True))
     parts.extend(_image_fingerprints(data.get("image_paths")))
-    normalized = re.sub(r"\s+", " ", "\n".join(parts)).strip().lower()
+    normalized = re.sub(r"\s+", " ", "\n".join(parts)).strip()
     if not normalized:
         return ""
-    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+    if legacy_casefold:
+        return hashlib.sha1(normalized.lower().encode("utf-8")).hexdigest()
+    return "v2:" + hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+
+
+def _matching_duplicate_row(
+    conn: sqlite3.Connection, data: dict[str, Any], digest: str
+) -> sqlite3.Row | None:
+    # Avoid a destructive/eager database migration. Legacy hashes only shortlist
+    # candidates; compare their actual case-sensitive content before reusing one.
+    legacy_digest = _content_hash(data, legacy_casefold=True)
+    rows = conn.execute(
+        "SELECT * FROM problems WHERE source_name = ? AND content_hash IN (?, ?) ORDER BY id",
+        (data.get("source_name") or "", digest, legacy_digest),
+    ).fetchall()
+    for row in rows:
+        if row["content_hash"] == digest:
+            return row
+        stored = dict(row)
+        for field in ("choices", "image_paths", "tables"):
+            stored[field] = json.loads(stored[field + "_json"] or "[]")
+        if _content_hash(stored) == digest:
+            return row
+    return None
 
 
 def hash_exists(content_hash: str) -> bool:
@@ -387,10 +429,7 @@ def create_problem_unique(
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if digest:
-            row = conn.execute(
-                "SELECT 1 FROM problems WHERE content_hash = ? AND source_name = ? LIMIT 1",
-                (digest, values["source_name"]),
-            ).fetchone()
+            row = _matching_duplicate_row(conn, data, digest)
             if row is not None:
                 conn.rollback()
                 return None
@@ -426,10 +465,7 @@ def find_existing_problem(data: dict[str, Any]) -> dict[str, Any] | None:
     if not digest:
         return None
     with connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM problems WHERE content_hash = ? AND source_name = ? ORDER BY id LIMIT 1",
-            (digest, data.get("source_name") or ""),
-        ).fetchone()
+        row = _matching_duplicate_row(conn, data, digest)
     return row_to_problem(row) if row else None
 
 
@@ -578,6 +614,41 @@ def get_problems_by_ids(ids: list[int]) -> list[dict[str, Any]]:
 # --- 내보내기 기록 -----------------------------------------------------------
 
 
+def _conversion_metadata(path: Path, export_root: Path) -> dict[str, Any] | None:
+    report_path = path.parent / "layout_report.json"
+    if path.suffix.lower() != ".hwpx" or not report_path.is_file():
+        return None
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        if report.get("export", {}).get("name") != path.relative_to(export_root).as_posix():
+            return None
+        report_name = report_path.relative_to(export_root).as_posix()
+        source_ref = (report.get("source") or {}).get("copy") or {}
+        source_name = str(source_ref.get("name") or "")
+        source_path = (export_root / source_name).resolve()
+        if not source_name:
+            candidates = list(path.parent.glob("*.pdf"))
+            source_path = candidates[0].resolve() if len(candidates) == 1 else None
+        source = None
+        if source_path and source_path.is_file() and source_path.is_relative_to(export_root):
+            source_name = source_path.relative_to(export_root).as_posix()
+            source = {"name": str((report.get("source") or {}).get("name") or source_path.name),
+                      "url": f"/files/exports/{quote(source_name, safe='/')}"}
+        return {
+            "source": source,
+            "report": {"name": report_name, "url": f"/files/exports/{quote(report_name, safe='/')}"},
+            "quality": report.get("quality") or {},
+            "scope": report.get("scope") or {},
+            "summary": {
+                "output_page_count": (report.get("fidelity") or {}).get("hwpx_page_count"),
+                "output_problem_count": (report.get("stats") or {}).get("output_problem_count"),
+            },
+        }
+    except (OSError, ValueError, TypeError, AttributeError):
+        # Older/incomplete sidecars must not hide otherwise downloadable files.
+        return None
+
+
 def list_exports() -> list[dict[str, Any]]:
     """data/exports/에 저장된 내보내기 결과를 최신순으로 나열한다."""
     ensure_dirs()
@@ -605,6 +676,9 @@ def list_exports() -> list[dict[str, Any]]:
                 "url": f"/files/exports/{quote(rel_path, safe='/')}",
             }
         )
+        conversion = _conversion_metadata(path, export_root)
+        if conversion is not None:
+            items[-1]["conversion"] = conversion
     items.sort(key=lambda item: item["modified_ts"], reverse=True)
     for item in items:
         item.pop("modified_ts")
