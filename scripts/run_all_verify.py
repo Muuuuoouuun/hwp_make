@@ -93,7 +93,7 @@ def main() -> int:
     args = parser.parse_args()
 
     py_targets = discover_py()
-    node_targets = sorted(SCRIPTS.glob("verify_frontend_*.js"))
+    node_targets = sorted(SCRIPTS.glob("verify_*.js"))
     has_node = shutil.which("node") is not None
 
     if args.list:

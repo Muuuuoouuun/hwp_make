@@ -25,7 +25,7 @@ function element() {
 }
 function harness(names) {
   const els = Object.fromEntries(["simpleFileInput", "simpleStudioButton", "simpleFileRemove", "simpleDropzone", "simpleConvertButton", "simpleCancelButton", "simpleQualityNote", "simpleResultActions", "simpleHistoryList", "simpleMathAi", "simpleMathAiOption", "simpleSelectedFile", "simpleFileName", "simpleFileMeta", "simpleConversionStatus", "simpleConversionStatusText", "fileInput", "fileName", "layoutExportButton", "importButton", "quickImportButton"].map(k => [k, element()]));
-  const state = { simpleConversionBusy: false, simpleCancelRequested: false, simpleFailure: "", simpleNotices: [], exports: [] };
+  const state = { simpleConversionBusy: false, simpleCancelRequested: false, simpleFailure: "", simpleNotices: [], exports: [], recognitionRequestId: 0, session: { authenticated: false }, workspaceStage: "input" };
   const body = element(); body.classList.add("simple-converter-mode");
   const context = vm.createContext({
     state, els, document: { body, activeElement: null, createElement: element, querySelector: () => null },
@@ -36,6 +36,14 @@ function harness(names) {
     setImportButtonsDisabled: (buttons, disabled) => buttons.forEach(b => b.disabled = disabled),
     setImportProgress() {}, loadExportHistory: async () => true, fileToBase64: async () => "dGVzdA==",
     visibleModals: () => [], editableTarget: () => false,
+    renderWorkspaceStage() {},
+    recognizeSimpleFile: async (file) => {
+      state.recognizedFile = file;
+      state.recognizedProblems = [{ id: 1 }];
+      state.workspaceStage = "ready";
+      els.simpleMathAiOption.classList.toggle("hidden", !/\.pdf$/i.test(file.name));
+      return true;
+    },
   });
   vm.runInContext(names.map(fn).join("\n"), context);
   return context;

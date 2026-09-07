@@ -23,10 +23,12 @@ assert(html.includes('id="simpleModeButton"'), "studio → simple return button 
 assert(js.includes("function applyUiMode(mode"), "applyUiMode mode switcher missing");
 assert(js.includes('applyUiMode("studio"'), "studio switch wiring missing");
 assert(js.includes('applyUiMode("simple"'), "simple switch wiring missing");
-assert(js.includes("UI_MODE_STORAGE_KEY"), "ui mode persistence key missing");
-assert(html.includes('window.localStorage.getItem("hwpMakeUiMode")'), "pre-paint mode restore script missing");
+assert(!js.includes("UI_MODE_STORAGE_KEY"), "legacy UI storage must not control the premium route");
+assert(!html.includes('window.localStorage.getItem("hwpMakeUiMode")'), "pre-paint must ignore legacy UI mode");
+assert(js.includes('if (mode === "studio") return enterPremiumEditor()'), "editor must require the explicit session-aware entry action");
+assert(!js.includes("window.location.assign("), "login/editor entry must preserve the selected File in the current page");
 assert(css.includes("body:not(.simple-converter-mode) .simple-converter"), "simple screen is not hidden in studio mode");
-// 스튜디오 복귀 시 숨김 상태에서 계산하지 못한 패널/용지 크기를 다시 측정해야 한다.
+// 프리미엄은 별도 페이지 초기화에서 용지 크기를 측정한다.
 for (const remeasure of ["applyWorkspaceLayout()", "ensurePaperBaseWidth()", "updatePaperCanvasSize()"]) {
   assert(
     js.split("function applyUiMode")[1]?.includes(remeasure),
@@ -40,9 +42,9 @@ assert(/exportPdfLayoutFiles\(\{\s*layoutMode = "coordinate"/.test(js), "studio 
 assert(js.includes('layout_mode: layoutMode'), "layout_mode is not parameterized in the export payload");
 
 // ③ 스튜디오 상태 보호: basket 비파괴 + 폼 상태 오버라이드 + 파일 선택 복원 + UI 부수효과 차단.
-assert(js.includes("preserveBasket: true"), "simple conversion must preserve the studio basket");
-assert(js.includes("exportOverrides:"), "simple conversion must pass export overrides instead of mutating studio form state");
-assert(js.includes("autoKind: true"), "simple conversion must not read/write the studio import-kind select");
+assert(js.includes("await exportSelected(state.recognizedProblems.map"), "basic conversion must reuse recognized source IDs without importing or changing basket");
+assert(js.includes('templateKey: "basic"'), "simple conversion must pass basic options rather than read studio form state");
+assert(js.includes("kind: EXT_KINDS[simpleFileExtension(file)]"), "recognition must classify the selected file independently of studio controls");
 assert(/if \(quick && preserveBasket\)/.test(js), "preserveBasket fast path missing in handleImportedProblems");
 assert(/if \(!preserveBasket\) \{\s*\n\s*addManyToBasket/.test(js), "partial-failure path may still clobber the basket");
 assert(!/els\.exportTemplate\.value\s*=\s*"basic"/.test(js), "simple conversion still mutates the studio template select");

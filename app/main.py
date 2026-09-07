@@ -22,9 +22,11 @@ from . import (
     ai_api,
     collector,
     docx_writer,
+    exam_numbering,
     exam_templates,
     hwpx_writer_v2,
     importers,
+    local_auth,
     pdf_layout_fidelity,
     pdf_layout_writer,
     preview,
@@ -60,6 +62,8 @@ app = FastAPI(title="HWP Make", version="0.1.0")
 storage.init_db()
 ai_api.initialize_ai_runtime()
 app.include_router(ai_api.router)
+_LOCAL_AUTH = local_auth.LocalWorkspaceAuth(storage.DATA_DIR)
+app.include_router(_LOCAL_AUTH.router())
 
 
 @app.middleware("http")
@@ -145,6 +149,12 @@ class ExportPayload(BaseModel):
     template_key: str = "basic"
     include_answer_sheet: bool = False
     native_math: bool | None = None
+    # Local premium workspace preview. This is a document policy boundary,
+    # not a paid entitlement; web account/billing integration is a later stage.
+    workspace: Literal["basic", "premium"] = "basic"
+    numbering_mode: Literal["preserve", "sequential"] = "preserve"
+    start_number: int = Field(default=1, ge=1, le=999, strict=True)
+    confirm_duplicate_numbers: bool = False
 
 
 def _decode_upload(data_base64: str) -> bytes:
@@ -220,6 +230,33 @@ def _selected_problems_or_409(ids: list[int]) -> list[dict[str, Any]]:
         raise HTTPException(status_code=400, detail="같은 문항을 중복으로 선택할 수 없습니다.")
     return problems
 
+
+
+def _export_problems(payload: ExportPayload, request: Request | None = None) -> list[dict[str, Any]]:
+    """Resolve the same immutable numbering input for preview and download."""
+    if payload.workspace == "basic" and (
+        payload.numbering_mode != "preserve"
+        or payload.start_number != 1
+        or payload.confirm_duplicate_numbers
+    ):
+        raise HTTPException(status_code=422, detail={
+            "code": "premium_workspace_required",
+            "message": "순서에 따른 번호 변경은 프리미엄 시험지 스튜디오에서 설정해 주세요.",
+        })
+    if payload.workspace == "premium":
+        _LOCAL_AUTH.require_user(request)
+    problems = _selected_problems_or_409(payload.ids)
+    if payload.workspace == "basic":
+        return problems
+    try:
+        return exam_numbering.prepare_export_problems(
+            problems,
+            payload.numbering_mode,
+            payload.start_number,
+            confirm_duplicate_numbers=payload.confirm_duplicate_numbers,
+        )
+    except exam_numbering.NumberingError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
 
 
 def _effective_native_math(payload: ExportPayload, template: exam_templates.ExamTemplate) -> bool:
@@ -693,8 +730,16 @@ def _pdf_structured_objective_score(
 
 
 @app.get("/")
+@app.get("/premium")
+@app.get("/premium/studio")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/api/premium-capabilities")
+def premium_capabilities() -> dict[str, Any]:
+    """Describe this local development slice without inventing paid access."""
+    return {"available": True, "mode": "local_preview", "billing_enabled": False}
 
 
 @app.get("/api/health")
@@ -1092,9 +1137,9 @@ def collect(payload: CollectPayload) -> dict[str, Any]:
 
 
 @app.post("/api/preview")
-def preview_export(payload: ExportPayload) -> dict[str, Any]:
+def preview_export(payload: ExportPayload, request: Request = None) -> dict[str, Any]:
     template = _get_template_or_400(payload.template_key)
-    problems = _selected_problems_or_409(payload.ids)
+    problems = _export_problems(payload, request)
     if not preview.available():
         raise HTTPException(status_code=501, detail="미리보기 엔진(rhwp-python)이 설치되어 있지 않습니다.")
     title = exam_templates.resolve_export_title(payload.title, template)
@@ -1118,9 +1163,9 @@ def preview_export(payload: ExportPayload) -> dict[str, Any]:
 
 
 @app.post("/api/export")
-def export(payload: ExportPayload) -> FileResponse:
+def export(payload: ExportPayload, request: Request = None) -> FileResponse:
     template = _get_template_or_400(payload.template_key)
-    problems = _selected_problems_or_409(payload.ids)
+    problems = _export_problems(payload, request)
     storage.ensure_dirs()
     title = exam_templates.resolve_export_title(payload.title, template)
     native_math = _effective_native_math(payload, template)

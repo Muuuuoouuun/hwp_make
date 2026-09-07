@@ -726,7 +726,8 @@ def write_docx(
         stem_lines = stem.splitlines()
         if template.merge_question_number:
             first_line = (
-                _strip_question_prefix(stem_lines[0], label)
+                (stem_lines[0] if problem.get("_numbering_prepared")
+                 else _strip_question_prefix(stem_lines[0], label))
                 if stem_lines
                 else problem.get("title") or "문제"
             )

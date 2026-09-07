@@ -37,6 +37,7 @@ const context = vm.createContext({
   document: { createElement: () => new Element() },
   window: { requestAnimationFrame: () => {} },
   persistBasket() {}, syncPaperPreviewMeta() {}, syncConversionReadyStatus() {},
+  syncNumberingControls() {}, numberMapping: (problem, index) => `출력 ${index + 1} · 원본 ${problem?.number || "번호 없음"}`,
   computeLayoutPlan: () => null, renderLayoutPlanSummary() {},
   problemLabel: (problem) => problem.title || "문항", compactText: (value) => value,
   icon: () => new Element(),

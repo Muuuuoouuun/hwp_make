@@ -1588,7 +1588,10 @@ def write_hwpx(
             for line in stem_lines[1:]:
                 total += estimate_para_height(line, "body")
         elif template.merge_question_number:
-            first_line = _strip_question_prefix(stem_lines[0], label) if stem_lines else ""
+            first_line = (
+                stem_lines[0] if problem.get("_numbering_prepared")
+                else _strip_question_prefix(stem_lines[0], label)
+            ) if stem_lines else ""
             total += estimate_para_height(
                 f"{label}. {first_line or problem.get('title') or '문제'}",
                 "heading",
@@ -1729,7 +1732,10 @@ def write_hwpx(
             for line in stem_lines[1:]:
                 para(line, "body")
         elif template.merge_question_number:
-            first_line = _strip_question_prefix(stem_lines[0], label) if stem_lines else ""
+            first_line = (
+                stem_lines[0] if problem.get("_numbering_prepared")
+                else _strip_question_prefix(stem_lines[0], label)
+            ) if stem_lines else ""
             para(
                 f"{label}. {first_line or problem.get('title') or '문제'}",
                 "heading",
@@ -1927,7 +1933,10 @@ def write_hwpx(
             for line in stem_lines[1:]:
                 para(line, "body")
         elif template.merge_question_number:
-            first_line = _strip_question_prefix(stem_lines[0], label) if stem_lines else ""
+            first_line = (
+                stem_lines[0] if problem.get("_numbering_prepared")
+                else _strip_question_prefix(stem_lines[0], label)
+            ) if stem_lines else ""
             para(
                 f"{label}. {first_line or problem.get('title') or '문제'}",
                 "heading",

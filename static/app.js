@@ -9,8 +9,24 @@ const ACTUAL_PREVIEW_ZOOM_MIN = 0.25;
 const ACTUAL_PREVIEW_ZOOM_MAX = 2;
 const ACTUAL_PREVIEW_ZOOM_STEP = 0.1;
 const MAX_CLIENT_UPLOAD_BYTES = 64 * 1024 * 1024;
+const PREMIUM_NUMBERING_KEY = "hwpmake.premium.numbering.v1";
+
+function isPremiumWorkspace() {
+  return state.workspaceStage === "editor" && state.session?.authenticated === true;
+}
 
 const state = {
+  workspaceStage: "input",
+  session: { authenticated: false, user: null, setup_required: false },
+  sessionBusy: false,
+  sessionRequestId: 0,
+  recognizedProblems: [],
+  recognizedFile: null,
+  selectedFile: null,
+  recognitionController: null,
+  recognitionRequestId: 0,
+  editorSourceFile: null,
+  editorOpening: false,
   problems: [],
   problemsTotal: 0,
   problemsHasMore: false,
@@ -64,10 +80,36 @@ const state = {
   simpleFailure: "",
   simpleNotices: [],
   simpleLastArtifact: null,
+  numberingMode: "sequential",
+  startNumber: 1,
+  duplicateConfirmationKey: "",
 };
 
 const els = {
+  sessionButton: document.querySelector("#sessionButton"),
+  editorSessionButton: document.querySelector("#editorSessionButton"),
+  sessionModal: document.querySelector("#sessionModal"),
+  sessionForm: document.querySelector("#sessionForm"),
+  sessionTitle: document.querySelector("#sessionTitle"),
+  sessionDescription: document.querySelector("#sessionDescription"),
+  sessionNameField: document.querySelector("#sessionNameField"),
+  sessionName: document.querySelector("#sessionName"),
+  sessionPasswordField: document.querySelector("#sessionPasswordField"),
+  sessionPassword: document.querySelector("#sessionPassword"),
+  sessionStatus: document.querySelector("#sessionStatus"),
+  sessionClose: document.querySelector("#sessionClose"),
+  sessionSubmit: document.querySelector("#sessionSubmit"),
+  sessionLogout: document.querySelector("#sessionLogout"),
+  sessionResume: document.querySelector("#sessionResume"),
+  simpleRecognitionSummary: document.querySelector("#simpleRecognitionSummary"),
+  simpleRecognitionCount: document.querySelector("#simpleRecognitionCount"),
+  simpleRecognitionNote: document.querySelector("#simpleRecognitionNote"),
+  simpleActions: document.querySelector("#simpleActions"),
+  simpleRecognizeRetry: document.querySelector("#simpleRecognizeRetry"),
+  simpleHistory: document.querySelector("#simpleHistory"),
+  simpleFooter: document.querySelector("#simpleFooter"),
   simpleConverter: document.querySelector("#simpleConverter"),
+  simpleHelpButton: document.querySelector("#simpleHelpButton"),
   simpleStudioButton: document.querySelector("#simpleStudioButton"),
   simpleModeButton: document.querySelector("#simpleModeButton"),
   simpleMathAi: document.querySelector("#simpleMathAi"),
@@ -160,6 +202,12 @@ const els = {
   orderEditorCancel: document.querySelector("#orderEditorCancel"),
   orderEditorApply: document.querySelector("#orderEditorApply"),
   exportTitle: document.querySelector("#exportTitle"),
+  numberingMode: document.querySelector("#numberingMode"),
+  startNumber: document.querySelector("#startNumber"),
+  numberingStatus: document.querySelector("#numberingStatus"),
+  duplicateNumberOption: document.querySelector("#duplicateNumberOption"),
+  confirmDuplicateNumbers: document.querySelector("#confirmDuplicateNumbers"),
+  premiumPreviewNotice: document.querySelector("#premiumPreviewNotice"),
   paperTitlePreview: document.querySelector("#paperTitlePreview"),
   paperCountPreview: document.querySelector("#paperCountPreview"),
   paperSheet: document.querySelector("#paperSheet"),
@@ -301,6 +349,9 @@ async function responseError(response) {
     // Keep the HTTP status text when the body cannot be read.
   }
   const error = new Error(friendlyErrorMessage(message));
+  if (Array.isArray(detail?.items) && detail.items.length) {
+    error.message += " · " + detail.items.slice(0, 4).map((item) => `${item.position}번째 문항: ${item.message || item.reason}`).join(" / ");
+  }
   error.status = response.status;
   error.detail = detail;
   return error;
@@ -358,6 +409,7 @@ function syncConversionReadyStatus() {
 }
 
 async function loadProblems({ render = true, append = false } = {}) {
+  if (!isPremiumWorkspace()) return false;
   const requestId = ++state.problemsRequestId;
   const params = new URLSearchParams();
   if (els.searchInput.value.trim()) params.set("q", els.searchInput.value.trim());
@@ -1422,9 +1474,10 @@ function openRecognitionLayer() {
 
 // --- 내보내기 바구니 ---------------------------------------------------------
 
-const BASKET_STORAGE_KEY = "hwpmake.basket.v1";
+const BASKET_STORAGE_KEY = "hwpmake.premium.basket.v1";
 
 function persistBasket() {
+  if (!isPremiumWorkspace()) return;
   try {
     localStorage.setItem(BASKET_STORAGE_KEY, JSON.stringify(state.basket));
   } catch {
@@ -1433,8 +1486,9 @@ function persistBasket() {
 }
 
 function restoreBasket() {
+  if (!isPremiumWorkspace()) return [];
   try {
-    const parsed = JSON.parse(localStorage.getItem(BASKET_STORAGE_KEY) || "[]");
+    const parsed = JSON.parse(localStorage.getItem(BASKET_STORAGE_KEY) ?? localStorage.getItem("hwpmake.basket.v1") ?? "[]");
     if (Array.isArray(parsed)) {
       return parsed
         .filter((entry) => entry && typeof entry.id === "number")
@@ -1444,6 +1498,74 @@ function restoreBasket() {
     // 손상된 저장값은 무시한다.
   }
   return [];
+}
+
+function restoreNumbering() {
+  if (!isPremiumWorkspace()) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem(PREMIUM_NUMBERING_KEY) || "null");
+    if (saved?.mode === "preserve" || saved?.mode === "sequential") state.numberingMode = saved.mode;
+    if (Number.isInteger(saved?.start) && saved.start >= 1 && saved.start <= 999) state.startNumber = saved.start;
+  } catch { /* Ignore damaged or unavailable local recovery data. */ }
+  els.numberingMode.value = state.numberingMode;
+  els.startNumber.value = String(state.startNumber);
+}
+
+function outputNumber(problem, index) {
+  return state.numberingMode === "preserve" ? String(problem?.number ?? "").trim() : Number.isInteger(state.startNumber) ? String(state.startNumber + index) : "";
+}
+
+function numberMapping(problem, index) {
+  return `출력 ${outputNumber(problem, index) || "번호 없음"} · 원본 ${String(problem?.number ?? "").trim() || "번호 없음"}`;
+}
+
+function duplicateOriginalNumbers() {
+  const seen = new Set();
+  const duplicate = new Set();
+  for (const entry of state.basket) {
+    const value = String(resolveBasketProblem(entry)?.number ?? "").trim();
+    if (value && seen.has(value)) duplicate.add(value);
+    seen.add(value);
+  }
+  return [...duplicate];
+}
+
+function syncNumberingControls() {
+  if (!isPremiumWorkspace()) return;
+  const signature = JSON.stringify([state.numberingMode, state.startNumber, state.basket.map((entry) => [entry.id, resolveBasketProblem(entry)?.number])]);
+  if (state.duplicateConfirmationKey !== signature) {
+    els.confirmDuplicateNumbers.checked = false;
+    state.duplicateConfirmationKey = signature;
+  }
+  const preserve = state.numberingMode === "preserve";
+  const duplicates = preserve ? duplicateOriginalNumbers() : [];
+  els.startNumber.disabled = preserve;
+  els.duplicateNumberOption.classList.toggle("hidden", !duplicates.length);
+  const valid = Number.isInteger(state.startNumber) && state.startNumber >= 1 && state.startNumber + Math.max(0, state.basket.length - 1) <= 999;
+  const missing = preserve && state.basket.some((entry) => !String(resolveBasketProblem(entry)?.number ?? "").trim());
+  els.numberingStatus.textContent = preserve
+    ? (missing ? "원번호가 없는 문항이 있습니다. 원본 번호를 입력하거나 자동 번호를 선택하세요." : duplicates.length ? `중복 원번호 ${duplicates.join(", ")} · 아래 확인 후 출력할 수 있습니다.` : "원본 번호를 본문·정답·해설에 유지합니다.")
+    : valid ? `${state.startNumber}번부터 ${state.basket.length ? state.startNumber + state.basket.length - 1 : state.startNumber}번까지 본문·정답·해설에 같은 번호를 적용합니다.` : "시작 번호와 마지막 출력 번호는 1~999의 정수여야 합니다.";
+}
+
+function numberingPayload({ basic = false } = {}) {
+  if (basic || !isPremiumWorkspace()) return { workspace: "basic", numbering_mode: "preserve", start_number: 1 };
+  syncNumberingControls();
+  if (state.numberingMode === "sequential" && (!Number.isInteger(state.startNumber) || state.startNumber < 1 || state.startNumber + Math.max(0, state.basket.length - 1) > 999)) {
+    throw new Error("시작 번호와 마지막 출력 번호는 1~999의 정수여야 합니다.");
+  }
+  if (state.numberingMode === "preserve" && duplicateOriginalNumbers().length && !els.confirmDuplicateNumbers.checked) {
+    throw new Error("중복 원번호를 확인하고 확인란을 선택하거나 자동 번호를 사용하세요.");
+  }
+  return { workspace: "premium", numbering_mode: state.numberingMode, start_number: state.numberingMode === "preserve" ? 1 : state.startNumber, confirm_duplicate_numbers: state.numberingMode === "preserve" && els.confirmDuplicateNumbers.checked };
+}
+
+function changeNumbering() {
+  if (!isPremiumWorkspace()) return;
+  state.numberingMode = els.numberingMode.value === "preserve" ? "preserve" : "sequential";
+  state.startNumber = els.startNumber.value === "" ? NaN : Number(els.startNumber.value);
+  try { localStorage.setItem(PREMIUM_NUMBERING_KEY, JSON.stringify({ mode: state.numberingMode, start: state.startNumber })); } catch { /* Session remains usable. */ }
+  renderBasket();
 }
 
 function inBasket(id) {
@@ -1517,11 +1639,11 @@ function renderOrderEditor(focusIndex = null) {
     row.setAttribute("aria-label", `${index + 1}번째 문항 ${entry.label}. Alt와 위아래 화살표로 이동하거나 Delete로 제거합니다.`);
     const number = document.createElement("span");
     number.className = "order-editor-index";
-    number.textContent = String(index + 1);
+    number.textContent = outputNumber(problem, index) || "—";
     const copy = document.createElement("span");
     copy.className = "order-editor-copy";
     const title = document.createElement("strong");
-    title.textContent = entry.label;
+    title.textContent = `${numberMapping(problem, index)} · ${problem?.title || entry.label}`;
     const snippet = document.createElement("span");
     snippet.textContent = compactText(problem?.stem || "본문 미리보기 없음");
     copy.append(title, snippet);
@@ -1652,7 +1774,7 @@ function computeLayoutPlan() {
   if (!planner || !state.basket.length) return null;
   const template = currentExportTemplate() || { columns: 1 };
   const problems = state.basket.map(
-    (entry) => resolveBasketProblem(entry) || { id: entry.id, title: entry.label, stem: entry.label },
+    (entry, index) => ({ ...(resolveBasketProblem(entry) || { id: entry.id, title: entry.label, stem: entry.label }), number: outputNumber(resolveBasketProblem(entry), index) }),
   );
   return planner.planLayout(problems, template);
 }
@@ -1661,7 +1783,7 @@ function layoutRiskLabel(index) {
   const entry = state.basket[index];
   if (!entry) return `${index + 1}번째 문항`;
   const problem = resolveBasketProblem(entry);
-  return `${index + 1}. ${problem ? problemLabel(problem) : entry.label}`;
+  return `${numberMapping(problem, index)} · ${problem?.title || entry.label}`;
 }
 
 function renderLayoutPlanSummary(plan) {
@@ -1715,6 +1837,7 @@ function basketHasUnavailableProblems() {
 }
 
 function renderBasket() {
+  syncNumberingControls();
   persistBasket();
   const count = state.basket.length;
   els.basketBadge.textContent = String(state.basket.length);
@@ -1780,7 +1903,7 @@ function renderBasket() {
 
     const label = document.createElement("span");
     label.className = "basket-label";
-    label.textContent = `${index + 1}. ${entry.label}`;
+    label.textContent = `${numberMapping(problem, index)} · ${problem?.title || entry.label}`;
     label.title = entry.label;
 
     const snippet = document.createElement("span");
@@ -2738,8 +2861,7 @@ async function exportSelected(idsOverride = null, overrides = null, { signal = n
     toast("확인하지 못한 문항이 있습니다. 시험지 목록에서 다시 확인해 주세요.");
     return false;
   }
-  const ids = Array.isArray(idsOverride) ? idsOverride : state.basket.map((entry) => entry.id);
-  if (!ids.length) {
+  if (!(Array.isArray(idsOverride) ? idsOverride : state.basket).length) {
     toast("먼저 시험지에 넣을 문제를 담으세요.");
     return false;
   }
@@ -2747,6 +2869,11 @@ async function exportSelected(idsOverride = null, overrides = null, { signal = n
     toast("편집 중인 문항을 저장하지 못해 내보내기를 중단했습니다.");
     return false;
   }
+  // Saving can change source numbers and invalidate duplicate acknowledgement.
+  const ids = Array.isArray(idsOverride) ? [...idsOverride] : state.basket.map((entry) => entry.id);
+  if (!ids.length) return false;
+  let numbering;
+  try { numbering = numberingPayload({ basic: Boolean(overrides) }); } catch (error) { toast(error.message); return false; }
   if (!overrides) {
     // 간단 변환(overrides)에서는 숨겨진 스튜디오의 워크플로 단계·모바일 pane을 건드리지 않는다.
     setWorkflowStep(3);
@@ -2779,6 +2906,7 @@ async function exportSelected(idsOverride = null, overrides = null, { signal = n
           template_key: templateKey,
           include_answer_sheet: includeAnswerSheet,
           native_math: nativeMath,
+          ...numbering,
         }),
       });
     } catch (error) {
@@ -2942,14 +3070,14 @@ function resetActualPreview() {
 }
 
 async function previewExport() {
+  if (!isPremiumWorkspace()) return;
   if (state.conversionBusy) return;
   if (basketHasUnavailableProblems()) {
     renderBasket();
     toast("확인할 수 없는 문항을 다시 확인하거나 제거해 주세요.");
     return;
   }
-  const ids = state.basket.map((entry) => entry.id);
-  if (!ids.length) {
+  if (!state.basket.length) {
     toast("먼저 시험지에 넣을 문제를 담으세요.");
     return;
   }
@@ -2957,6 +3085,10 @@ async function previewExport() {
     toast("편집 중인 문항을 저장하지 못해 미리보기를 중단했습니다.");
     return;
   }
+  const ids = state.basket.map((entry) => entry.id);
+  if (!ids.length) return;
+  let numbering;
+  try { numbering = numberingPayload(); } catch (error) { toast(error.message); return; }
   setWorkflowStep(3);
   if (mobileWorkspaceActive()) setMobilePane("preview", { focus: true });
   const selectedFormat = String(els.exportFormat.value || "hwpx").toLowerCase();
@@ -2976,6 +3108,7 @@ async function previewExport() {
         template_key: els.exportTemplate.value || "basic",
         include_answer_sheet: els.exportAnswerSheet.checked,
         native_math: Boolean(els.exportNativeMath?.checked),
+        ...numbering,
       }),
     });
     resetActualPreview();
@@ -3354,40 +3487,34 @@ function simpleFileExtension(file) {
 
 function setSimpleFile(file, { syncInput = false } = {}) {
   if (state.simpleConversionBusy) return;
+  state.recognitionController?.abort();
+  state.recognitionRequestId += 1;
+  state.recognitionController = null;
+  state.selectedFile = file;
+  state.recognizedProblems = [];
+  state.recognizedFile = null;
   clearSimpleResult();
-  // 스튜디오의 파일 선택(els.fileInput)은 여기서 건드리지 않는다.
-  // 변환 실행 시점(runSimpleConversion)에만 잠시 대입하고 끝나면 복원한다.
   if (syncInput) assignSingleFile(els.simpleFileInput, file);
-  els.simpleMathAiOption?.classList.toggle("hidden", !isPdfFile(file));
-
+  els.simpleSelectedFile?.classList.toggle("hidden", !file);
+  if (els.simpleFileName) els.simpleFileName.textContent = file?.name || "";
+  if (els.simpleFileMeta) els.simpleFileMeta.textContent = file ? formatSimpleFileSize(file.size) : "";
   if (!file) {
-    els.simpleSelectedFile?.classList.add("hidden");
-    if (els.simpleFileName) els.simpleFileName.textContent = "";
-    if (els.simpleFileMeta) els.simpleFileMeta.textContent = "";
-    if (els.simpleConvertButton) els.simpleConvertButton.disabled = true;
-    setSimpleConversionStatus("변환할 파일을 선택해 주세요.");
+    state.workspaceStage = "input";
+    setSimpleConversionStatus("");
+    renderWorkspaceStage();
     return;
   }
-
-  const extension = simpleFileExtension(file);
-  const supported = Boolean(EXT_KINDS[extension]);
+  const supported = Boolean(EXT_KINDS[simpleFileExtension(file)]);
   const oversized = Number(file.size || 0) > MAX_CLIENT_UPLOAD_BYTES;
-  if (els.simpleFileName) els.simpleFileName.textContent = file.name;
-  if (els.simpleFileMeta) {
-    els.simpleFileMeta.textContent = `${extension ? extension.toUpperCase() : "파일"} · ${formatSimpleFileSize(file.size)}`;
+  if (!supported || oversized) {
+    state.workspaceStage = "error";
+    setSimpleConversionStatus(oversized ? "64MB 이하 파일만 변환할 수 있습니다." : "지원하지 않는 파일 형식입니다.", "error");
+    renderWorkspaceStage();
+    els.simpleRecognizeRetry.classList.add("hidden");
+    return;
   }
-  els.simpleSelectedFile?.classList.remove("hidden");
-  if (els.simpleConvertButton) els.simpleConvertButton.disabled = !supported || oversized;
-
-  if (!supported) {
-    setSimpleConversionStatus("지원하지 않는 파일 형식입니다.", "error");
-  } else if (oversized) {
-    setSimpleConversionStatus("64MB 이하 파일만 변환할 수 있습니다.", "error");
-  } else {
-    setSimpleConversionStatus("파일이 준비되었습니다. 변환하기를 눌러 주세요.", "ready");
-  }
+  return recognizeSimpleFile(file);
 }
-
 function setSimpleQualityNote(message) {
   if (!els.simpleQualityNote) return;
   els.simpleQualityNote.textContent = message || "";
@@ -3398,6 +3525,198 @@ function showSimpleQuality(results) {
   const notes = [...state.simpleNotices];
   for (const result of results || []) notes.push(...simpleQualityMessages(result));
   setSimpleQualityNote([...new Set(notes)].join(" · "));
+}
+
+function renderWorkspaceStage() {
+  const editor = isPremiumWorkspace();
+  const stage = state.workspaceStage;
+  const hasFile = Boolean(state.selectedFile);
+  const recognized = Boolean(state.recognizedFile === state.selectedFile && state.recognizedProblems.length);
+  const basicPdfFallback = stage === "error" && isPdfFile(state.selectedFile) && state.selectedFile.size <= MAX_CLIENT_UPLOAD_BYTES;
+  document.body.classList.toggle("simple-converter-mode", !editor);
+  document.body.dataset.workspaceStage = stage;
+  document.title = editor ? "프리미엄 시험지 스튜디오 · HWP Make" : "HWPX 변환 · HWP Make";
+  els.simpleRecognitionSummary?.classList.toggle("hidden", !recognized || editor);
+  els.simpleActions?.classList.toggle("hidden", !hasFile || stage === "recognizing");
+  els.simpleConversionStatus?.classList.toggle("hidden", !hasFile && stage !== "error");
+  els.simpleConvertButton?.classList.toggle("hidden", !recognized && !basicPdfFallback);
+  if (els.simpleConvertButton) {
+    els.simpleConvertButton.disabled = (!recognized && !basicPdfFallback) || state.simpleConversionBusy;
+    if (!state.simpleConversionBusy) els.simpleConvertButton.textContent = basicPdfFallback ? "기본 변환" : "HWPX로 변환";
+  }
+  els.simpleRecognizeRetry?.classList.toggle("hidden", stage !== "error" || !hasFile);
+  els.simpleHistory?.classList.toggle("hidden", stage !== "results");
+  els.simpleHelpButton?.classList.toggle("hidden", !hasFile);
+  els.simpleFooter?.classList.toggle("hidden", stage !== "results");
+  els.simpleMathAiOption?.classList.toggle("hidden", !recognized || !isPdfFile(state.selectedFile));
+  if (els.simpleStudioButton) {
+    els.simpleStudioButton.disabled = !recognized || state.simpleConversionBusy || state.editorOpening;
+    els.simpleStudioButton.textContent = state.session.authenticated ? "문항 편집" : "로그인하고 문항 편집";
+  }
+  if (els.sessionButton) els.sessionButton.textContent = state.session.authenticated ? state.session.user?.name || "내 계정" : "로그인";
+  if (els.simpleRecognitionCount) els.simpleRecognitionCount.textContent = recognized ? `${state.recognizedProblems.length}개 문항을 인식했습니다` : "";
+  if (els.simpleRecognitionNote) els.simpleRecognitionNote.textContent = recognized ? "원래 순서와 번호로 변환하거나, 필요한 문항을 골라 편집하세요." : "";
+}
+
+async function refreshSession() {
+  const requestId = ++state.sessionRequestId;
+  const session = await api("/api/session");
+  if (requestId !== state.sessionRequestId) return state.session;
+  state.session = session;
+  if (!state.session.authenticated && state.workspaceStage === "editor") {
+    state.workspaceStage = state.recognizedProblems.length ? "ready" : "input";
+  }
+  renderWorkspaceStage();
+  return state.session;
+}
+
+function hasSavedComposition() {
+  if (!state.session.authenticated) return false;
+  try {
+    const saved = JSON.parse(localStorage.getItem(BASKET_STORAGE_KEY) ?? localStorage.getItem("hwpmake.basket.v1") ?? "[]");
+    return Array.isArray(saved) && saved.some((entry) => Number.isInteger(entry?.id));
+  } catch { return false; }
+}
+
+async function openSessionDialog() {
+  els.sessionStatus.textContent = "";
+  els.sessionPassword.value = "";
+  els.sessionSubmit.disabled = true;
+  openModal(els.sessionModal, isPremiumWorkspace() ? els.editorSessionButton : els.sessionButton, els.sessionPassword);
+  try {
+    await refreshSession();
+    const authenticated = Boolean(state.session.authenticated);
+    const setup = !authenticated && state.session.setup_required;
+    els.sessionTitle.textContent = authenticated ? state.session.user?.name || "내 계정" : setup ? "작업 계정 만들기" : "로그인";
+    els.sessionNameField.classList.toggle("hidden", !setup);
+    els.sessionName.required = setup;
+    els.sessionPasswordField.classList.toggle("hidden", authenticated);
+    els.sessionPassword.required = !authenticated;
+    els.sessionPassword.autocomplete = setup ? "new-password" : "current-password";
+    els.sessionSubmit.classList.toggle("hidden", authenticated);
+    els.sessionSubmit.textContent = setup ? "계정 만들기" : "로그인";
+    els.sessionLogout.classList.toggle("hidden", !authenticated);
+    els.sessionResume.classList.toggle("hidden", !authenticated || !hasSavedComposition());
+    (authenticated ? els.sessionClose : setup ? els.sessionName : els.sessionPassword).focus();
+  } catch (error) {
+    els.sessionStatus.textContent = friendlyErrorMessage(error);
+  } finally {
+    els.sessionSubmit.disabled = false;
+  }
+}
+
+async function authenticateLocalSession(event) {
+  event.preventDefault();
+  if (state.sessionBusy) return;
+  if (!els.sessionForm.reportValidity()) return;
+  state.sessionBusy = true;
+  state.sessionRequestId += 1;
+  setButtonBusy(els.sessionSubmit, true, "확인 중…");
+  els.sessionSubmit.disabled = true;
+  els.sessionStatus.textContent = "";
+  try {
+    const setup = Boolean(state.session.setup_required);
+    const payload = { password: els.sessionPassword.value };
+    if (setup) payload.name = els.sessionName.value.trim();
+    state.session = await api(setup ? "/api/session/setup" : "/api/session/login", { method: "POST", body: JSON.stringify(payload) });
+    if (!state.session.authenticated) throw new Error("로그인을 확인하지 못했습니다. 다시 시도해 주세요.");
+    els.sessionPassword.value = "";
+    closeModal(els.sessionModal);
+    // Authentication never changes the File, recognized IDs or workspace stage.
+    renderWorkspaceStage();
+  } catch (error) {
+    els.sessionStatus.textContent = friendlyErrorMessage(error);
+  } finally {
+    state.sessionBusy = false;
+    setButtonBusy(els.sessionSubmit, false);
+    els.sessionSubmit.disabled = false;
+  }
+}
+
+async function logoutLocalSession() {
+  if (state.sessionBusy) return;
+  if (state.simpleConversionBusy || state.conversionBusy || state.importController || state.editorOpening) {
+    els.sessionStatus.textContent = "진행 중인 작업이 끝난 뒤 로그아웃해 주세요.";
+    return;
+  }
+  if (state.draftDirty && !(await flushActiveDraft({ quiet: true }))) {
+    els.sessionStatus.textContent = "편집 내용을 저장하지 못했습니다. 저장한 뒤 로그아웃해 주세요.";
+    return;
+  }
+  state.sessionBusy = true;
+  els.sessionLogout.disabled = true;
+  try {
+    await api("/api/session/logout", { method: "POST" });
+    state.sessionRequestId += 1;
+    state.recognitionController?.abort();
+    state.recognitionRequestId += 1;
+    state.session = { authenticated: false, user: null, setup_required: false };
+    state.workspaceStage = "input";
+    state.basket = [];
+    state.problems = [];
+    state.problemById.clear();
+    state.activeId = null;
+    state.editorSourceFile = null;
+    state.draftDirty = false;
+    state.numberingMode = "sequential";
+    state.startNumber = 1;
+    state.exports = [];
+    state.orderDraft = [];
+    try {
+      for (const key of [BASKET_STORAGE_KEY, PREMIUM_NUMBERING_KEY, "hwpmake.basket.v1", WORKSPACE_LAYOUT_KEY]) localStorage.removeItem(key);
+    } catch { /* The clean in-memory session still applies. */ }
+    for (const modal of visibleModals()) closeModal(modal);
+    setSimpleFile(null, { syncInput: true });
+    renderList(); renderEditor(); renderBasket();
+    els.simpleDropzone.focus();
+  } catch (error) {
+    els.sessionStatus.textContent = friendlyErrorMessage(error);
+  } finally {
+    state.sessionBusy = false;
+    els.sessionLogout.disabled = false;
+  }
+}
+
+async function recognizeSimpleFile(file = state.selectedFile) {
+  if (!file || state.simpleConversionBusy) return false;
+  state.recognitionController?.abort();
+  const requestId = ++state.recognitionRequestId;
+  const controller = new AbortController();
+  state.recognitionController = controller;
+  state.recognizedProblems = [];
+  state.recognizedFile = null;
+  state.workspaceStage = "recognizing";
+  setSimpleConversionStatus("파일에서 문항을 인식하고 있습니다…", "working");
+  renderWorkspaceStage();
+  try {
+    const data = await fileToBase64(file, { signal: controller.signal });
+    if (requestId !== state.recognitionRequestId || file !== state.selectedFile) return false;
+    const result = await api("/api/import", { method: "POST", signal: controller.signal,
+      body: JSON.stringify({ kind: EXT_KINDS[simpleFileExtension(file)], filename: file.name, data_base64: data, metadata: {} }),
+    });
+    if (requestId !== state.recognitionRequestId || file !== state.selectedFile) return false;
+    const byId = new Map([...(result.created || []), ...(result.existing || [])].filter((problem) => Number.isInteger(problem?.id)).map((problem) => [problem.id, problem]));
+    const ids = Array.isArray(result.ordered_ids) ? [...new Set(result.ordered_ids)] : [...byId.keys()];
+    if (ids.length !== byId.size || ids.some((id) => !byId.has(id))) throw new Error("인식 결과의 문항 목록이 일치하지 않습니다. 다시 인식해 주세요.");
+    const problems = ids.map((id) => byId.get(id));
+    if (!problems.length) throw new Error("편집 가능한 문항을 찾지 못했습니다. 파일 내용을 확인하고 다시 인식해 주세요.");
+    state.recognizedProblems = problems;
+    state.recognizedFile = file;
+    state.simpleNotices = result.notices || [];
+    state.workspaceStage = "ready";
+    setSimpleConversionStatus(`${file.name} · 문항 인식 완료`, "ready");
+    setSimpleQualityNote(state.simpleNotices.join(" · "));
+    loadAIStatus().catch(() => {});
+    return true;
+  } catch (error) {
+    if (requestId !== state.recognitionRequestId || file !== state.selectedFile) return false;
+    state.workspaceStage = "error";
+    setSimpleConversionStatus(friendlyErrorMessage(error), "error");
+    return false;
+  } finally {
+    if (state.recognitionController === controller) state.recognitionController = null;
+    if (requestId === state.recognitionRequestId) renderWorkspaceStage();
+  }
 }
 
 function simpleQualityMessages(result) {
@@ -3553,45 +3872,20 @@ function renderSimpleHistory() {
   appendRefresh();
 }
 
-const UI_MODE_STORAGE_KEY = "hwpMakeUiMode";
-
-function applyUiMode(mode, { focus = false } = {}) {
-  if (state.simpleConversionBusy) return;
+async function applyUiMode(mode) {
+  if (state.simpleConversionBusy || state.conversionBusy || state.importController || state.editorOpening) return;
+  if (mode === "studio") return enterPremiumEditor();
+  if (state.draftDirty && !(await flushActiveDraft({ quiet: true }))) return;
   for (const modal of visibleModals()) closeModal(modal);
-  const simple = mode !== "studio";
-  document.body.classList.toggle("simple-converter-mode", simple);
-  try {
-    localStorage.setItem(UI_MODE_STORAGE_KEY, simple ? "simple" : "studio");
-  } catch (error) {
-    // localStorage 비활성(사생활 모드 등)이면 이번 세션에서만 모드가 유지된다.
-  }
-  try {
-    const url = new URL(window.location.href);
-    url.searchParams.set("mode", simple ? "simple" : "studio");
-    window.history.replaceState(null, "", url);
-  } catch (error) {
-    // URL 갱신 실패는 화면 전환 동작에 영향이 없다.
-  }
-  if (!simple) {
-    // 간단 화면 아래에 숨겨져 있는 동안 측정하지 못한 패널/용지 크기를 다시 계산한다.
-    // 숨김 상태에서 굳은 캐시가 남지 않도록 기준 폭 캐시부터 비운다.
-    state.paperBaseWidth = 0;
-    state.paperViewportMode = null;
-    window.requestAnimationFrame(() => {
-      applyWorkspaceLayout();
-      ensurePaperBaseWidth();
-      updatePaperCanvasSize();
-    });
-  }
-  if (focus) {
-    const target = simple ? els.simpleDropzone : document.querySelector("#workspace");
-    target?.focus?.();
-  }
+  state.workspaceStage = state.recognizedProblems.length ? (state.simpleLastArtifact ? "results" : "ready") : "input";
+  renderWorkspaceStage();
+  els.simpleDropzone.focus();
 }
-
 async function runSimpleConversion() {
-  const file = els.simpleFileInput?.files?.[0];
+  const file = state.selectedFile;
   if (!file || state.simpleConversionBusy) return;
+  if (!isPdfFile(file) && (state.recognizedFile !== file || !state.recognizedProblems.length)) return;
+  if (state.recognitionController) return;
   if (state.importController) {
     setSimpleConversionStatus("다른 변환이 아직 진행 중입니다. 완료된 뒤 다시 시도해 주세요.", "error");
     return;
@@ -3625,19 +3919,13 @@ async function runSimpleConversion() {
           mathAi: Boolean(els.simpleMathAi?.checked && !els.simpleMathAi?.disabled),
           collect: pdfResults,
         })
-      : await importFiles({
-          quick: true,
-          skipReplaceConfirm: true,
-          preserveBasket: true,
-          autoKind: true,
-          exportOverrides: {
+      : await exportSelected(state.recognizedProblems.map((problem) => problem.id), {
             title: file.name.replace(/\.[^.]+$/, "") || DEFAULT_EXPORT_TITLE,
             format: "hwpx",
             templateKey: "basic",
             includeAnswerSheet: false,
             nativeMath: true,
-          },
-        });
+        }, { signal: (state.importController = new AbortController()).signal });
     if (state.simpleCancelRequested && !completed) {
       setSimpleConversionStatus("대기를 중단했습니다. 서버에서 생성이 계속될 수 있으니 최근 변환을 다시 불러와 확인해 주세요.", "idle");
     } else {
@@ -3649,6 +3937,7 @@ async function runSimpleConversion() {
       );
     }
     if (completed) {
+      state.workspaceStage = "results";
       showSimpleQuality(pdfResults);
       showSimpleResult(pdfResults);
     }
@@ -3656,6 +3945,7 @@ async function runSimpleConversion() {
     setSimpleConversionStatus(`변환 실패 · ${friendlyErrorMessage(error)}`, "error");
   } finally {
     state.simpleConversionBusy = false;
+    state.importController = null;
     state.simpleCancelRequested = false;
     setButtonBusy(els.simpleConvertButton, false);
     els.simpleConvertButton.disabled = false;
@@ -3672,6 +3962,7 @@ async function runSimpleConversion() {
     // 포커스를 쥔 채 사라지면 키보드 초점이 body로 떨어지므로 먼저 옮긴다.
     if (document.activeElement === els.simpleCancelButton) els.simpleConvertButton?.focus();
     els.simpleCancelButton?.classList.add("hidden");
+    renderWorkspaceStage();
   }
 }
 
@@ -3867,6 +4158,13 @@ els.simpleDropzone?.addEventListener("drop", (event) => {
   if (files.length > 1 && !els.simpleConvertButton.disabled) setSimpleConversionStatus("한 번에 한 파일만 변환합니다. 첫 번째 파일을 선택했습니다.", "ready");
 });
 els.simpleFileRemove?.addEventListener("click", () => setSimpleFile(null, { syncInput: true }));
+els.simpleRecognizeRetry?.addEventListener("click", () => recognizeSimpleFile());
+els.sessionButton?.addEventListener("click", openSessionDialog);
+els.editorSessionButton?.addEventListener("click", openSessionDialog);
+els.sessionForm?.addEventListener("submit", authenticateLocalSession);
+els.sessionClose?.addEventListener("click", () => closeModal(els.sessionModal));
+els.sessionLogout?.addEventListener("click", logoutLocalSession);
+els.sessionResume?.addEventListener("click", () => enterPremiumEditor({ resume: true }));
 els.simpleConvertButton?.addEventListener("click", runSimpleConversion);
 els.simpleCancelButton?.addEventListener("click", () => {
   if (!state.simpleConversionBusy) return;
@@ -4020,7 +4318,7 @@ window.addEventListener("blur", () => {
   els.paperStage?.classList.remove("pan-ready", "panning");
 });
 window.addEventListener("beforeunload", (event) => {
-  if (!state.draftDirty && !state.savingDraft && !state.simpleConversionBusy && !state.importController && !state.conversionBusy) return;
+  if (!state.draftDirty && !state.savingDraft && !state.simpleConversionBusy && !state.importController && !state.recognitionController && !state.conversionBusy) return;
   event.preventDefault();
   event.returnValue = "";
 });
@@ -4036,6 +4334,8 @@ els.exportTemplate.addEventListener("change", () => {
   syncTemplatePreview();
 });
 els.exportTitle.addEventListener("input", syncPaperPreviewMeta);
+els.numberingMode?.addEventListener("change", changeNumbering);
+els.startNumber?.addEventListener("input", changeNumbering);
 els.exportFormat.addEventListener("change", () => syncExportOptions());
 if (els.exportNativeMath) {
   els.exportNativeMath.addEventListener("change", () => {
@@ -4089,10 +4389,61 @@ els.basketList.addEventListener("drop", async (event) => {
   await selectProblem(dropped.id);
 });
 
-(async function init() {
-  initSimpleHelp({ openSettings: openAISettings });
-  els.simpleMathAiOption?.classList.toggle("hidden", !isPdfFile(els.simpleFileInput?.files?.[0]));
-  state.basket = restoreBasket();
+async function enterPremiumEditor({ resume = false } = {}) {
+  if (state.editorOpening || state.simpleConversionBusy || state.recognitionController) return false;
+  if (!state.session.authenticated) {
+    await openSessionDialog();
+    return false;
+  }
+  if (!resume && (!state.recognizedProblems.length || state.recognizedFile !== state.selectedFile)) {
+    setSimpleConversionStatus("파일에서 문항을 인식한 뒤 편집할 수 있습니다.", "error");
+    return false;
+  }
+  state.editorOpening = true;
+  const entryFile = state.recognizedFile;
+  const recognitionRequestId = state.recognitionRequestId;
+  renderWorkspaceStage();
+  try {
+    await refreshSession();
+    if (!state.session.authenticated) {
+      await openSessionDialog();
+      return false;
+    }
+    const capability = await api("/api/premium-capabilities");
+    if (!capability.available) throw new Error("이 작업 계정에서는 편집 공간을 사용할 수 없습니다.");
+    if (!resume && (state.recognizedFile !== entryFile || state.selectedFile !== entryFile || state.recognitionRequestId !== recognitionRequestId || !state.recognizedProblems.length)) return false;
+    const previousStage = state.workspaceStage;
+    state.workspaceStage = "editor";
+    if (resume) {
+      state.basket = restoreBasket();
+      if (!state.basket.length) {
+        state.workspaceStage = previousStage;
+        throw new Error("이전에 저장한 시험지가 없습니다. 파일을 먼저 넣어주세요.");
+      }
+    } else if (state.editorSourceFile !== state.recognizedFile) {
+      state.basket = state.recognizedProblems.map((problem) => ({ id: problem.id, label: problemLabel(problem) }));
+      for (const problem of state.recognizedProblems) state.problemById.set(problem.id, problem);
+      state.editorSourceFile = state.recognizedFile;
+    }
+    closeModal(els.sessionModal);
+    els.premiumPreviewNotice.textContent = "로컬 작업 계정 · 문항 순서와 출력 번호 편집 미리보기";
+    renderWorkspaceStage();
+    await initializePremiumEditor();
+    if (state.basket.length) await selectProblem(state.basket[0].id);
+    els.workspace.focus();
+    return true;
+  } catch (error) {
+    state.workspaceStage = state.recognizedProblems.length ? "ready" : "error";
+    setSimpleConversionStatus(friendlyErrorMessage(error), "error");
+    return false;
+  } finally {
+    state.editorOpening = false;
+    renderWorkspaceStage();
+  }
+}
+
+async function initializePremiumEditor() {
+  restoreNumbering();
   restoreWorkspaceLayout();
   setMobilePane(state.mobilePane);
   applyWorkspaceLayout();
@@ -4114,11 +4465,18 @@ els.basketList.addEventListener("drop", async (event) => {
   syncPaperPreviewMeta();
   syncExportOptions({ resetNativeMath: true });
   renderBasket();
+  state.paperBaseWidth = 0;
+  state.paperViewportMode = null;
   window.requestAnimationFrame(() => {
     ensurePaperBaseWidth();
     updatePaperCanvasSize();
   });
-})().catch((error) => {
-  els.statusText.textContent = "서버 연결 실패";
-  toast(error.message);
-});
+}
+
+(async function init() {
+  // Every route starts with only file input. Login, old mode values, and saved
+  // baskets never open the editor or fetch its library on initial load.
+  renderWorkspaceStage();
+  initSimpleHelp({ openSettings: openAISettings });
+  try { await refreshSession(); } catch { /* Basic file conversion remains usable. */ }
+})();

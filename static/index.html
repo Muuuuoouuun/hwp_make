@@ -5,22 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>HWPX 변환 · HWP Make</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232f56c7'/%3E%3Cpath d='M4 5h8M4 8h8M4 11h5' stroke='white' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="/static/styles.css?v=30" />
+    <link rel="stylesheet" href="/static/styles.css?v=32" />
   </head>
-  <body class="simple-converter-mode">
-    <script>
-      // 저장된 화면 모드(간단 변환/스튜디오)를 첫 페인트 전에 복원해 깜빡임을 막는다.
-      (function () {
-        try {
-          var fromUrl = new URLSearchParams(window.location.search).get("mode");
-          var saved = window.localStorage.getItem("hwpMakeUiMode");
-          var mode = fromUrl === "studio" || fromUrl === "simple" ? fromUrl : saved;
-          if (mode === "studio") document.body.classList.remove("simple-converter-mode");
-        } catch (error) {
-          /* localStorage 비활성 환경에서는 기본(간단 변환)으로 시작한다. */
-        }
-      })();
-    </script>
+  <body class="simple-converter-mode" data-workspace-stage="input">
     <main id="simpleConverter" class="simple-converter" aria-labelledby="simpleConverterTitle">
       <header class="simple-header">
         <a class="simple-brand" href="/" aria-label="HWP Make 홈">
@@ -28,22 +15,21 @@
           <span>HWP MAKE</span>
         </a>
         <div class="simple-header-actions">
-          <button id="simpleHelpButton" class="simple-help-button" type="button" data-ai-help aria-controls="aiHelpPopover" aria-expanded="false" aria-haspopup="dialog">도움말</button>
-          <button id="simpleStudioButton" class="simple-studio-button" type="button">스튜디오 열기</button>
+          <button id="simpleHelpButton" class="simple-help-button hidden" type="button" data-ai-help aria-controls="aiHelpPopover" aria-expanded="false" aria-haspopup="dialog">도움말</button>
+          <button id="sessionButton" class="simple-studio-button" type="button" aria-haspopup="dialog">로그인</button>
         </div>
       </header>
 
       <section class="simple-converter-card">
         <div class="simple-heading">
-          <h1 id="simpleConverterTitle">파일을 HWPX로 변환</h1>
-          <p>파일을 올리고 변환 버튼을 누르세요.</p>
+          <h1 id="simpleConverterTitle">파일을 넣어주세요</h1>
         </div>
 
         <label id="simpleDropzone" class="simple-dropzone" for="simpleFileInput" tabindex="0">
           <span class="simple-upload-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24"><path d="M12 16V5m0 0L7.5 9.5M12 5l4.5 4.5M5 15.5v2.25A2.25 2.25 0 0 0 7.25 20h9.5A2.25 2.25 0 0 0 19 17.75V15.5" /></svg>
           </span>
-          <strong>파일을 클릭하거나 여기로 드래그하세요</strong>
+          <strong>클릭하거나 여기에 놓으세요</strong>
           <span>PDF, HWP, HWPX, DOCX, 이미지, TXT · 최대 64MB</span>
         </label>
         <input
@@ -67,21 +53,28 @@
           </button>
         </div>
 
-        <label id="simpleMathAiOption" class="simple-option" title="Gemini API 키를 AI 설정에서 연결하면 사용할 수 있습니다.">
+        <label id="simpleMathAiOption" class="simple-option hidden" title="Gemini API 키를 AI 설정에서 연결하면 사용할 수 있습니다.">
           <input id="simpleMathAi" type="checkbox" disabled />
           <span>PDF 수식을 Gemini AI로 인식</span>
         </label>
 
-        <div class="simple-actions">
+        <div id="simpleRecognitionSummary" class="simple-recognition-summary hidden" aria-live="polite">
+          <strong id="simpleRecognitionCount"></strong>
+          <p id="simpleRecognitionNote"></p>
+          <button id="simpleStudioButton" class="simple-studio-button" type="button">문항 편집</button>
+        </div>
+
+        <div id="simpleActions" class="simple-actions hidden">
           <button id="simpleConvertButton" class="simple-convert-button" type="button" aria-describedby="simpleConversionStatus" disabled>
-            변환하기
+            HWPX로 변환
           </button>
           <button id="simpleCancelButton" class="simple-cancel-button hidden" type="button">
             변환 취소
           </button>
+          <button id="simpleRecognizeRetry" class="simple-cancel-button hidden" type="button">다시 인식</button>
         </div>
 
-        <div id="simpleConversionStatus" class="simple-conversion-status" role="status" aria-live="polite" aria-atomic="true" data-tone="idle">
+        <div id="simpleConversionStatus" class="simple-conversion-status hidden" role="status" aria-live="polite" aria-atomic="true" data-tone="idle">
           <span class="simple-status-dot" aria-hidden="true"></span>
           <span id="simpleConversionStatusText">변환할 파일을 선택해 주세요.</span>
         </div>
@@ -89,7 +82,7 @@
         <p id="simpleQualityNote" class="simple-quality hidden" aria-live="polite"></p>
         <div id="simpleResultActions" class="simple-result-actions hidden" aria-label="변환 결과 확인"></div>
 
-        <section class="simple-history" aria-labelledby="simpleHistoryTitle">
+        <section id="simpleHistory" class="simple-history hidden" aria-labelledby="simpleHistoryTitle">
           <h2 id="simpleHistoryTitle">최근 변환</h2>
           <div id="simpleHistoryList" class="simple-history-list" aria-live="polite">
             <p class="simple-history-empty">아직 변환한 파일이 없습니다.</p>
@@ -97,7 +90,7 @@
         </section>
       </section>
 
-      <footer class="simple-footer">변환 후 다운로드가 시작됩니다. 최근 변환에서 다시 받을 수 있습니다.</footer>
+      <footer id="simpleFooter" class="simple-footer hidden">변환 후 다운로드가 시작됩니다. 최근 변환에서 다시 받을 수 있습니다.</footer>
     </main>
 
     <a class="skip-link" href="#workspace">핵심 작업으로 건너뛰기</a>
@@ -106,7 +99,7 @@
         <div class="brand-block">
           <span class="brand-mark" aria-hidden="true">H</span>
           <div>
-            <h1>시험지 스튜디오</h1>
+            <h1>프리미엄 시험지 스튜디오</h1>
             <p id="statusText">가져온 문제 준비 중</p>
           </div>
         </div>
@@ -127,8 +120,9 @@
           </div>
           <span id="saveStatus" class="save-status" aria-live="polite">변경 없음</span>
           <button id="simpleModeButton" class="utility-button" type="button" title="파일 하나를 바로 HWPX로 바꾸는 간단 화면으로 이동">
-            <span>간단 변환</span>
+            <span>파일 화면</span>
           </button>
+          <button id="editorSessionButton" class="utility-button" type="button" aria-haspopup="dialog">내 계정</button>
           <button id="shortcutHelpButton" class="utility-button" type="button" aria-haspopup="dialog" aria-keyshortcuts="?">
             <kbd>?</kbd><span>단축키</span>
           </button>
@@ -139,6 +133,7 @@
         </div>
       </header>
 
+      <p id="premiumPreviewNotice" class="premium-preview-notice" role="status">로컬 내부 미리보기 · 유료 이용권과 결제는 아직 제공하지 않습니다.</p>
       <section class="workflow-strip" aria-label="작업 단계">
         <button class="workflow-step active" type="button" data-workflow-step="1" data-mobile-pane="source" aria-pressed="true"><span>1</span><b>자료 가져오기</b></button>
         <div class="workflow-line" aria-hidden="true"></div>
@@ -364,6 +359,16 @@
               <label class="check-label"><input id="exportAnswerSheet" type="checkbox" /> 정답·해설지</label>
               <label id="nativeMathLabel" class="check-label"><input id="exportNativeMath" type="checkbox" /> 네이티브 수식</label>
             </div>
+            <fieldset class="numbering-controls">
+              <legend>출력 번호</legend>
+              <div class="field-row">
+                <label><span>번호 방식</span><select id="numberingMode"><option value="sequential">순서대로 자동 번호</option><option value="preserve">원번호 유지</option></select></label>
+                <label><span>시작 번호</span><input id="startNumber" type="number" min="1" max="999" step="1" value="1" aria-describedby="numberingStatus" /></label>
+              </div>
+              <p id="numberingStatus" class="numbering-status" aria-live="polite">1번부터 본문·정답·해설에 같은 번호를 적용합니다.</p>
+              <label id="duplicateNumberOption" class="check-label hidden"><input id="confirmDuplicateNumbers" type="checkbox" /> 중복된 원번호를 확인했고 그대로 출력합니다.</label>
+              <details class="numbering-scope"><summary>지원 범위 확인</summary><p>일반 문항을 지원합니다. 이미지 속 번호·공유 지문·다른 문항 참조가 있는 자료는 자동 번호 변경을 지원하지 않습니다.</p></details>
+            </fieldset>
           </div>
           <div id="layoutPlanWarnings" class="layout-plan-warnings hidden" role="note" aria-live="polite"></div>
           <div id="paperStage" class="paper-stage" role="region" tabindex="0" aria-label="시험지 작업 캔버스, 현재 배율 100%. Space를 누른 채 드래그하여 이동합니다.">
@@ -447,6 +452,23 @@
       </div>
     </div>
 
+    <div id="sessionModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="sessionTitle">
+      <form id="sessionForm" class="settings-dialog session-dialog">
+        <div class="modal-head"><div><h2 id="sessionTitle">로그인</h2></div><button id="sessionClose" type="button">닫기</button></div>
+        <div class="settings-body">
+          <p id="sessionDescription">이 컴퓨터의 작업 계정입니다. 로그인하면 인식한 문항을 편집할 수 있습니다. 유료 구독은 아직 제공하지 않습니다.</p>
+          <label id="sessionNameField" class="hidden"><span>이름</span><input id="sessionName" type="text" autocomplete="name" maxlength="80" /></label>
+          <label id="sessionPasswordField"><span>비밀번호</span><input id="sessionPassword" type="password" autocomplete="current-password" minlength="10" maxlength="256" required /><small>10자 이상</small></label>
+          <p id="sessionStatus" role="status" aria-live="polite"></p>
+        </div>
+        <div class="settings-actions">
+          <button id="sessionResume" class="ghost hidden" type="button">이전 작업 열기</button>
+          <button id="sessionLogout" class="ghost hidden" type="button">로그아웃</button>
+          <button id="sessionSubmit" class="primary" type="submit">로그인</button>
+        </div>
+      </form>
+    </div>
+
     <div id="aiSettingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="aiSettingsTitle">
       <form id="aiSettingsForm" class="settings-dialog">
         <div class="modal-head"><div><h2 id="aiSettingsTitle">AI 연결 설정</h2><p>키는 이 컴퓨터의 로컬 설정에 저장되며 화면에 다시 표시되지 않습니다.</p></div><button id="aiSettingsClose" type="button">닫기</button></div>
@@ -484,6 +506,6 @@
     </div>
     <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
     <script src="/static/layout-planner.js?v=1"></script>
-    <script src="/static/app.js?v=33" type="module"></script>
+    <script src="/static/app.js?v=32" type="module"></script>
   </body>
 </html>
