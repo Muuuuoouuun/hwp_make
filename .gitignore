@@ -8,4 +8,5 @@ venv/
 /data/
 *.log
 tmp/
+/dist/
 assets/fonts/shinmyeong-jungmyeongjo/
