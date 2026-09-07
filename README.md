@@ -6,6 +6,8 @@ HWP Make는 PDF, HWP/HWPX, DOCX, 이미지, 텍스트, CSV/SQLite 자료를 문�
 
 ## 문서 역할
 
+- [웹 프로토타입 실행](docs/web_prototype.md): 로그인·내 파일 업로드·백그라운드 변환·다운로드를 실제 엔진으로 시험하는 별도 로컬 서버입니다. `pip install -r requirements.web.txt` 후 `python run_web_prototype.py`로 시작합니다.
+- [웹 서비스 전환 기획](docs/web_service_plan.md): 비공개 베타 범위, 사용자별 자료 보호, 변환 대기열, 배포 구성, 개발 순서와 출시 관문을 정리한 구현 전 제안입니다.
 - `README.md`: 실행 방법, 주요 경로, 현재 판정 기준, 검증 명령을 빠르게 확인하는 입구입니다.
 - `docs/product_b_bottleneck_specs.md`: Product B의 현재 기준과 폐기한 옛 기준을 관리하는 canonical 문서입니다.
 - `docs/priority_work_queue.md`: 지금 막아야 하는 P0/P1/P2 작업 큐입니다.
