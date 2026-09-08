@@ -92,6 +92,17 @@ def run() -> None:
         assert capabilities["mode"] == "local_preview"
         assert capabilities["billing_enabled"] is False
 
+        # Repeated saves of a page-less imported/manual question must stay valid.
+        draft = storage.create_problem({"stem": "페이지 없는 문항"})
+        for text in ("첫 번째 편집", "두 번째 편집"):
+            response = client.put(f"/api/problems/{draft['id']}", json={
+                "stem": text, "source_page": draft["source_page"],
+            })
+            check_response(response, 200)
+            draft = response.json()["item"]
+            assert draft["source_page"] is None
+            assert draft["stem"] == text
+
         for options, labels in (
             ({}, ["27", "12"]),
             ({"workspace": "premium", "numbering_mode": "preserve"}, ["27", "12"]),

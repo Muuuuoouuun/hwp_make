@@ -497,7 +497,9 @@ def update_problem(problem_id: int, data: dict[str, Any]) -> dict[str, Any]:
     for key in allowed:
         if key in data:
             assignments.append(f"{key} = :{key}")
-            values[key] = data[key] if data[key] is not None else ""
+            # A missing page stays nullable so subsequent editor saves can send
+            # the stored value back through the integer API field.
+            values[key] = data[key] if data[key] is not None or key == "source_page" else ""
     if "choices" in data:
         assignments.append("choices_json = :choices_json")
         values["choices_json"] = _json_list(data.get("choices"))

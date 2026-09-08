@@ -1,5 +1,7 @@
 import { initSimpleHelp } from "./simple-help.js";
 
+import { createStudioViews } from "./studio-views.js?v=1";
+
 const DEFAULT_EXPORT_TITLE = "새 시험지";
 const WORKSPACE_LAYOUT_KEY = "hwp-make:workspace-layout-v2";
 const PREVIEW_ZOOM_MIN = 0.5;
@@ -590,6 +592,11 @@ function syncViewPresetButtons() {
 
 function setViewPreset(preset, { announce = true } = {}) {
   if (!["all", "source", "edit", "preview"].includes(preset)) return;
+  if (typeof studioViews !== "undefined" && studioViews.active()) {
+    if (preset === "source") studioViews.openSources();
+    else studioViews.setView(preset === "preview" ? "paper" : "edit");
+    return;
+  }
   if (!desktopWorkspaceActive()) {
     setMobilePane(preset === "edit" ? "editor" : preset === "preview" ? "preview" : "source", { focus: true });
     return;
@@ -783,6 +790,10 @@ function ensurePaperBaseWidth() {
   if (!els.paperStage || !els.paperStage.clientWidth) return;
   const mode = mobileWorkspaceActive() ? "mobile" : "desktop";
   state.paperViewportMode = mode;
+  if (typeof studioViews !== "undefined" && studioViews.active()) {
+    state.paperBaseWidth = 720;
+    return;
+  }
   state.paperBaseWidth = Math.max(260, els.paperStage.clientWidth - 20);
 }
 
@@ -831,6 +842,13 @@ function fitPreviewToStage({ announce = true } = {}) {
   ensurePaperBaseWidth();
   els.paperSheet.style.setProperty("--paper-base-width", `${state.paperBaseWidth}px`);
   const widthScale = (els.paperStage.clientWidth - 20) / state.paperBaseWidth;
+  if (typeof studioViews !== "undefined" && studioViews.active()) {
+    const paperWidthScale = (els.paperStage.clientWidth - 56) / state.paperBaseWidth;
+    const paperHeightScale = (els.paperStage.clientHeight - 48) / Math.max(930, els.paperSheet.scrollHeight);
+    setPreviewZoom(Math.min(1, paperWidthScale, paperHeightScale), { announce, fit: true });
+    els.paperStage.scrollTo?.({ left: 0, top: 0, behavior: "auto" });
+    return;
+  }
   setPreviewZoom(Math.min(1, widthScale), { announce, fit: true });
   els.paperStage.scrollTo?.({ left: 0, top: 0, behavior: "auto" });
 }
@@ -1877,6 +1895,7 @@ function renderBasket() {
     empty.className = "basket-empty";
     empty.textContent = "왼쪽 문제 보관함에서 문항을 담으면 이곳에서 순서를 정할 수 있습니다.";
     els.basketList.append(empty);
+    if (typeof studioViews !== "undefined") studioViews.refresh();
     window.requestAnimationFrame(() => updatePaperCanvasSize());
     return;
   }
@@ -2018,6 +2037,7 @@ function renderBasket() {
     row.append(handle, body, actions);
     els.basketList.append(row);
   });
+  if (typeof studioViews !== "undefined") studioViews.refresh();
   window.requestAnimationFrame(() => updatePaperCanvasSize());
 }
 
@@ -2225,6 +2245,7 @@ async function selectProblem(problemId) {
   renderList();
   renderEditor();
   if (mobileWorkspaceActive()) setMobilePane("editor", { focus: true });
+  if (typeof studioViews !== "undefined") studioViews.refresh();
 }
 
 function renderEditor() {
@@ -2285,13 +2306,14 @@ function renderEditor() {
   state.draftDirty = false;
   setSaveStatus("저장됨", "saved");
   syncAIActionState();
+  if (typeof studioViews !== "undefined") studioViews.refresh();
 }
 
 function editorPayload(problem, imagePaths) {
   return {
     source_type: problem.source_type || "manual",
     source_name: els.editSource.value.trim(),
-    source_page: problem.source_page,
+    source_page: problem.source_page || null,
     number: els.editNumber.value.trim(),
     subject: els.editSubject.value.trim(),
     unit: els.editUnit.value.trim(),
@@ -4467,11 +4489,16 @@ async function initializePremiumEditor() {
   renderBasket();
   state.paperBaseWidth = 0;
   state.paperViewportMode = null;
+  if (typeof studioViews !== "undefined") studioViews.enter();
   window.requestAnimationFrame(() => {
     ensurePaperBaseWidth();
     updatePaperCanvasSize();
   });
 }
+
+const studioViews = createStudioViews({ state, els, selectProblem, resolveBasketProblem,
+  outputNumber, numberMapping, flushActiveDraft, openModal, closeModal, setSideMode,
+  currentExportTemplate, updatePaperCanvasSize, fitPreviewToStage, toast });
 
 (async function init() {
   // Every route starts with only file input. Login, old mode values, and saved

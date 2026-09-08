@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>HWPX 변환 · HWP Make</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232f56c7'/%3E%3Cpath d='M4 5h8M4 8h8M4 11h5' stroke='white' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="/static/styles.css?v=32" />
+    <link rel="stylesheet" href="/static/styles.css?v=33" />
+    <link rel="stylesheet" href="/static/studio-views.css?v=1" />
   </head>
   <body class="simple-converter-mode" data-workspace-stage="input">
     <main id="simpleConverter" class="simple-converter" aria-labelledby="simpleConverterTitle">
@@ -99,12 +100,12 @@
         <div class="brand-block">
           <span class="brand-mark" aria-hidden="true">H</span>
           <div>
-            <h1>프리미엄 시험지 스튜디오</h1>
+            <h1>HWP MAKE <span class="studio-brand-suffix">/ Studio</span></h1>
             <p id="statusText">가져온 문제 준비 중</p>
           </div>
         </div>
         <div class="topbar-actions">
-          <div class="view-switcher" role="group" aria-label="작업공간 보기">
+          <div class="view-switcher legacy-view-switcher" role="group" aria-label="작업공간 보기">
             <button class="view-preset active" type="button" data-view-preset="all" aria-label="전체 패널 보기" aria-pressed="true" title="전체 패널 보기">
               <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="4" width="4" height="12" rx="1"/><rect x="8" y="4" width="4" height="12" rx="1"/><rect x="13.5" y="4" width="4" height="12" rx="1"/></svg>
             </button>
@@ -118,7 +119,15 @@
               <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 5h5.5M2.5 10h5.5M2.5 15h5.5"/><rect class="preset-emphasis" x="10.5" y="3" width="7" height="14" rx="1.4"/></svg>
             </button>
           </div>
+          <div class="studio-view-switcher" role="group" aria-label="프리미엄 보기">
+            <button type="button" data-studio-view="edit" aria-pressed="true">편집</button>
+            <button type="button" data-studio-view="paper" aria-pressed="false">시험지</button>
+            <button type="button" data-studio-view="order" aria-pressed="false">순서</button>
+          </div>
+          <div id="studioHeaderActions" class="studio-header-actions"></div>
+          <details class="studio-utility"><summary>더 보기</summary><div id="studioUtilities"></div></details>
           <span id="saveStatus" class="save-status" aria-live="polite">변경 없음</span>
+          <span class="studio-local-label" title="로컬 편집 미리보기입니다. 유료 이용권과 결제는 아직 제공하지 않습니다.">로컬 미리보기</span>
           <button id="simpleModeButton" class="utility-button" type="button" title="파일 하나를 바로 HWPX로 바꾸는 간단 화면으로 이동">
             <span>파일 화면</span>
           </button>
@@ -133,6 +142,15 @@
         </div>
       </header>
 
+      <section class="studio-context" aria-label="현재 시험지">
+        <div id="studioTitleHost"></div>
+        <div class="studio-context-actions">
+          <button id="studioAddSource" type="button">자료 추가</button>
+          <button id="studioEditSelected" type="button">선택 문항 편집</button>
+          <button id="studioOpenSettings" type="button">번호·출력 설정</button>
+        </div>
+      </section>
+
       <p id="premiumPreviewNotice" class="premium-preview-notice" role="status">로컬 내부 미리보기 · 유료 이용권과 결제는 아직 제공하지 않습니다.</p>
       <section class="workflow-strip" aria-label="작업 단계">
         <button class="workflow-step active" type="button" data-workflow-step="1" data-mobile-pane="source" aria-pressed="true"><span>1</span><b>자료 가져오기</b></button>
@@ -143,6 +161,16 @@
       </section>
 
       <section id="workspace" class="workspace" aria-label="문항 제작 작업공간" tabindex="-1">
+        <nav id="studioNav" class="studio-nav" aria-label="시험지 문항">
+          <div class="studio-nav-heading"><h2>문항 목록</h2><span id="studioNavCount"></span></div>
+          <div id="studioQuestionNav"></div>
+          <p class="studio-nav-help">문항을 선택해 내용을 확인하세요.</p>
+        </nav>
+        <section id="studioOrderPane" class="studio-order-pane" aria-labelledby="studioOrderTitle">
+          <div class="studio-order-heading"><h2 id="studioOrderTitle">문항 순서</h2><p>끌어서 이동 · Alt + ↑↓로 순서 변경</p></div>
+          <div id="studioOrderList"></div>
+        </section>
+        <aside id="studioInspector" class="studio-inspector" aria-label="번호와 출력 설정"></aside>
         <aside id="sourceWorkPane" class="work-pane source-pane" aria-label="자료와 문제 보관함">
           <div class="pane-tabs" role="tablist" aria-label="왼쪽 패널 전환">
             <button id="sourceTab" class="pane-tab active" type="button" role="tab" data-side-mode="source" aria-selected="true" aria-controls="sourcePanel" tabindex="0">자료 가져오기</button>
@@ -380,6 +408,7 @@
               </div>
               <div class="paper-subhead"><span id="paperLayoutHint">선택한 양식은 1단으로 출력됩니다.</span><span id="paperColumnLabel">1단</span></div>
               <div id="basketList" class="basket-list"></div>
+              <div id="studioDocumentContent" class="studio-document-content"></div>
             </div>
             </div>
           </div>
@@ -396,6 +425,12 @@
       </section>
     </main>
 
+    <div id="studioSourceModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="studioSourceTitle">
+      <section class="studio-drawer"><div class="modal-head"><h2 id="studioSourceTitle">자료와 문제 보관함</h2><button id="studioSourceClose" type="button">닫기</button></div><div id="studioSourceHost"></div></section>
+    </div>
+    <div id="studioSettingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="studioSettingsTitle">
+      <section class="studio-settings-dialog"><div class="modal-head"><h2 id="studioSettingsTitle">번호·출력 설정</h2><button id="studioSettingsClose" type="button">닫기</button></div><div id="studioSettingsHost"></div></section>
+    </div>
     <div id="previewModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="previewModalTitle">
       <div class="preview-dialog">
         <div class="modal-head"><div><h2 id="previewModalTitle">HWPX 렌더 미리보기</h2><span id="previewNote" class="hint"></span></div><button id="previewClose" type="button">닫기</button></div>
@@ -506,6 +541,6 @@
     </div>
     <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
     <script src="/static/layout-planner.js?v=1"></script>
-    <script src="/static/app.js?v=32" type="module"></script>
+    <script src="/static/app.js?v=33" type="module"></script>
   </body>
 </html>
