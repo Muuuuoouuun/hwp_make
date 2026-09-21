@@ -1,0 +1,25 @@
+{
+  "package": "rhwp-python",
+  "version": "0.7.0+nativecell1",
+  "core_version": "0.7.13",
+  "core_repository": "https://github.com/edwardkim/rhwp",
+  "core_commit": "ce45231c0c88efd5397d8fae9cd7d73de915095d",
+  "binding_repository": "https://github.com/DanMeon/rhwp-python",
+  "binding_commit": "c42f46aee3959c7caa33db771c0addc1a8302e61",
+  "target": "x86_64-pc-windows-msvc",
+  "python_abi": "abi3-py310",
+  "rust": "1.98.1",
+  "maturin": "1.15.0",
+  "cargo_xwin": "0.23.1",
+  "host": "Ubuntu in WSL on Windows",
+  "artifacts": {
+    "Cargo.lock": "894f4c96d50cdc42eee783a4f3b67bac4e5003cd98bf89f40fd4257cebc84269",
+    "README.md": "05234ade6ed2f786492a528a7965b767c788bbdb095817f2db6af7dd7e88e51b",
+    "rebuild-windows.sh": "d6bcf50dab614ccfeb4b9772134fdb73c12a21f7943024c3b7c44a4c7aa8e358",
+    "rhwp-core.LICENSE": "d6ea0e91bf1e6136b606e288e7e22dc44e39b4f087d4bdcde2bd0d8aaf5314dd",
+    "rhwp-core.patch": "ff95d4d9b435c2636c32b9ec7c522488458419f26193963168b6b9af67b103c1",
+    "rhwp-python.LICENSE": "a2648a14c45481193a27a5d37a5016b23688403c2d1fd0f51844ab8e12cebe77",
+    "rhwp-python.patch": "0e74eefd2f5d30be4c1634c26c762ee42409b921856fff538247083f688dc649",
+    "wheels/rhwp_python-0.7.0+nativecell1-cp310-abi3-win_amd64.whl": "656860ac2eae43bee5a91796bdee3e86eb31e393fc557852b58fae325627b6f7"
+  }
+}

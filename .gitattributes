@@ -2,3 +2,8 @@
 *.hwp binary
 *.hwpx binary
 *.png binary
+
+# Preserve the exact bytes verified by the renderer artifact manifest.
+packaging/renderer/** -text whitespace=cr-at-eol
+# A blank context line in a unified diff consists of one required space.
+packaging/renderer/*.patch whitespace=-blank-at-eol,cr-at-eol

@@ -7,6 +7,7 @@ root = Path(SPECPATH).parent
 vendor = root / "app" / "_vendor"
 sys.path.insert(0, str(vendor))
 datas = [(str(root / "packaging" / "basic-static"), "static"),
+         (str(root / "app" / "data"), "app/data"),
          (str(root / "packaging" / "app.ico"), "."),
          (str(root / "packaging" / "BASIC-README.txt"), "."),
          (str(root / "tmp" / "desktop-build" / "licenses"), "licenses")]

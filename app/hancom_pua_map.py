@@ -32,6 +32,7 @@ _OPERATORS: dict[int, str] = {
     0xE056: ">", 0xE05B: "∫", 0xE05C: "√", 0xE067: "∑",
     0xE06D: "□",  # Structure placeholder/fraction rule glyph used by layout repair passes.
     0xE06E: "⃗",
+    0xE0C8: "°",  # Render-verified angle degree sign (2026-06 grade-1 math).
     0xE03E: "",  # Structural spacer before script-sized glyphs; rendering it as □ breaks formulas.
     0xE078: "(", 0xE079: "{", 0xE07A: "", 0xE07B: "|", 0xE101: "|",
 }

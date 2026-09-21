@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import re
+
 import logging
 import io
 import os
@@ -161,6 +163,13 @@ def _local_name(element: etree._Element) -> str:
 
 def _strip_section_layout_caches(payload: bytes) -> bytes:
     root = parse_xml(payload)
+    # Named editable question drawings carry regenerated line caches and fixed
+    # extents. Removing those caches makes static readers draw edited prose as
+    # one overflowing line. Ordinary documents retain the existing policy.
+    if any(_local_name(node) == "drawText"
+           and re.fullmatch(r"question:v\d+:q\d{2}", node.get("name", ""))
+           for node in root.iter()):
+        return payload
     removed = False
     for parent in root.iter():
         for child in list(parent):

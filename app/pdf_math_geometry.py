@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 import statistics
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 from . import math_text
@@ -127,6 +127,117 @@ def _glyphs(line_geometries: list[dict[str, Any]]) -> list[Glyph]:
 def line_geometry_glyphs(line_geometries: list[dict[str, Any]]) -> list[Glyph]:
     """Public view of the per-character geometry of one recognized problem."""
     return _glyphs(line_geometries)
+
+
+def recover_native_radicals(lines, *, source_page):
+    """Join only source-proven radical operands before native paragraph flow.
+
+    Read the actual continuous vinculum, not the tall equation glyph's centre.
+    Preserve every glyph outside that horizontal extent, including a suffix
+    emitted in the same PDF span. Ambiguous/nested structures stay unresolved.
+    """
+    from copy import deepcopy
+    import fitz
+    import numpy as np
+    from . import pdf_layout_writer as w
+
+    records = []
+    for li, line in enumerate(lines):
+        for si, span in enumerate(line.get("spans", [])):
+            if not w.is_hancom_eq_font(str(span.get("font", ""))):
+                continue
+            for ci, char in enumerate(span.get("chars", [])):
+                rect = fitz.Rect(char["bbox"])
+                records.append({"key": (li, si, ci), "char": char, "span": span,
+                                "rect": rect, "text": w._pdf_output_text(char.get("c", ""))})
+    consumed, replacements = set(), {}
+    bars = [r for r in records if r["char"].get("c") == w._HANCOM_FRACTION_RULE_CHAR]
+    for sign in [r for r in records if r["text"] == "√"]:
+        sr = sign["rect"]
+        matches = [r for r in bars if r["key"] not in consumed
+                   and abs(r["rect"].x0-sr.x1) < 2
+                   and r["rect"].y0 <= (sr.y0+sr.y1)/2 <= r["rect"].y1]
+        if len(matches) != 1:
+            continue
+        bar = matches[0]
+        br = bar["rect"]
+        pix = source_page.get_pixmap(matrix=fitz.Matrix(3, 3), clip=br, alpha=False)
+        if not pix.width or not pix.height:
+            continue
+        pixels = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height,pix.width,pix.n)
+        ink = pixels[:,:,:3].mean(axis=2) < 200
+        rows = []
+        for y, row in enumerate(ink):
+            edges = np.diff(np.r_[False,row,False].astype(np.int8))
+            runs = np.flatnonzero(edges == -1)-np.flatnonzero(edges == 1)
+            if (len(runs) and runs.max() >= pix.width*.85
+                    and abs((pix.y+y+.5)/3-sr.y0) <= sr.height*.4):
+                rows.append(y)
+        if not rows or rows[-1]-rows[0] > max(4, br.height*.16*3):
+            continue
+        rule_y = (pix.y + statistics.median(rows)+.5)/3
+        candidates = [r for r in records if r["key"] not in consumed
+                      and r is not sign and r is not bar and r["text"].strip()
+                      and br.x0-.8 <= r["rect"].x0 and r["rect"].x1 <= br.x1+.8
+                      and rule_y < (r["rect"].y0+r["rect"].y1)/2 <= sr.y1+sr.height*.25]
+        if not candidates or any(r["text"] in ("√", "□", "▢") for r in candidates):
+            continue
+        glyphs = [Glyph(r["text"], *r["rect"], float(r["span"]["size"]),r["key"][0])
+                  for r in candidates]
+        text = _inline_expression(glyphs)
+        if not text or re.search(r"[가-힣]",text):
+            continue
+        size = _baseline(glyphs)[0]
+        baseline = [r for r in candidates if float(r["span"]["size"]) >= size*.82]
+        origins = [r["char"].get("origin",r["span"].get("origin"))[1] for r in baseline]
+        if max(origins)-min(origins) > size*.25:
+            continue
+        expression = "$\\sqrt{"+text+"}$"
+        bounds = fitz.Rect(sr)
+        for r in candidates:
+            bounds |= r["rect"]
+        origin = (bounds.x0, statistics.median(origins))
+        copy = deepcopy(sign["span"])
+        copy.update(text=expression,size=size,bbox=tuple(bounds),origin=origin,
+                    chars=[{"c":expression.strip("$"),"bbox":tuple(bounds),"origin":origin}])
+        copy["source_radical_chars"] = [deepcopy(r["char"]) for r in [sign,bar,*candidates]]
+        replacements[sign["key"]] = copy
+        consumed.update(r["key"] for r in [sign,bar,*candidates])
+    if not consumed:
+        return deepcopy(lines)
+    output = []
+    for li, line in enumerate(lines):
+        copied = deepcopy(line)
+        spans = []
+        for si, span in enumerate(line.get("spans", [])):
+            buffer = []
+            def flush():
+                if not buffer:
+                    return
+                retained = deepcopy(span)
+                retained["chars"] = deepcopy(buffer)
+                retained["text"] = "".join(c["c"] for c in buffer)
+                retained["bbox"] = tuple(w._union_rect([fitz.Rect(c["bbox"]) for c in buffer]))
+                retained["origin"] = buffer[0].get("origin",span.get("origin"))
+                spans.append(retained)
+                buffer.clear()
+            chars = span.get("chars", [])
+            if not chars:
+                spans.append(deepcopy(span))
+            for ci,char in enumerate(chars):
+                key = (li,si,ci)
+                if key in consumed:
+                    flush()
+                    if key in replacements:
+                        spans.append(replacements[key])
+                else:
+                    buffer.append(char)
+            flush()
+        if spans:
+            copied["spans"] = spans
+            copied["bbox"] = w._union_rect([fitz.Rect(s["bbox"]) for s in spans])
+            output.append(copied)
+    return output
 
 
 def _mark_glyph_near_bar(
@@ -801,8 +912,10 @@ def _bar_contains(outer: Glyph, inner: Glyph, pad: float = 1.5) -> bool:
     return (
         outer.left - pad <= inner.left
         and inner.right <= outer.right + pad
-        and outer.top - pad <= inner.top
-        and inner.bottom <= outer.bottom + pad
+        # Equation-font em boxes extend beyond their visible horizontal rule.
+        # A root in the numerator can start above the outer fraction's em box;
+        # its centre still lies inside that box and identifies the nesting.
+        and outer.top - max(pad, outer.height * 0.5) <= inner.center_y <= outer.bottom + pad
     )
 
 
@@ -933,6 +1046,11 @@ def _resolve_bar_structure(
 
     split = _bar_row_parts(candidates)
     if split is None:
+        value = _inline_expression(candidates)
+        if (candidates and all(glyph.center_y > bar.center_y for glyph in candidates)
+                and re.fullmatch(r"[A-Za-z]{1,4}", value)):
+            consumed_ids.update(id(glyph) for glyph in candidates)
+            return _synthetic_glyph(rf"\overline{{{value}}}", candidates, bar)
         return None
     upper, lower = split
     numerator = _inline_expression(upper)
@@ -1997,6 +2115,88 @@ def reconstruct_condition_math_lines(line_geometries: list[dict[str, Any]]) -> l
             if value and value not in result:
                 result.append(value)
     return result
+
+
+def reconstruct_stacked_math_rows(
+    stem: str, geometry: list[dict[str, Any]]
+) -> tuple[str, list[dict[str, Any]]]:
+    """Rebuild complete physical rows before text heuristics consume operands.
+
+    All donor glyphs must be accounted for. Resolve nested roots and fractions
+    together, then order their surrounding text and overlines on the baseline.
+    Removing the repaired geometry prevents later fallback passes from repairing
+    the same source a second time and scrambling the newly assembled equation.
+    """
+    glyphs = _glyphs(geometry)
+    bars = [glyph for glyph in glyphs if glyph.text in _PLACEHOLDER_CHARS]
+    consumed: set[int] = set()
+    original_ids = {id(glyph) for glyph in glyphs}
+    resolved: list[tuple[Glyph, set[int]]] = []
+    for bar in sorted(bars, key=_bar_area, reverse=True):
+        if id(bar) in consumed:
+            continue
+        used: set[int] = set()
+        token = _resolve_bar_structure(glyphs, bars, bar, used)
+        if token is None:
+            above, below = _fraction_parts(glyphs, bar)
+            value = _inline_expression(below)
+            if not above and re.fullmatch(r"[A-Za-z]{1,4}", value):
+                token = _synthetic_glyph(rf"\overline{{{value}}}", below, bar)
+                used = {id(bar), *(id(glyph) for glyph in below)}
+        # Nested resolution also tracks temporary tokens. Their object ids can
+        # be reused by the next root, so only original PDF glyphs may persist.
+        used.intersection_update(original_ids)
+        if token is not None and not (used & consumed):
+            consumed.update(used)
+            resolved.append((token, used))
+    working = [glyph for glyph in glyphs if id(glyph) not in consumed]
+    working.extend(token for token, _ in resolved)
+    removed_lines: set[int] = set()
+    for anchor, _ in resolved:
+        if anchor.line_index in removed_lines:
+            continue
+        nearby_tokens = [
+            token for token, _ in resolved
+            if abs(token.center_y - anchor.center_y) <= 8
+        ]
+        if len(nearby_tokens) < 2:
+            continue
+        center = statistics.median(token.center_y for token in nearby_tokens)
+        row = [
+            glyph for glyph in working
+            if abs(glyph.center_y - center) <= max(8, glyph.height * 0.55)
+        ]
+        if row:
+            baseline_size, _ = _baseline(row)
+            normal_height = statistics.median(
+                glyph.height for glyph in row if glyph.size >= baseline_size * 0.9
+            )
+            left, right = min(glyph.left for glyph in row), max(glyph.right for glyph in row)
+            row.extend(
+                glyph for glyph in working if glyph not in row
+                and 0 < glyph.size <= baseline_size * 0.82
+                and abs(glyph.center_y - center) <= normal_height
+                and left <= glyph.center_x <= right + normal_height * 0.5
+            )
+        if any(_CHOICE_RE.match(glyph.text) or glyph.text in _PLACEHOLDER_CHARS for glyph in row):
+            continue
+        row_ids = {id(glyph) for glyph in row}
+        source_ids = row_ids | set().union(*(
+            used for token, used in resolved if id(token) in row_ids
+        ))
+        involved = {glyph.line_index for glyph in glyphs if id(glyph) in source_ids}
+        if any(glyph.line_index in involved and id(glyph) not in source_ids for glyph in glyphs):
+            continue
+        mapping = _stem_geometry_map(stem, geometry)
+        if not involved <= set(mapping):
+            continue
+        candidate, changed = _replace_geometry_lines(
+            stem, geometry, involved, wrap_inline_math_text(_inline_expression(row))
+        )
+        if changed:
+            stem = candidate
+            removed_lines.update(involved)
+    return stem, [line for index, line in enumerate(geometry) if index not in removed_lines]
 
 
 def repair_problem_math_layout(

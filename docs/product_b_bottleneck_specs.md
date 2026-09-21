@@ -1,8 +1,8 @@
 # Product B 기준 정리
 
-Updated: 2026-07-09
+Updated: 2026-09-09
 
-제품 B = **입력 PDF/이미지 → 원본과 같은 레이아웃의 편집형 HWPX**(좌표 기반 PDF 재구성, writer=`app/pdf_layout_writer.py`). 2026-07-09 기준 `/api/pdf-layout-export`는 `write_pdf_layout_hwpx()` 좌표 기반 경로를 기본으로 사용하고, rhwp 렌더 비교로 전체 페이지 `layout_view_sync_ratio` 0.94+를 검증합니다. 저장소가 병렬 편집 중이라 핫파일은 **append-only + 신규 키/컬럼 가드**로 3-way merge 충돌을 최소화합니다.
+제품 B = **입력 PDF/이미지 → 원본 흐름과 편집성을 보존하는 HWPX**. 2026-09-09부터 `/api/pdf-layout-export`는 `write_pdf_structured_hwpx()`를 사용합니다. 본문 이미지 덮개, 잘게 나눈 크롭, 좌표 고정 글상자를 성공 수단으로 쓰지 않습니다. [PDF 편집성 검증 기준](native_pdf_editability.md)이 아래 과거 조사 메모보다 우선합니다. 원본 레이아웃 목표는 계속 유지하며, 실제 렌더가 미달이면 통과로 표시하지 않습니다.
 
 Product B는 입력 PDF/HWP/HWPX를 평가원/교육청 시험지에 가까운 편집형 HWPX로 복원하는 작업입니다. 이 문서는 예전 병목 조사 메모를 현재 개발 기준으로 정리한 canonical 문서입니다.
 
@@ -21,7 +21,7 @@ Product B는 입력 PDF/HWP/HWPX를 평가원/교육청 시험지에 가까운 �
 - 네 개 로컬 수학 PDF 샘플 기준으로 선택지 분수 placeholder는 제거되었고, 단순 stem stacked fraction, log-base residue, 확정 split vector residue까지 복원되었습니다.
 - 현재 로컬 baseline은 `stem□` 48개, malformed equation 0, render overflow 0입니다. residual bucket은 fraction 13, root 7, vector/arrow 6, cases/grouping 13, adjacent script/structure 9입니다.
 - 남은 핵심 병목은 mixed fraction, root, super/subscript, cases, bbox 기반 vector base 추론입니다. QA 리포트는 실제 출력 잔여 placeholder와 원본 PDF 구조 힌트를 분리해서 기록합니다.
-- PDF 원본 레이아웃 HWPX는 좌표 기반 writer가 canonical입니다. 흐름 기반 writer는 2단 flow 재구성 실험 경로로 유지합니다.
+- PDF 내보내기의 현재 기준은 일반 문단·실제 표·네이티브 수식입니다. 좌표 기반 저수준 writer는 공개 API의 우회 경로로 사용할 수 없습니다.
 - 폰트/간격 기본 profile은 평가원형 `신명조/HY신명조/신명 중명조 + Times New Roman + 돋움/중고딕`, 본문 10-11pt, 줄간격 160-170%, 장평 약 95, 자간 약 -5입니다.
 
 ## 현재 Canonical 기준
@@ -29,7 +29,7 @@ Product B는 입력 PDF/HWP/HWPX를 평가원/교육청 시험지에 가까운 �
 ### 1. 입력 경로는 두 개로 분리한다
 
 - 문제은행 편집 경로: `/api/import` -> recognition/storage -> `hwpx_writer_v2`
-- 원본 레이아웃 복원 경로: `/api/pdf-layout-export` -> `pdf_layout_writer.write_pdf_layout_hwpx`
+- 원본 레이아웃 복원 경로: `/api/pdf-layout-export` -> `pdf_layout_writer.write_pdf_structured_hwpx` -> 실제 패키지와 원문 독립 검증
 
 두 경로를 한 성공 기준으로 섞지 않습니다. 문제은행 경로는 문항 단위 재구성이 목표이고, PDF 원본 레이아웃 경로는 원본 시험지 흐름과 배치를 유지하는 것이 목표입니다.
 
@@ -39,7 +39,7 @@ Born-digital 평가원/학평 PDF는 텍스트, PUA, 글리프 좌표가 남아 
 
 ### 3. 전체 페이지 이미지 fallback은 성공이 아니다
 
-`/api/pdf-layout-export` 경로에서 full-page raster fallback은 금지 기준입니다. 편집 가능한 텍스트와 네이티브 수식이 우선이고, 그림/도표/복원 불확실 영역만 지역 이미지 fallback으로 보존합니다.
+`/api/pdf-layout-export` 경로에서 전체 페이지뿐 아니라 본문·수식 영역의 지역 이미지 덮개도 금지합니다. 여러 작은 크롭의 합집합이 본문을 덮는지도 검사합니다. 출처가 검증되는 실제 그림·도표만 이미지로 허용합니다.
 
 ### 4. 수식은 Hancom EQN 네이티브로 유지한다
 

@@ -2520,6 +2520,8 @@ class HwpxDocument:
 
     def _run_pre_save_validation(self) -> None:
         """Raise if validate_on_save is enabled and the document is invalid."""
+        from .tools.question_reflow import refresh_question_layout
+        refresh_question_layout(self)
         if not self.validate_on_save:
             return
         report = self.validate()
@@ -2573,6 +2575,8 @@ class HwpxDocument:
         When ``reset_dirty`` is ``False``, the document remains marked as
         modified after the archive snapshot is generated.
         """
+        from .tools.question_reflow import refresh_question_layout
+        refresh_question_layout(self)
         updates = self._root.serialize()
         if updates:
             for part_name, payload in updates.items():
@@ -2591,6 +2595,8 @@ class HwpxDocument:
     def _to_bytes_for_validation(self) -> bytes:
         """Serialize current state for document validation without handing bytes to callers."""
 
+        from .tools.question_reflow import refresh_question_layout
+        refresh_question_layout(self)
         updates = self._root.serialize()
         return self._package._save_bytes_unchecked(
             updates,

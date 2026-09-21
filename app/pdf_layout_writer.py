@@ -7,6 +7,7 @@ page coordinates using editable HWPX drawing text boxes.
 from __future__ import annotations
 
 import io
+import hashlib
 import math
 import os
 import re
@@ -2437,7 +2438,7 @@ def _iter_text_spans(page: fitz.Page) -> list[dict[str, Any]]:
 
 def _iter_text_lines(page: fitz.Page) -> list[dict[str, Any]]:
     lines: list[dict[str, Any]] = []
-    for block in page.get_text("rawdict").get("blocks", []):
+    for block in page.get_text("rawdict", flags=fitz.TEXTFLAGS_RAWDICT & ~fitz.TEXT_PRESERVE_IMAGES).get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
@@ -2457,11 +2458,14 @@ def _iter_text_lines(page: fitz.Page) -> list[dict[str, Any]]:
                 copied["text"] = text
                 copied["chars"] = chars
                 copied["bbox"] = tuple(rect)
+                from .pdf_source_characters import normalize_source_span
+                copied = normalize_source_span(copied)
                 spans.append(copied)
             if not spans:
                 continue
             lines.append({"spans": spans, "bbox": _union_rect([fitz.Rect(span["bbox"]) for span in spans])})
-    return lines
+    from .pdf_source_characters import restore_bitmap_characters
+    return restore_bitmap_characters(page, lines)
 
 
 def _union_rect(rects: list[fitz.Rect]) -> fitz.Rect:
@@ -5593,6 +5597,9 @@ def _flow_native_table_items(
             if row_index is not None and column_index is not None:
                 cells[row_index][column_index].append(span)
 
+        from .pdf_source_characters import source_spans_in_cell
+        cells = [[source_spans_in_cell(spans, fitz.Rect(x_boundaries[c], y_boundaries[r], x_boundaries[c+1], y_boundaries[r+1]))
+                  for c in range(column_count)] for r in range(row_count)]
         populated_rows = sum(1 for row in cells if sum(bool(cell) for cell in row) >= 2)
         if populated_rows < 2:
             continue
@@ -6309,6 +6316,32 @@ def _raster_native_table_items(
         populated = [row for row in row_spans if row]
         if len(populated) < 2 or sum(len(row) for row in populated) < 4:
             continue
+        # Stacked chart bars have paired horizontal edges separated by blank
+        # bands. Their labels move with segment widths, unlike a table's
+        # aligned numeric columns. Do not infer a grid from those bars.
+        gx0, gy0, gx1, gy1 = map(round, grid)
+        band = dark[max(0, gy0):min(dark.shape[0], gy1 + 1),
+                    max(0, gx0 - 2):min(dark.shape[1], gx1 + 3)]
+        rails = _binary_runs(np.mean(band, axis=0) >= .85, minimum=1) if band.size else []
+        if len(rails) < 2:
+            if len(populated) < len(row_spans):
+                continue
+            numeric = all(re.fullmatch(r"[+−-]?\d+(?:[.,]\d+)?%?", _pdf_output_text(s["text"]).strip())
+                          for row in populated for s in row)
+            if numeric:
+                ordered = [sorted(row, key=lambda s: s["bbox"][0]) for row in populated]
+                if len({len(row) for row in ordered}) != 1:
+                    continue
+                aligned = True
+                for column in zip(*ordered):
+                    positions = [[s["bbox"][0], (s["bbox"][0] + s["bbox"][2]) / 2, s["bbox"][2]]
+                                 for s in column]
+                    tolerance = max(float(s.get("size") or 0) for s in column) * .4
+                    if min(max(axis) - min(axis) for axis in zip(*positions)) > tolerance:
+                        aligned = False
+                        break
+                if not aligned:
+                    continue
         reference = max(populated, key=len)
         centers = sorted((fitz.Rect(span["bbox"]).x0 + fitz.Rect(span["bbox"]).x1) / 2.0 for span in reference)
         clustered_centers = _cluster_flow_axes(centers, tolerance=14.0)
@@ -8160,6 +8193,10 @@ def write_pdf_flow_hwpx(
 
 def _structured_pdf_template_key(filename: str, exam_title: str) -> str:
     name = filename.lower()
+    if any(word in name for word in ("과학", "물리", "화학", "생명", "science")):
+        return "kice_science"
+    if any(word in name for word in ("한국사", "사회", "지리", "윤리", "역사", "경제", "정치", "history", "social")):
+        return "kice_social"
     if "국어" in name or "korean" in name:
         return "kice_korean"
     if "영어" in name or "english" in name:
@@ -8184,12 +8221,15 @@ def _structured_hwpx_counts(path: Path) -> dict[str, int]:
         "column_breaks": 0,
         "two_column_page_tables": 0,
         "running_header_tables": 0,
+        "section_count": 0,
+        "section_breaks": 0,
     }
     with zipfile.ZipFile(path) as archive:
         for name in archive.namelist():
             if not re.fullmatch(r"Contents/section\d+\.xml", name):
                 continue
             root = etree.fromstring(archive.read(name))
+            counts["section_count"] += 1
             counts["native_equations"] += len(root.findall(f".//{{{HP}}}equation"))
             counts["draw_text_boxes"] += len(root.findall(f".//{{{HP}}}drawText"))
             counts["paragraphs"] += len(root.findall(f".//{{{HP}}}p"))
@@ -8228,21 +8268,20 @@ def _structured_hwpx_counts(path: Path) -> dict[str, int]:
             counts["column_breaks"] += sum(
                 1 for paragraph in root.findall(f".//{{{HP}}}p") if paragraph.get("columnBreak") == "1"
             )
+    counts["section_breaks"] = max(0, counts["section_count"] - 1)
     return counts
 
 
 def _structured_hwpx_plain_text(path: Path) -> str:
+    from .pdf_native_text import body_text
+
     chunks: list[str] = []
     with zipfile.ZipFile(path, "r") as archive:
         for name in archive.namelist():
             if not re.fullmatch(r"Contents/section\d+\.xml", name):
                 continue
             root = etree.fromstring(archive.read(name))
-            chunks.extend(
-                str(node.text or "")
-                for node in root.findall(f".//{{{HP}}}t")
-                if str(node.text or "")
-            )
+            chunks.append(body_text(root, include_equations=False))
     return re.sub(r"\s+", "", "".join(chunks))
 
 
@@ -8252,6 +8291,7 @@ def _structured_editable_text_fragments(items: list[dict[str, Any]]) -> list[str
         values = [
             str(item.get("stem") or ""),
             *(str(choice or "") for choice in item.get("choices") or []),
+            *(str(cell or "") for table in item.get("tables") or [] for row in table for cell in row),
             *(
                 str(line or "")
                 for block in (item.get("condition_blocks") or [])
@@ -8268,14 +8308,11 @@ def _structured_editable_text_fragments(items: list[dict[str, Any]]) -> list[str
         ]
         for value in values:
             for line in value.splitlines():
-                plain = "".join(
-                    segment
-                    for segment, is_math in math_text.split_math_text(line)
-                    if not is_math
-                )
-                compact = re.sub(r"\s+", "", plain)
-                if len(compact) >= 4:
-                    fragments.append(compact)
+                for segment, is_math in math_text.split_math_text(line):
+                    if not is_math:
+                        compact = re.sub(r"\s+", "", segment)
+                        if len(compact) >= 4:
+                            fragments.append(compact)
     return fragments
 
 
@@ -9891,19 +9928,20 @@ def write_pdf_structured_hwpx(
     max_pages: int | None = None,
     template_key: str | None = None,
     native_math: bool = True,
-    high_fidelity_math: bool = True,
+    high_fidelity_math: bool = False,
     math_ai_recognition: bool = False,
     math_ai_model: str | None = None,
     variant_policy: str = "all",
 ) -> dict[str, Any]:
     """Write editable HWPX with deterministic math recovery.
 
-    The high-fidelity path combines editable text/equations with regional
-    visual overlays. Pure reflow is available via high_fidelity_math=False.
+    Body text is ordinary reflowing paragraphs with inline native equations.
+    The legacy high_fidelity_math argument is retained for caller compatibility;
+    it must never enable source-image overlays or positioned text boxes.
     All source forms are retained unless variant_policy='first' is requested.
     """
     from . import hwpx_writer_v2, importers
-    from .pdf_math_geometry import repair_problem_math_layout
+    from .pdf_math_geometry import repair_problem_math_layout, reconstruct_stacked_math_rows
     from .recognition.pipeline import recognize_pdf
 
     pdf_path = Path(pdf_path)
@@ -9961,10 +9999,22 @@ def write_pdf_structured_hwpx(
         if second_numbers and min(second_numbers) <= 5 and variant_overlap_ratio >= 0.80:
             variant_page_limit = half_pages
 
+    if resolved_template != "kice_math" or not math_ai_recognition:
+        from .pdf_native_content import write_native_content
+
+        return write_native_content(
+            pdf_path, output_path, title=title, template=resolved_template,
+            recognized=recognized, page_limit=min(total_recognized_pages, max_pages or total_recognized_pages,
+                                                 variant_page_limit or total_recognized_pages),
+            native_math=native_math, variant_policy=variant_policy,
+            variant_page_limit=variant_page_limit, variant_overlap_ratio=variant_overlap_ratio,
+        )
+
     items: list[dict[str, Any]] = []
     seen: set[tuple[int, str, str, tuple[str, ...]]] = set()
     duplicate_count = 0
     figure_count = 0
+    image_provenance: list[dict[str, Any]] = []
     unreliable_count = 0
     repair_totals = {
         "matrices": 0,
@@ -9979,6 +10029,7 @@ def write_pdf_structured_hwpx(
     }
     recognized_problem_count = 0
     variant_duplicate_problem_count = 0
+    page_fraction_scripts: dict[int, set[str]] = {}
 
     for problem in recognized.problems:
         page_number = int(getattr(problem, "page_number", 0) or 0)
@@ -9996,12 +10047,36 @@ def write_pdf_structured_hwpx(
         source_choice_labels = re.findall(r"[①②③④⑤]", source_problem_text)
         source_choice_order_noncanonical = source_choice_labels[:5] != sorted(source_choice_labels[:5])
         geometry = list(getattr(problem, "line_geometries", []) or [])
+        raw_geometry_text = "\n".join(str(line.get("text") or "") for line in geometry)
+        rebuilt_text, unrepaired_geometry = reconstruct_stacked_math_rows(raw_geometry_text, geometry)
+        rebuilt_stem = None
+        if len(unrepaired_geometry) < len(geometry):
+            # Recognition may have already guessed an incorrect flattened
+            # formula. Rebuild against untouched glyph lines before splitting
+            # choices so all original operand donors can still be located.
+            rebuilt_stem, choices = importers._split_stem_and_choices(rebuilt_text)
+            stem = rebuilt_stem
         geometry_split = importers._split_stem_and_choices_from_pdf_geometry(
             source_problem_text,
             geometry,
         )
+        fraction_choices_verified = False
         if geometry_split is not None:
             geometry_stem, geometry_choices = geometry_split
+            fraction_choices = [choice for choice in geometry_choices if r"\frac{" in choice]
+            if fraction_choices:
+                if page_number not in page_fraction_scripts:
+                    from .pdf_native_content import recover_stacked_fractions
+                    with fitz.open(pdf_path) as source_document:
+                        source_page = source_document[page_number - 1]
+                        _, fractions = recover_stacked_fractions(_iter_text_lines(source_page), [], [], source_page=source_page)
+                    page_fraction_scripts[page_number] = {
+                        re.sub(r"\s+", "", _hancom_eqn_script(value) or value) for value in fractions
+                    }
+                fraction_choices_verified = all(
+                    re.sub(r"\s+", "", _hancom_eqn_script(value) or value)
+                    in page_fraction_scripts[page_number] for value in fraction_choices
+                )
             geometry_placeholder_count = importers._placeholder_count_in_fields(
                 geometry_stem, geometry_choices
             )
@@ -10009,6 +10084,13 @@ def write_pdf_structured_hwpx(
             geometry_nonempty = sum(1 for choice in geometry_choices if str(choice or "").strip())
             text_nonempty = sum(1 for choice in choices if str(choice or "").strip())
             if (
+                (
+                    len(geometry_choices) == len(choices)
+                    and len(choices) >= 4
+                    and fraction_choices_verified
+                    and importers._placeholder_count_in_fields("", geometry_choices) == 0
+                )
+                or
                 (
                     len(geometry_choices) >= len(choices)
                     and geometry_placeholder_count < text_placeholder_count
@@ -10028,14 +10110,31 @@ def write_pdf_structured_hwpx(
                 )
             ):
                 stem, choices = geometry_stem, geometry_choices
+        if rebuilt_stem is not None:
+            stem, repair_geometry = rebuilt_stem, unrepaired_geometry
+        else:
+            stem, repair_geometry = reconstruct_stacked_math_rows(stem, geometry)
         stem = math_text.normalize_recognized_math_layout_text(stem)
         choices = [math_text.normalize_recognized_math_layout_text(choice) for choice in choices]
-        geometry_stem = importers._repair_pdf_stem_fractions_from_geometry(stem, geometry)
+        geometry_stem = importers._repair_pdf_stem_fractions_from_geometry(stem, repair_geometry)
         if importers._placeholder_count_in_fields(geometry_stem, choices) < importers._placeholder_count_in_fields(
             stem, choices
         ):
             stem = geometry_stem
-        stem, choices, repair_stats = repair_problem_math_layout(stem, choices, geometry)
+        stem, choices, repair_stats = repair_problem_math_layout(stem, choices, repair_geometry)
+        # Flattened recognition can already contain a plausible but incorrect
+        # fraction, so placeholder count alone cannot select the better choices.
+        # The geometry split associates the stacked operands with their labels.
+        if geometry_split is not None:
+            _, geometry_choices = geometry_split
+            if (len(geometry_choices) == len(choices)
+                    and len(choices) >= 4
+                    and fraction_choices_verified
+                    and importers._placeholder_count_in_fields("", geometry_choices) == 0):
+                choices = [
+                    math_text.normalize_recognized_math_layout_text(choice)
+                    for choice in geometry_choices
+                ]
         for key in repair_totals:
             repair_totals[key] += int(repair_stats.get(key) or 0)
 
@@ -10067,6 +10166,15 @@ def write_pdf_structured_hwpx(
                         ]
                     )
                 figure_count += 1
+                if figure_index <= len(problem_figure_boxes):
+                    image_provenance.append({
+                        "sha256": hashlib.sha256(bytes(figure_png)).hexdigest(),
+                        "role": "source_figure",
+                        "page": page_number,
+                        "bbox_px": figure_boxes_px[-1],
+                        "page_width_px": int(getattr(problem, "page_width_px", 0) or 0),
+                        "page_height_px": int(getattr(problem, "page_height_px", 0) or 0),
+                    })
         problem_box = getattr(problem, "box", None)
         bbox_px = None
         if problem_box is not None:
@@ -10118,10 +10226,6 @@ def write_pdf_structured_hwpx(
     if max_pages is not None:
         output_page_limit = min(output_page_limit or max_pages, max_pages)
     flow_page_limit: int | None = None
-    visual_math_stats: dict[str, Any] = {}
-    visual_math_mode = False
-    visual_text_stats: dict[str, Any] = {}
-    visual_text_mode = False
     if direct_text_flow:
         flow_page_limit = output_page_limit
         items = _structured_pdf_text_flow_items(
@@ -10213,6 +10317,14 @@ def write_pdf_structured_hwpx(
                         ]
                     )
                     figure_count += 1
+                    image_provenance.append({
+                        "sha256": hashlib.sha256(figure_png).hexdigest(),
+                        "role": "source_figure",
+                        "page": source_page,
+                        "bbox_px": figure_boxes_px[-1],
+                        "page_width_px": page_width_px,
+                        "page_height_px": page_height_px,
+                    })
                 continuation_count += 1
                 continuation_lines += len(continuation.splitlines())
                 start_y_px = float(page_height_px) * 0.13
@@ -10321,6 +10433,9 @@ def write_pdf_structured_hwpx(
     if resolved_template == "kice_math" and native_math:
         _attach_structured_math_condition_blocks(pdf_path, items)
         _attach_structured_math_native_tables(pdf_path, items)
+        for item in items:
+            item["tables"].extend([["\n".join(block.get("lines", []))]] for block in item.get("condition_blocks", []))
+            item["tables"].extend(table["text_rows"] for table in item.get("native_tables", []) if table.get("text_rows"))
 
     output_source_page_numbers: list[int] = []
     source_page_seen: set[int] = set()
@@ -10353,71 +10468,15 @@ def write_pdf_structured_hwpx(
                 expected_column_breaks += 1
         previous_item = item
     editable_text_fragments = _structured_editable_text_fragments(items)
-    if direct_text_flow:
-        visual_text_stats = write_pdf_layout_hwpx(
-            pdf_path,
-            output_path,
-            max_pages=flow_page_limit,
-            include_images=True,
-            include_lines=False,
-            text_mode="line",
-            native_math=False,
-            math_visual_overlays=False,
-            text_visual_overlays=True,
-            text_visual_overlay_mode="foreground",
-            foreground_stroke_soften_strength=(
-                0.30 if "english" in resolved_template else 0.42
-            ),
-            force_grayscale_overlays=True,
-            math_ai_recognition=math_ai_recognition,
-            math_ai_model=math_ai_model,
-        )
-        visual_text_mode = True
-    elif resolved_template == "kice_math" and native_math and high_fidelity_math:
-        # KICE PDFs encode equations as positioned private glyph fragments.
-        # OCR reflow can keep the equation editable but cannot reliably infer
-        # every stacked exponent, fraction and limit.  The coordinate writer
-        # keeps normal text editable and overlays only math-risk clips for
-        # source-exact visual fidelity.  It never falls back to a full-page
-        # raster image or embeds structurally unsafe equations in drawText.
-        visual_math_stats = write_pdf_layout_hwpx(
-            pdf_path,
-            output_path,
-            max_pages=output_page_limit,
-            include_images=True,
-            include_lines=False,
-            text_mode="line",
-            native_math=False,
-            math_visual_overlays=True,
-            text_visual_overlays=True,
-            text_visual_overlay_mode="foreground",
-            foreground_overlay_right_pad=22.0,
-            positioned_native_math=True,
-            force_grayscale_overlays=True,
-            math_ai_recognition=math_ai_recognition,
-            math_ai_model=math_ai_model,
-        )
-        visual_math_mode = True
-    elif resolved_template == "kice_math" and native_math:
-        _write_structured_math_page_tables(
-            pdf_path,
-            output_path,
-            title,
-            items,
-            max_pages=max_pages,
-        )
-    else:
-        hwpx_writer_v2.write_hwpx(
-            output_path,
-            title,
-            items,
-            resolved_template,
-            native_math=native_math,
-            preserve_source_layout=True,
-        )
+    hwpx_writer_v2.write_hwpx(
+        output_path,
+        title,
+        items,
+        resolved_template,
+        native_math=native_math,
+        preserve_source_layout=True,
+    )
     structure = _structured_hwpx_counts(output_path)
-    visual_layout_stats = visual_math_stats if visual_math_mode else visual_text_stats
-    visual_layout_mode = visual_math_mode or visual_text_mode
     output_plain_text = _structured_hwpx_plain_text(output_path)
     source_text_char_count = sum(len(fragment) for fragment in editable_text_fragments)
     matched_text_char_count = sum(
@@ -10430,11 +10489,6 @@ def write_pdf_structured_hwpx(
         if source_text_char_count == 0
         else matched_text_char_count / source_text_char_count
     )
-    if visual_layout_mode:
-        source_text_preservation_ratio = float(
-            visual_layout_stats.get("editable_text_coverage_ratio") or 0.0
-        )
-        matched_text_char_count = int(round(source_text_char_count * source_text_preservation_ratio))
     source_math_segments = 0
     unresolved_placeholders = 0
     for item in items:
@@ -10458,30 +10512,10 @@ def write_pdf_structured_hwpx(
         for value in values:
             source_math_segments += sum(1 for _segment, is_math in math_text.split_math_text(value) if is_math)
             unresolved_placeholders += sum(value.count(marker) for marker in ("□", "▢", "�"))
-    if source_math_segments == 0:
-        unresolved_placeholders = 0
-    if visual_math_mode:
-        if visual_math_stats.get("positioned_native_math_enabled"):
-            source_math_segments = int(
-                visual_math_stats.get("positioned_native_math_segments") or 0
-            )
-        else:
-            source_math_segments = int(visual_math_stats.get("source_math_segments") or 0)
-        unresolved_placeholders = 0
-    native_equations = int(
-        visual_math_stats.get("positioned_native_equations")
-        if visual_math_mode and visual_math_stats.get("positioned_native_math_enabled")
-        else visual_math_stats.get("native_equations")
-        if visual_math_mode
-        else structure["native_equations"]
-    )
+    native_equations = int(structure["native_equations"])
     coverage = 1.0 if source_math_segments == 0 else min(1.0, native_equations / source_math_segments)
     source_problem_count = max(0, recognized_problem_count - duplicate_count)
-    editable_coverage = min(1.0, len(items) / max(1, source_problem_count))
-    if visual_layout_mode:
-        editable_coverage = float(
-            visual_layout_stats.get("editable_text_coverage_ratio") or 0.0
-        )
+    editable_coverage = source_text_preservation_ratio
     with fitz.open(pdf_path) as source_pdf:
         source_pages = len(source_pdf)
     effective_page_limit = max_pages
@@ -10490,20 +10524,9 @@ def write_pdf_structured_hwpx(
     if effective_page_limit is not None:
         source_pages = min(source_pages, effective_page_limit)
     return {
-        "layout_mode": (
-            "structured_math_visual_overlay"
-            if visual_math_mode
-            else "structured_text_visual_overlay"
-            if visual_text_mode
-            else "structured"
-        ),
-        "structure": (
-            "positioned_editable_text_math_overlays"
-            if visual_math_mode
-            else "positioned_editable_text_visual_overlays"
-            if visual_text_mode
-            else "paragraphs_tables_native_equations"
-        ),
+        "layout_mode": "structured",
+        "image_provenance": image_provenance,
+        "structure": "paragraphs_tables_native_equations",
         "pages": source_pages,
         "source_pages": source_pages,
         "source_problem_count": source_problem_count,
@@ -10527,32 +10550,14 @@ def write_pdf_structured_hwpx(
         "variant_overlap_ratio": round(variant_overlap_ratio, 4),
         "variant_duplicate_problem_count": variant_duplicate_problem_count,
         "unreliable_text_problems": unreliable_count,
-        "editable_text_coverage_ratio": round(
-            float(visual_layout_stats.get("editable_text_coverage_ratio") or editable_coverage)
-            if visual_layout_mode
-            else editable_coverage,
-            4,
-        ),
+        "editable_text_coverage_ratio": round(editable_coverage, 4),
         "source_text_char_count": source_text_char_count,
         "matched_text_char_count": matched_text_char_count,
         "source_text_preservation_ratio": round(source_text_preservation_ratio, 4),
-        "native_math_enabled": (
-            bool(visual_layout_stats.get("native_math_enabled"))
-            if visual_layout_mode
-            else bool(native_math)
-        ),
+        "native_math_enabled": bool(native_math),
         "source_math_segments": source_math_segments,
         "native_equations": native_equations,
         "native_math_coverage_ratio": round(coverage, 4),
-        "positioned_native_math_enabled": bool(
-            visual_math_stats.get("positioned_native_math_enabled", False)
-        ),
-        "positioned_native_equations": int(
-            visual_math_stats.get("positioned_native_equations") or 0
-        ),
-        "positioned_native_math_segments": int(
-            visual_math_stats.get("positioned_native_math_segments") or 0
-        ),
         "draw_text_boxes": int(structure["draw_text_boxes"]),
         "paragraphs": int(structure["paragraphs"]),
         "tables": int(structure["tables"]),
@@ -10560,30 +10565,14 @@ def write_pdf_structured_hwpx(
         "column_breaks": int(structure["column_breaks"]),
         "two_column_page_tables": int(structure["two_column_page_tables"]),
         "running_header_tables": int(structure["running_header_tables"]),
-        "column_layout_mode": "positioned_source_geometry" if visual_layout_mode else "page_tables",
-        "images": int(visual_layout_stats.get("images") or 0) if visual_layout_mode else figure_count,
-        "full_page_images": int(visual_layout_stats.get("full_page_images") or 0),
-        "full_page_raster_fallback": bool(visual_layout_stats.get("full_page_raster_fallback", False)),
-        "math_visual_overlays": int(visual_math_stats.get("math_visual_overlays") or 0),
-        "math_visual_overlay_area_ratio": float(
-            visual_math_stats.get("math_visual_overlay_area_ratio") or 0.0
-        ),
-        "math_visual_overlay_enabled": bool(
-            visual_math_stats.get("math_visual_overlay_enabled", False)
-        ),
-        "text_visual_overlays": int(visual_layout_stats.get("text_visual_overlays") or 0),
-        "text_visual_overlay_area_ratio": float(
-            visual_layout_stats.get("text_visual_overlay_area_ratio") or 0.0
-        ),
-        "text_visual_overlay_enabled": bool(
-            visual_layout_stats.get("text_visual_overlay_enabled", False)
-        ),
-        "fraction_rule_lines": int(visual_math_stats.get("fraction_rule_lines") or 0),
-        "math_char_text_items": int(visual_math_stats.get("math_char_text_items") or 0),
-        "line_rects": int(visual_math_stats.get("line_rects") or 0),
-        "page_standard_names": list(visual_layout_stats.get("page_standard_names") or []),
-        "page_print_paper_names": list(visual_layout_stats.get("page_print_paper_names") or []),
-        "page_print_scale_values": list(visual_layout_stats.get("page_print_scale_values") or []),
+        "column_layout_mode": "native_columns",
+        "images": figure_count,
+        "full_page_images": 0,
+        "full_page_raster_fallback": False,
+        "math_visual_overlays": 0,
+        "text_visual_overlays": 0,
+        "math_visual_overlay_enabled": False,
+        "text_visual_overlay_enabled": False,
         "unresolved_math_placeholders": unresolved_placeholders,
         "template_key": resolved_template,
         "font_face": "HY신명조",

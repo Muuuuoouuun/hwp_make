@@ -134,7 +134,7 @@ CURRENCY_SPAN_RE = re.compile(
     rf"^\$\d+(?:\.\d+)?(?:\s+{_CURRENCY_CONNECTOR})?\s+\$\d+(?:\.\d+)?$", re.IGNORECASE
 )
 CURRENCY_FRAGMENT_RE = re.compile(
-    rf"^\$\d+(?:\.\d+)?(?:\s+{_CURRENCY_CONNECTOR})?\s*\$$", re.IGNORECASE
+    rf"^\$\d+(?:\.\d+)?(?:\s+{_CURRENCY_CONNECTOR})?\s+\$$", re.IGNORECASE
 )
 LATIN_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 PLAIN_HYPHENATED_LATIN_RE = re.compile(r"^[A-Za-z0-9]+(?:[-\u2010-\u2015][A-Za-z0-9]+)+$")
@@ -835,14 +835,48 @@ def normalize_math_token(token: str) -> str:
 
 def _scan_math_spans(text: str) -> list[MathSpan]:
     value = str(text or "")
+    # Price choices contain opening dollar signs with no matching closer in
+    # that choice. Preserve closed numeric formulas, including roots/minus
+    # expressions, and mask only currency delimiters without changing offsets.
+    scan = list(value)
+    for amount in re.finditer(r"[①-⑤]\s*(\$)\s*\d+(?:\.\d+)?(?![\d.])", value):
+        tail = re.split(r"[①-⑤\n]", value[amount.end():], maxsplit=1)[0]
+        if "$" in tail:
+            before_dollar = tail.split("$", 1)[0]
+            prose_suffix = re.match(
+                rf"\s+(?:{_CURRENCY_CONNECTOR}\b|[A-Za-z]+\s*:)",
+                before_dollar, re.IGNORECASE,
+            )
+            if not prose_suffix:
+                continue
+        scan[amount.start(1)] = "＄"
+    # Names such as ITEM_01 and file_name use a literal underscore. They are
+    # not implicit subscripts. Mask the complete name, preserving offsets, so
+    # a suffix cannot be rediscovered as a different equation. Explicit math
+    # delimiters and LaTeX groups still match across this mask and are read
+    # from the original value below. Short variables and known functions
+    # (x_1, AB_1, log_2) retain the existing implicit-math behavior.
+    for name in re.finditer(
+        r"(?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9]*)(?:_[A-Za-z0-9]+)+(?![A-Za-z0-9_])",
+        value,
+    ):
+        base = name[1]
+        if (name.start() and value[name.start() - 1] == "\\"
+            and re.match(LATEX_COMMAND_PATTERN, value[name.start() - 1:])):
+            continue
+        if len(base) >= 3 and base.lower() not in MATH_LATIN_WORD_ALLOWLIST:
+            scan[name.start():name.end()] = "\ufffc" * len(name[0])
+    scan = "".join(scan)
     spans: list[MathSpan] = []
     last_end = 0
-    for match in FORMULA_TOKEN_RE.finditer(value):
-        token = match.group(0).strip()
+    for match in FORMULA_TOKEN_RE.finditer(scan):
+        token = value[match.start():match.end()].strip()
         if (
             len(token) <= 1
             and not MATH_SYMBOL_TOKEN_RE.match(token)
-        ) or DATE_LIKE_RE.match(token) or NUMERIC_RANGE_RE.match(token) or ALNUM_ID_RE.match(token) or CURRENCY_SPAN_RE.match(token) or CURRENCY_FRAGMENT_RE.match(token):
+        ) or DATE_LIKE_RE.match(token) or NUMERIC_RANGE_RE.match(token) or ALNUM_ID_RE.match(token) or CURRENCY_SPAN_RE.match(token) or (
+            CURRENCY_FRAGMENT_RE.match(token) and re.match(r"\d", value[match.end():])
+        ):
             continue
         if _looks_like_plain_latin_text_fragment(token):
             continue

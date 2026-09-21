@@ -289,13 +289,15 @@ def _simple_paragraph_text_length(paragraph: ET.Element) -> int | None:
         for run_child in child:
             run_child_name = _element_local_name(run_child).lower()
             if run_child_name == "t":
-                total += len("".join(run_child.itertext()))
+                total += len("".join(run_child.itertext()).encode("utf-16-le")) // 2
+                total += sum(8 if _element_local_name(n).lower() == "tab" else 1 for n in run_child)
+            elif run_child_name == "tab" or _is_tab_control_element(run_child):
+                total += 8
             elif run_child_name in {
-                "tab",
                 "linebreak",
                 "hyphen",
                 "nbspace",
-            } or _is_tab_control_element(run_child):
+            }:
                 total += 1
             else:
                 return None
@@ -358,15 +360,20 @@ def _is_tab_control_element(node: ET.Element) -> bool:
 
 
 def _append_text_with_tabs(run: ET.Element, value: str) -> None:
-    segments = value.split("\t")
+    segments = _re.split(r"(\r\n|\r|\n|\t)", value)
     text_tag = _child_tag_like(run, "t", _HP_NS)
     tab_tag = _child_tag_like(run, "tab", _HP_NS)
-    for index, segment in enumerate(segments):
-        text_element = run.makeelement(text_tag, {})
-        text_element.text = _sanitize_text(segment)
-        run.append(text_element)
-        if index < len(segments) - 1:
+    break_tag = _child_tag_like(run, "lineBreak", _HP_NS)
+    for segment in segments:
+        if segment == "\t":
             run.append(run.makeelement(tab_tag, {}))
+            continue
+        text_element = run.makeelement(text_tag, {})
+        if segment in {"\r\n", "\r", "\n"}:
+            text_element.append(run.makeelement(break_tag, {}))
+        else:
+            text_element.text = _sanitize_text(segment)
+        run.append(text_element)
 
 
 def _normalize_length(value: str | None) -> str:
@@ -1306,7 +1313,9 @@ class HwpxOxmlSectionProperties:
     def _sync_header_footer_control(self, tag: str, source: ET.Element) -> None:
         run = self._header_footer_control_run()
         for ctrl in list(run.findall(f"{_HP}ctrl")):
-            if ctrl.find(f"{_HP}{tag}") is not None:
+            existing = ctrl.find(f"{_HP}{tag}")
+            if (existing is not None
+                and existing.get("applyPageType", "BOTH") == source.get("applyPageType", "BOTH")):
                 run.remove(ctrl)
         ctrl = _append_child(run, f"{_HP}ctrl", {})
         ctrl.append(deepcopy(source))
@@ -1524,28 +1533,27 @@ class HwpxOxmlRun:
 
     @property
     def text(self) -> str:
+        from hwpx_text_content import text_with_controls
         parts: list[str] = []
-        for node in self.element.findall(f"{_HP}t"):
-            parts.append("".join(node.itertext()))
+        for node in self.element:
+            if tag_local_name(node.tag) == 't':
+                parts.append(text_with_controls(node))
+            elif tag_local_name(node.tag) == 'lineBreak':
+                parts.append('\n')
+            elif tag_local_name(node.tag) == 'tab' or _is_tab_control_element(node):
+                parts.append('\t')
         return "".join(parts)
 
     @text.setter
     def text(self, value: str) -> None:
-        primary = self._ensure_plain_text_node()
-        changed = (primary.text or "") != value
-        primary.text = _sanitize_text(value)
-        for node in self._plain_text_nodes()[1:]:
-            if node.text:
-                node.text = ""
-                changed = True
-        # Also clear text from <hp:t> nodes that have children (mixed
-        # content).  The child markup is preserved; only the direct text
-        # is removed so the displayed content is not duplicated.
-        for node in self.element.findall(f"{_HP}t"):
-            if len(list(node)) > 0 and node is not primary:
-                if node.text:
-                    node.text = ""
-                    changed = True
+        # A run replacement must replace its old textual line/tab controls
+        # too. Otherwise reading and writing a verse run duplicates breaks,
+        # or leaves mixed-content tails from the previous text behind.
+        changed = self.text != value
+        for node in list(self.element):
+            if tag_local_name(node.tag) in {"t", "tab", "lineBreak"} or _is_tab_control_element(node):
+                self.element.remove(node)
+        _append_text_with_tabs(self.element, value)
         if changed:
             _clear_paragraph_layout_cache(self.paragraph.element)
             self.paragraph.section.mark_dirty()
@@ -3464,12 +3472,14 @@ class HwpxOxmlParagraph:
     @property
     def text(self) -> str:
         """Return the concatenated textual content of this paragraph."""
+        from hwpx_text_content import text_with_controls
         texts: list[str] = []
         for run in self._run_elements():
             for child in run:
                 if tag_local_name(child.tag) == "t":
-                    if child.text:
-                        texts.append(child.text)
+                    texts.append(text_with_controls(child))
+                elif tag_local_name(child.tag) == "lineBreak":
+                    texts.append("\n")
                 elif tag_local_name(child.tag) == "tab" or _is_tab_control_element(child):
                     texts.append("\t")
         return "".join(texts)
@@ -3490,7 +3500,7 @@ class HwpxOxmlParagraph:
         # Remove existing text/tab nodes from all runs.
         for run in runs:
             for child in list(run):
-                if tag_local_name(child.tag) in {"t", "tab"} or _is_tab_control_element(child):
+                if tag_local_name(child.tag) in {"t", "tab", "lineBreak"} or _is_tab_control_element(child):
                     run.remove(child)
 
         # Remove non-first runs that are now empty (only had text).
@@ -3605,6 +3615,7 @@ class HwpxOxmlParagraph:
         run_element = _append_child(self.element, f"{_HP}run", run_attrs)
         text_element = _append_child(run_element, f"{_HP}t", {})
         text_element.text = text
+        _clear_paragraph_layout_cache(self.element)
         self.section.mark_dirty()
         return HwpxOxmlRun(run_element, self)
 
@@ -6276,7 +6287,7 @@ class HwpxOxmlDocument:
         if self._manifest_dirty:
             updates[self._manifest_path] = _serialize_xml(self._manifest)
         for section in self._sections:
-            if section.dirty:
+            if section.dirty and not getattr(section, "_preserve_question_layout_caches", False):
                 section.remove_layout_caches()
             else:
                 section.remove_stale_layout_caches()

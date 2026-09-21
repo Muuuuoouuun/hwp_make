@@ -1,0 +1,190 @@
+diff --git a/src/renderer/layout/paragraph_layout.rs b/src/renderer/layout/paragraph_layout.rs
+index c2de353..f8c5be4 100644
+--- a/src/renderer/layout/paragraph_layout.rs
++++ b/src/renderer/layout/paragraph_layout.rs
+@@ -1219,7 +1219,10 @@ impl LayoutEngine {
+                         })
+                     })
+                     .unwrap_or(false);
+-            let (line_height, baseline) = if has_tac_shape && raw_lh > max_fs * 1.5 {
++            // An inline shape in a table/textbox cell consumes its saved line
++            // height. Compressing it to the font height lets the next line
++            // overlap the shape even when the source cache has enough space.
++            let (line_height, baseline) = if has_tac_shape && cell_ctx.is_none() && raw_lh > max_fs * 1.5 {
+                 // Shape 높이가 line_height에 포함 → 폰트 기반 line_height 사용
+                 let font_lh = max_fs * 1.2; // 폰트 크기의 120%
+                 let font_bl = max_fs * 0.85;
+@@ -3306,6 +3309,20 @@ impl LayoutEngine {
+                         continue;
+                     }
+                     if let Some(p) = para {
++                        // A line may contain only an equation and a textbox.
++                        // It still needs the same inline shape-position record
++                        // as a line containing ordinary text runs.
++                        if let Some(Control::Shape(shape)) = p.controls.get(tac_ci) {
++                            let shape_h = hwpunit_to_px(shape.common().height as i32, self.dpi);
++                            tree.set_inline_shape_position(
++                                section_index,
++                                para_index,
++                                tac_ci,
++                                cell_ctx.as_ref(),
++                                inline_x,
++                                (y + baseline - shape_h).max(y),
++                            );
++                        }
+                         if let Some(Control::Equation(eq)) = p.controls.get(tac_ci) {
+                             let tokens = crate::renderer::equation::tokenizer::tokenize(&eq.script);
+                             let ast =
+@@ -3377,9 +3394,11 @@ impl LayoutEngine {
+                                 inline_x,
+                                 eq_y,
+                             );
+-                            inline_x += tac_w;
+                         }
+                     }
++                    // Every inline control occupies width, including shapes
++                    // whose paint is emitted by the later object pass.
++                    inline_x += tac_w;
+                 }
+             }
+ 
+diff --git a/src/renderer/layout/table_cell_content.rs b/src/renderer/layout/table_cell_content.rs
+index 05cc62f..cb83bed 100644
+--- a/src/renderer/layout/table_cell_content.rs
++++ b/src/renderer/layout/table_cell_content.rs
+@@ -479,13 +479,25 @@ impl LayoutEngine {
+             .map(|rx| rx.last().copied().unwrap_or(0.0))
+             .fold(col_x.last().copied().unwrap_or(0.0), f64::max);
+         let table_height = row_y.last().copied().unwrap_or(0.0);
+-        // TAC 표: 호스트 문단 정렬에 따라 배치
+-        let table_x = match host_alignment {
+-            Alignment::Center | Alignment::Distribute => {
+-                container.x + (container.width - table_width).max(0.0) / 2.0
++        // Inline tables follow paragraph alignment. A floating table in a
++        // textbox retains its own horizontal alignment and source offset.
++        // Ignoring these fields shifts both the frame and its editable text.
++        let table_x = if table.common.treat_as_char {
++            match host_alignment {
++                Alignment::Center | Alignment::Distribute => {
++                    container.x + (container.width - table_width).max(0.0) / 2.0
++                }
++                Alignment::Right => container.x + (container.width - table_width).max(0.0),
++                _ => container.x,
++            }
++        } else {
++            use crate::model::shape::HorzAlign;
++            let offset = hwpunit_to_px(table.common.horizontal_offset as i32, self.dpi);
++            match table.common.horz_align {
++                HorzAlign::Right | HorzAlign::Outside => container.x + container.width - table_width - offset,
++                HorzAlign::Center => container.x + (container.width - table_width) / 2.0 + offset,
++                _ => container.x + offset,
+             }
+-            Alignment::Right => container.x + (container.width - table_width).max(0.0),
+-            _ => container.x, // 왼쪽 정렬 (기본)
+         };
+         let table_y = y_start;
+ 
+@@ -566,27 +578,18 @@ impl LayoutEngine {
+                 None
+             };
+ 
+-            // 셀 배경
+-            let fill_color = border_style.and_then(|bs| bs.fill_color);
+-            let gradient = border_style.and_then(|bs| bs.gradient.clone());
+-            if fill_color.is_some() || gradient.is_some() {
+-                let rect_id = tree.next_id();
+-                let rect_node = RenderNode::new(
+-                    rect_id,
+-                    RenderNodeType::Rectangle(RectangleNode::new(
+-                        0.0,
+-                        ShapeStyle {
+-                            fill_color,
+-                            stroke_color: None,
+-                            stroke_width: 0.0,
+-                            ..Default::default()
+-                        },
+-                        gradient,
+-                    )),
+-                    BoundingBox::new(cell_x, cell_y, cell_w, cell_h),
+-                );
+-                cell_node.children.push(rect_node);
+-            }
++            // Embedded table cells support the same native fills as ordinary
++            // cells, including images and patterns behind editable text.
++            self.render_cell_background(
++                tree,
++                &mut cell_node,
++                border_style,
++                cell_x,
++                cell_y,
++                cell_w,
++                cell_h,
++                bin_data_content,
++            );
+ 
+             // 셀 테두리를 엣지 그리드에 수집
+             if let Some(bs) = border_style {
+@@ -674,7 +677,7 @@ impl LayoutEngine {
+                     composed.lines.len(),
+                     sec_for_layout,
+                     para_for_layout,
+-                    ctx,
++                    ctx.clone(),
+                     pidx + 1 == para_count,
+                     0.0,
+                     None,
+@@ -686,6 +689,38 @@ impl LayoutEngine {
+                 // 셀 내 그림/도형 컨트롤 렌더링
+                 for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
+                     match ctrl {
++                        Control::Shape(shape) if shape.common().treat_as_char => {
++                            // Paragraph layout reserves the inline gap and records its
++                            // position, but leaves shape painting to the object pass.
++                            // Keep the full enclosing cell path: a textbox containing
++                            // a table is not a top-level table or body paragraph.
++                            let Some((shape_x, shape_y)) = tree.get_inline_shape_position(
++                                sec_for_layout,
++                                para_for_layout,
++                                ctrl_idx,
++                                ctx.as_ref(),
++                            ) else {
++                                continue;
++                            };
++                            let common = shape.common();
++                            let empty_map = std::collections::HashMap::new();
++                            self.layout_shape_object(
++                                tree,
++                                &mut cell_node,
++                                shape.as_ref(),
++                                shape_x,
++                                shape_y,
++                                hwpunit_to_px(common.width as i32, self.dpi),
++                                hwpunit_to_px(common.height as i32, self.dpi),
++                                sec_for_layout,
++                                ctx.as_ref().map(|c| c.parent_para_index).unwrap_or(para_for_layout),
++                                ctrl_idx,
++                                styles,
++                                bin_data_content,
++                                &empty_map,
++                                ctx.as_ref().map(|c| c.path.as_slice()).unwrap_or(&[]),
++                            );
++                        }
+                         Control::Picture(pic) => {
+                             let pic_w = hwpunit_to_px(pic.common.width as i32, self.dpi);
+                             let pic_h = hwpunit_to_px(pic.common.height as i32, self.dpi);
+diff --git a/src/renderer/skia/text_replay.rs b/src/renderer/skia/text_replay.rs
+index a78aba2..90a5759 100644
+--- a/src/renderer/skia/text_replay.rs
++++ b/src/renderer/skia/text_replay.rs
+@@ -284,7 +284,10 @@ impl SkiaTextReplay<'_> {
+                     return;
+                 }
+ 
+-                let text = expand_pua_render_text(text);
++                // Inline objects paint themselves. As in SVG/web_canvas,
++                // their U+FFFC paragraph marker must not become a font glyph.
++                let text: String = text.chars().filter(|&c| c != '\u{FFFC}').collect();
++                let text = expand_pua_render_text(&text);
+                 let text = text.as_str();
+                 let char_positions = compute_char_positions(text, style);
+                 let clusters = split_into_clusters(text);

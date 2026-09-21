@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from app.pdf_layout_fidelity import analyze_pdf_hwpx_fidelity  # noqa: E402
 from app.pdf_layout_writer import write_pdf_structured_hwpx  # noqa: E402
+from app.pdf_editability import inspect_pdf_editability  # noqa: E402
 from scripts.verify_pdf_layout_hwpx import verify as verify_hwpx  # noqa: E402
 
 from hwpx.tools.package_validator import validate_editor_open_safety  # noqa: E402
@@ -109,7 +110,12 @@ def main() -> int:
             target_sync_ratio=0.90,
             artifact_mode="all",
         )
-        structure_issues = verify_hwpx(output, render=False)
+        structure_issues = verify_hwpx(output, render=False, require_pdf_font_faces=False)
+        editability = inspect_pdf_editability(
+            source, output, stats.get("image_provenance") or [],
+            page_limit=int(stats.get("pages") or 0),
+            require_question_boxes=bool(stats.get("question_grouping", {}).get("question_count")),
+        )
         open_safety = validate_editor_open_safety(output)
         paragraph_audit = _paragraph_audit(output)
         case = {
@@ -140,6 +146,7 @@ def main() -> int:
                 )
             },
             "structure_issues": structure_issues,
+            "editability": editability,
             "editor_open_safe": bool(open_safety.ok),
         }
         report["cases"].append(case)  # type: ignore[union-attr]
@@ -151,6 +158,8 @@ def main() -> int:
             failures.append(f"{prefix}: not all pages compared")
         if structure_issues:
             failures.append(f"{prefix}: HWPX structure issues: {structure_issues[:3]}")
+        if not editability["ok"]:
+            failures.append(f"{prefix}: native source/editability verification failed: {editability['issues'][:3]}")
         if not open_safety.ok:
             failures.append(f"{prefix}: editor-open safety failed: {open_safety.summary}")
         if float(stats.get("editable_text_coverage_ratio") or 0.0) < 0.99:
@@ -166,16 +175,14 @@ def main() -> int:
         if subject in {"korean", "english"} and paragraph_audit["justified_paragraphs"] <= 0:
             failures.append(f"{prefix}: no justified body paragraphs")
         if subject == "math":
-            if int(stats.get("math_visual_overlays") or 0) <= 0:
-                failures.append(f"{prefix}: no math visual overlays")
+            if int(stats.get("math_visual_overlays") or 0) != 0:
+                failures.append(f"{prefix}: forbidden math visual overlays")
             if float(fidelity.get("min_strict_alignment_ratio") or 0.0) < 0.94:
                 failures.append(f"{prefix}: strict math alignment below 94%")
             if float(fidelity.get("min_foreground_overlap_ratio") or 0.0) < 0.80:
                 failures.append(f"{prefix}: math foreground overlap below 80%")
-            if not stats.get("positioned_native_math_enabled"):
-                failures.append(f"{prefix}: positioned native math disabled")
-            if int(stats.get("positioned_native_equations") or 0) <= 0:
-                failures.append(f"{prefix}: no positioned native equations")
+            if int(stats.get("native_equations") or 0) <= 0:
+                failures.append(f"{prefix}: no native equations")
             if float(stats.get("native_math_coverage_ratio") or 0.0) < 0.90:
                 failures.append(f"{prefix}: native math coverage below 90%")
 
@@ -216,6 +223,8 @@ def main() -> int:
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
     print(f"Report: {report_path}")
+    for failure in failures:
+        print(f"FAIL: {failure}")
     return 1 if failures else 0
 
 

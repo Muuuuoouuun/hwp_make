@@ -1035,13 +1035,25 @@ def _hancom_eqn_script(source: str) -> str | None:
             "∴": "therefore",
             **_UNICODE_GREEK_EQN,
         }.get(char)
-        output.append(mapped if mapped is not None else char)
+        # Named EQN atoms need lexical boundaries: alphai denotes letters,
+        # while alpha i preserves the original Greek symbol and variable.
+        if mapped is not None and mapped.isalpha():
+            before = " " if output and output[-1] and output[-1][-1].isalpha() else ""
+            after = " " if cursor + 1 < len(expr) and (expr[cursor + 1].isalpha() or expr[cursor + 1] == "\\") else ""
+            output.append(before + mapped + after)
+        else:
+            output.append(mapped if mapped is not None else char)
         cursor += 1
     return _normalize_hancom_eqn_script("".join(output).strip())
 
 
 _EQN_WORD_OPERATORS = {
     "TIMES": "*",
+    "DIV": "÷",
+    "TRIANGLE": "△",
+    "ANGLE": "∠",
+    "PARALLEL": "∥",
+    "PERP": "⊥",
     "LEQ": "<=",
     "GEQ": ">=",
     "NEQ": "!=",
@@ -1055,7 +1067,7 @@ def _equation_visual_units(script: str) -> int:
     text = re.sub(r"\b(?:LEFT|RIGHT|left|right)\b\s*", "", text)
     text = re.sub(r"\b(?:rm|it)\b\s*", "", text)
     for word, operator in _EQN_WORD_OPERATORS.items():
-        text = re.sub(rf"\b{word}\b", operator, text)
+        text = re.sub(rf"\b{word}\b", operator, text, flags=re.IGNORECASE)
     previous = None
     while previous != text:
         previous = text

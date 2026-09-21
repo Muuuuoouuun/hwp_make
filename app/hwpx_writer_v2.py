@@ -414,6 +414,21 @@ def _patch_hwpx_exam_flow_linesegs(path: Path) -> int:
         root = etree.fromstring(payload)
         changed = False
         for paragraph in root.findall(f".//{_HP}p"):
+            inline_tables = [
+                table for table in paragraph.findall(f"./{_HP}run/{_HP}tbl")
+                if (pos := table.find(f"{_HP}pos")) is not None
+                and pos.get("treatAsChar") == "1"
+            ]
+            if inline_tables:
+                heights = [int(size.get("height", "0")) for table in inline_tables
+                           if (size := table.find(f"{_HP}sz")) is not None]
+                current = paragraph.find(f"{_HP}linesegarray")
+                if current is not None:
+                    paragraph.remove(current)
+                _set_paragraph_element_lineseg(paragraph, max(heights, default=2400) + 400)
+                changed = True
+                total += 1
+                continue
             if paragraph.findall(f".//{_HP}equation") or paragraph.findall(f".//{_HP}tbl"):
                 continue
             pictures = paragraph.findall(f".//{_HP}pic")
@@ -479,7 +494,122 @@ def _patch_hwpx_exam_flow_linesegs(path: Path) -> int:
     return total
 
 
-def _save_hwpx_with_hancom_compat(doc: Any, path: Path, *, native_math: bool) -> None:
+def _paragraph_text_units(paragraph: Any) -> int:
+    """HWP offsets count UTF-16 text and inline controls, never table-cell text."""
+    units = 0
+    for run in paragraph.findall(f"{_HP}run"):
+        for child in run:
+            if child.tag == f"{_HP}t":
+                units += len("".join(child.itertext()).encode("utf-16-le")) // 2
+                units += sum(8 if node.tag == f"{_HP}tab" else 1 for node in child)
+            elif child.tag in {f"{_HP}equation", f"{_HP}tbl", f"{_HP}pic", f"{_HP}ctrl", f"{_HP}tab"}:
+                units += 8
+    return units
+
+
+def _merge_native_paragraphs(path: Path) -> None:
+    """Keep visual cache lines in one editable paragraph, including table cells."""
+    with zipfile.ZipFile(path) as archive:
+        infos = archive.infolist()
+        payloads = {info.filename: archive.read(info.filename) for info in infos}
+    from hwpx.tools.paragraph_spacing import paragraph_spacing
+    header = etree.fromstring(payloads["Contents/header.xml"])
+    paragraph_styles = {p.get("id"): p for p in header.iter("{http://www.hancom.co.kr/hwpml/2011/head}paraPr")}
+    for name, payload in list(payloads.items()):
+        if not _SECTION_PART_RE.fullmatch(name):
+            continue
+        root = etree.fromstring(payload)
+        # A subList is an independent text flow. Work inside each container;
+        # joining descendants would accidentally join different table cells.
+        containers = [element for element in root.iter() if element.find(f"{_HP}p") is not None]
+        for container in containers:
+            previous = None
+            previous_group = None
+            for paragraph in list(container):
+                if paragraph.tag != f"{_HP}p":
+                    previous = previous_group = None
+                    continue
+                group = paragraph.attrib.pop("nativeParagraphGroup", None)
+                width = paragraph.attrib.pop("nativeParagraphWidth", None)
+                lines = paragraph.find(f"{_HP}linesegarray")
+                if width and lines is not None:
+                    for line in lines:
+                        line.set("horzsize", width)
+                if (group and group == previous_group and previous is not None
+                        and paragraph.get("pageBreak") != "1" and paragraph.get("columnBreak") != "1"):
+                    old_lines = previous.find(f"{_HP}linesegarray")
+                    offset = _paragraph_text_units(previous)
+                    runs = previous.findall(f"{_HP}run")
+                    space = etree.Element(f"{_HP}run", charPrIDRef=runs[-1].get("charPrIDRef", "0"))
+                    etree.SubElement(space, f"{_HP}t").text = " "
+                    previous.insert(len(runs), space)
+                    offset += 1
+                    for run in list(paragraph.findall(f"{_HP}run")):
+                        previous.insert(len(previous.findall(f"{_HP}run")), run)
+                    if old_lines is not None and lines is not None:
+                        for line in list(lines):
+                            line.set("textpos", str(int(line.get("textpos", "0")) + offset))
+                            old_lines.append(line)
+                    container.remove(paragraph)
+                else:
+                    previous, previous_group = paragraph, group
+            # Cache positions are cumulative within each body column or cell.
+            cursor = 0
+            for paragraph in container.findall(f"{_HP}p"):
+                if (paragraph.get("pageBreak") == "1" or paragraph.get("columnBreak") == "1"
+                        or paragraph.find(f".//{_HP}colPr") is not None):
+                    cursor = 0
+                lines = paragraph.find(f"{_HP}linesegarray")
+                if lines is None:
+                    continue
+                before, after = paragraph_spacing(paragraph, paragraph_styles)
+                cursor += round(before)
+                start = cursor
+                for line in lines:
+                    line.set("vertpos", str(cursor))
+                    cursor += int(line.get("vertsize", "1000")) + int(line.get("spacing", "0"))
+                object_heights = [
+                    int(size.get("height", "0"))
+                    + (0 if child.tag == f"{_HP}rect" and child.find(f"{_HP}drawText") is not None else 400)
+                    for run in paragraph.findall(f"{_HP}run")
+                    for child in run if child.tag in {f"{_HP}tbl", f"{_HP}pic", f"{_HP}rect"}
+                    for size in child.findall(f"{_HP}sz")
+                ]
+                if object_heights:
+                    cursor = max(cursor, start + max(object_heights))
+                cursor += round(after)
+        payloads[name] = etree.tostring(root, xml_declaration=True, encoding="utf-8", standalone=True)
+    with zipfile.ZipFile(path, "w") as archive:
+        for info in infos:
+            archive.writestr(info, payloads[info.filename])
+
+
+def _strip_native_source_markers(path: Path) -> None:
+    """Internal item mappings must never survive into a delivered document."""
+    with zipfile.ZipFile(path) as archive:
+        infos = archive.infolist()
+        payloads = {info.filename: archive.read(info.filename) for info in infos}
+    for name, payload in list(payloads.items()):
+        if not _SECTION_PART_RE.fullmatch(name):
+            continue
+        root = etree.fromstring(payload)
+        changed = False
+        for element in root.iter():
+            for attribute in ("nativeSourceItem", "nativeParagraphGroup", "nativeParagraphWidth"):
+                if attribute in element.attrib:
+                    del element.attrib[attribute]
+                    changed = True
+        if changed:
+            payloads[name] = etree.tostring(root, encoding="utf-8", xml_declaration=True, standalone=True)
+    with zipfile.ZipFile(path, "w") as archive:
+        for info in infos:
+            archive.writestr(info, payloads[info.filename])
+
+
+def _save_hwpx_with_hancom_compat(
+    doc: Any, path: Path, *, native_math: bool, native_paragraphs: bool = False,
+    native_items: list[dict[str, Any]] | None = None,
+) -> None:
     """Save a python-hwpx document after applying Hancom 2024 safety sidecars."""
 
     from hwpx.tools.package_validator import validate_editor_open_safety
@@ -497,6 +627,13 @@ def _save_hwpx_with_hancom_compat(doc: Any, path: Path, *, native_math: bool) ->
         _patch_hwpx_exam_flow_linesegs(tmp_path)
         if native_math:
             _patch_hwpx_native_math_linesegs(tmp_path)
+        if native_paragraphs:
+            _merge_native_paragraphs(tmp_path)
+            if native_items is not None:
+                from .pdf_native_typography import apply_native_typography
+
+                apply_native_typography(tmp_path, native_items)
+            _strip_native_source_markers(tmp_path)
 
         report = validate_editor_open_safety(tmp_path)
         if not report.ok:
@@ -640,7 +777,82 @@ def _append_equation_run(
     equation_index: int,
     *,
     compact_placeholder: bool = False,
+    equation_counter: list[int] | None = None,
 ) -> None:
+    # A recovered fraction may sit inside an inferred surrounding expression.
+    # Its inline delimiters are not HWP equation tokens.
+    script = re.sub(r"\$([^$]+)\$", r"\1", script)
+    def fraction_operands(value):
+        operands = []
+        remaining = value.strip()
+        for index in range(2):
+            if not remaining.startswith("{"):
+                return None
+            depth = 0
+            for end, char in enumerate(remaining):
+                depth += (char == "{") - (char == "}")
+                if depth == 0:
+                    operands.append(remaining[1:end])
+                    remaining = remaining[end+1:].strip()
+                    break
+            else:
+                return None
+            if index == 0:
+                if not remaining.startswith("over "):
+                    return None
+                remaining = remaining[5:].strip()
+        return operands if not remaining else None
+    word_fraction = fraction_operands(script)
+    if word_fraction and re.search(r"[가-힣]", script):
+        # HancomEQN-only renderers cannot draw Hangul in an equation font.
+        # A real inline two-row fraction uses the document's text font and
+        # stays editable; only the numerator has a bottom rule.
+        from . import pdf_layout_writer as pdf_writer
+
+        header = paragraph.section.document.headers[0]
+        fraction_rule = pdf_writer._ensure_header_divider_border_fill(header)
+        border_fills = header.element.find(f".//{_HH}borderFills")
+        no_border = None
+        for candidate in border_fills:
+            edges = [candidate.find(f"{_HH}{edge}Border") for edge in ("left", "right", "top", "bottom")]
+            if all(edge is not None and edge.get("type") == "NONE" for edge in edges):
+                no_border = candidate.get("id")
+                break
+        if no_border is None:
+            rule = border_fills.find(f"{_HH}borderFill[@id='{fraction_rule}']")
+            empty = etree.fromstring(etree.tostring(rule))
+            no_border = str(max(int(x.get("id", "0")) for x in border_fills) + 1)
+            empty.set("id", no_border)
+            for edge in ("left", "right", "top", "bottom"):
+                empty.find(f"{_HH}{edge}Border").set("type", "NONE")
+            border_fills.append(empty)
+            border_fills.set("itemCnt", str(len(border_fills)))
+            header.mark_dirty()
+        center = header.ensure_paragraph_format(alignment="CENTER", line_spacing_percent=100)
+        char_style = header.element.find(f".//{_HH}charPr[@id='{char_pr_id_ref}']")
+        font_height = int(char_style.get("height", "790")) if char_style is not None else 790
+        values = word_fraction
+        width = max(2000, min(22000, int(max(_visual_units(v) for v in values) * font_height * 0.55) + 400))
+        row_height = max(1200, int(font_height * 1.5))
+        table = paragraph.add_table(2, 1, width=width, height=row_height * 2, border_fill_id_ref=no_border)
+        for index, value in enumerate(values):
+            cell = table.cell(index, 0)
+            cell.set_size(width, row_height)
+            rich_value = re.sub(r"([A-Za-z]+(?:[_^]\{[^{}]+\})+)", r"$\1$", value)
+            _set_table_cell_rich_text(
+                table, index, 0, rich_value, char_pr_id_ref=char_pr_id_ref,
+                math_char_pr_id_ref=char_pr_id_ref, native_math=True,
+                equation_counter=equation_counter if equation_counter is not None else [equation_index],
+                cell_para_pr_id_ref=str(center), min_line_height=font_height,
+                native_paragraphs=True, cell_width=width,
+            )
+            pdf_writer._set_cell_border_fill(cell, fraction_rule if index == 0 else no_border)
+            pdf_writer._set_cell_margin(cell, left_mm=0, right_mm=0, top_mm=0, bottom_mm=0)
+            for p in cell.paragraphs:
+                p.element.set("paraPrIDRef", str(center))
+                for run in p.element.findall(f"{_HP}run"):
+                    run.set("charPrIDRef", str(char_pr_id_ref))
+        return
     run = paragraph.add_run("", char_pr_id_ref=char_pr_id_ref).element
     for child in list(run):
         run.remove(child)
@@ -738,6 +950,7 @@ def _replace_paragraph_runs(
                     char_pr_id_ref,
                     equation_counter[0],
                     compact_placeholder=compact_math_placeholder,
+                    equation_counter=equation_counter,
                 )
                 wrote = True
                 continue
@@ -769,17 +982,30 @@ def _set_table_cell_rich_text(
     cell_para_pr_id_ref: str | None = None,
     min_line_height: int = 1000,
     cell_line_limit: int = 46,
+    native_paragraphs: bool = False,
+    cell_width: int | None = None,
 ) -> None:
     cell = table.cell(row_index, col_index)
-    lines = _table_cell_render_lines(text, cell_line_limit)
+    if native_paragraphs:
+        grouped_lines = [
+            (group, line)
+            for group, raw_line in enumerate(str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"))
+            for line in (_wrap_math_line_parts(raw_line, cell_line_limit) or [raw_line])
+        ]
+    else:
+        grouped_lines = list(enumerate(_table_cell_render_lines(text, cell_line_limit)))
     cell.set_text("", split_paragraphs=True)
-    for line_index, line in enumerate(lines):
+    for line_index, (group, line) in enumerate(grouped_lines):
         paragraphs = cell.paragraphs
         paragraph = (
             paragraphs[0]
             if line_index == 0 and paragraphs
             else cell.add_paragraph("", char_pr_id_ref=char_pr_id_ref)
         )
+        if native_paragraphs:
+            paragraph.element.set("nativeParagraphGroup", f"cell-{row_index}-{col_index}-{group}")
+            if cell_width:
+                paragraph.element.set("nativeParagraphWidth", str(max(100, cell_width - 560)))
         _replace_paragraph_runs(
             paragraph,
             line,
@@ -900,8 +1126,11 @@ def write_hwpx(
     current_flow_column = 1
     next_source_anchor_top_hwp: int | None = None
     dynamic_para_formats: dict[tuple[str, int, int, int], str] = {}
+    native_paragraph_group = 0
+    native_content_document = any((problem.get("layout") or {}).get("source_content") for problem in problems)
     source_layout_flow = bool(
         preserve_source_layout
+        and not native_content_document
         and columns > 1
         and any(int(problem.get("source_page") or 0) > 0 for problem in problems)
     )
@@ -910,7 +1139,7 @@ def write_hwpx(
         and bool(problem["layout"].get("source_text_flow"))
         for problem in problems
     )
-    if source_layout_flow:
+    if source_layout_flow or native_content_document:
         column_body_height = (
             _A4_HEIGHT_HWP
             - _mm_to_hwp(_KICE_SOURCE_MARGIN_TOP_MM)
@@ -1118,6 +1347,10 @@ def write_hwpx(
         return _math_segment_units(segment, is_math)
 
     def wrap_line_parts(line: str, limit: int) -> list[str]:
+        if native_content_document:
+            # Legacy fixed character counts assumed small source-PDF fonts.
+            # Native A4 paragraphs must wrap at the actual available width.
+            limit = min(limit, max(12, int(content_width / (float(style_specs["body"]["size"]) * 100) * 1.8)))
         return _wrap_math_line_parts(line, limit)
 
     def wrapped_choice_lines(choices: list[str], limit: int = 68) -> list[str]:
@@ -1155,6 +1388,11 @@ def write_hwpx(
         allow_column_break: bool = True,
         **attrs: str,
     ) -> None:
+        nonlocal native_paragraph_group
+        if native_content_document:
+            native_paragraph_group += 1
+            attrs["nativeParagraphGroup"] = str(native_paragraph_group)
+            attrs["nativeParagraphWidth"] = str(content_width)
         if not (columns > 1 and not center and not right and style in {"heading", "body", "small"}):
             add_single_para(
                 line,
@@ -1513,6 +1751,14 @@ def write_hwpx(
         col_count = choice_grid_columns(choices)
         row_count = max(1, (len(choices) + col_count - 1) // col_count)
         row_height = 1400 if source_layout_flow else 2200
+        # Native fractions and roots extend beyond the old fixed 14pt row.
+        # Reserve every wrapped equation line plus cell padding so denominators
+        # are visible in Hancom/rhwp, not merely present in the XML package.
+        row_height = max(row_height, max((
+            sum(max(style_line_heights["body"], _native_math_height(line))
+                for line in _table_cell_render_lines(choice, 24)) + 1000
+            for choice in choices
+        ), default=row_height))
         return row_count * row_height + 200
 
     def add_choice_grid(choices: list[str]) -> None:
@@ -1555,8 +1801,34 @@ def write_hwpx(
                     cell_line_limit=24,
                 )
 
+    def source_picture_sizes(problem: dict[str, Any]) -> list[tuple[Path, tuple[int, int]]]:
+        layout = problem.get("layout") or {}
+        ratios = layout.get("image_width_ratios") or []
+        pictures = []
+        for image_index, image_path in enumerate(problem.get("image_paths") or []):
+            full_path = storage.resolve_data_image_path(image_path)
+            if full_path is None:
+                continue
+            ratio = ratios[image_index] if image_index < len(ratios) else layout.get("image_width_ratio", 1.0)
+            width = max(1, int(round(content_width * float(ratio))))
+            # Source figures retain their measured aspect and column scale.
+            # A legacy math-page height cap must not shrink science figures.
+            size = _picture_size(full_path, width)
+            if size:
+                pictures.append((full_path, size))
+        return pictures
+
     def estimate_problem_height(problem: dict[str, Any], index: int) -> int:
         layout = problem.get("layout") or {}
+        if isinstance(layout, dict) and layout.get("source_content"):
+            total = sum(estimate_para_height(line) for line in str(problem.get("stem") or "").splitlines())
+            total += sum(estimate_table_height(chunk) for rows in problem.get("tables") or [] for chunk in split_table_chunks(rows))
+            pictures = source_picture_sizes(problem)
+            if layout.get("image_width_ratios"):
+                total += max((size[1] for _, size in pictures), default=0)
+            else:
+                total += sum(size[1] for _, size in pictures)
+            return total
         if isinstance(layout, dict) and (
             layout.get("continuation") or layout.get("source_text_flow")
         ):
@@ -1796,14 +2068,22 @@ def write_hwpx(
         para("")
     else:
         para(title or template.masthead_title, "title", center=True)
-        meta = "   ".join(p for p in (template.area, template.period, template.variant) if p)
+        source_area = next(((problem.get("layout") or {}).get("source_masthead_area")
+                            for problem in problems
+                            if (problem.get("layout") or {}).get("source_masthead_area")), None)
+        source_masthead = next(((problem.get("layout") or {}).get("source_masthead_typography")
+                               for problem in problems
+                               if (problem.get("layout") or {}).get("source_masthead_typography")), {})
+        meta = "   ".join(p for p in (
+            (source_area or template.area, source_masthead.get("period", ""))
+            if native_content_document else (template.area, template.period, template.variant)) if p)
         if meta:
             para(meta, "meta", center=True)
-        if template.show_student_fields:
+        if template.show_student_fields and not native_content_document:
             para("성명 ____________     수험 번호 ____________     " + template.selection, "small", center=True)
-        elif template.selection:
+        elif template.selection and not native_content_document:
             para(template.selection, "small", center=True)
-        for direction in template.directions:
+        for direction in (() if native_content_document else template.directions):
             para(direction, "small")
         para("")
 
@@ -1850,6 +2130,42 @@ def write_hwpx(
         meta = " / ".join(p for p in [subject, meta_unit] if p)
 
         layout = problem.get("layout") or {}
+        if isinstance(layout, dict) and layout.get("source_content"):
+            # PDF content blocks already contain their original question/choice
+            # numbers. Use normal paragraph flow and native tables; never wrap
+            # the body in positioned drawing objects or a page-sized table.
+            source_paragraph_start = len(doc.paragraphs)
+            for line in str(problem.get("stem") or "").splitlines():
+                para(line, "body", preserve_inline_math=True)
+            source_tables = {entry["index"]: entry for entry in layout.get("native_tables", [])}
+            for table_index, rows in enumerate(problem.get("tables") or []):
+                geometry = source_tables.get(table_index)
+                for chunk in ([rows] if geometry else split_table_chunks(rows)):
+                    table_height = estimate_table_height(chunk)
+                    _add_table(doc, chunk, char_pr_id_ref=cp["body"],
+                               math_char_pr_id_ref=math_cp["body"], native_math=native_math,
+                               equation_counter=equation_counter, cell_para_pr_id_ref=pr_left,
+                               min_line_height=style_line_heights["body"], content_width=content_width,
+                               height=table_height, paragraph_attrs=reserve_object_height(table_height),
+                               native_paragraphs=True, source_geometry=geometry)
+            pictures = source_picture_sizes(problem)
+            if pictures and layout.get("image_width_ratios"):
+                row_height = max(size[1] for _, size in pictures)
+                _add_native_picture_row(
+                    doc, pictures, content_width,
+                    gaps=layout.get("image_horizontal_gaps") or [],
+                    leading=float(layout.get("image_leading_ratio") or 0.0),
+                    char_pr_id_ref=cp["body"], para_pr_id_ref=pr_left,
+                    paragraph_attrs=reserve_object_height(row_height + 400),
+                )
+            else:
+                for full_path, picture_size in pictures:
+                    _add_picture(doc, full_path.relative_to(storage.DATA_DIR).as_posix(), picture_size[0],
+                                 paragraph_attrs=reserve_object_height(picture_size[1] + 400))
+            for paragraph in doc.paragraphs[source_paragraph_start:]:
+                paragraph.element.set("nativeSourceItem", str(index))
+            previous_problem = problem
+            continue
         if (
             source_layout_flow
             and not source_text_document
@@ -2061,7 +2377,9 @@ def write_hwpx(
                     para(line, "body")
                 para("")
 
-    _save_hwpx_with_hancom_compat(doc, Path(path), native_math=native_math)
+    _save_hwpx_with_hancom_compat(doc, Path(path), native_math=native_math,
+                                native_paragraphs=native_content_document,
+                                native_items=problems if native_content_document else None)
 
 
 def _add_table(
@@ -2077,6 +2395,8 @@ def _add_table(
     content_width: int | None = None,
     height: int | None = None,
     paragraph_attrs: dict[str, str] | None = None,
+    native_paragraphs: bool = False,
+    source_geometry: dict[str, Any] | None = None,
 ) -> None:
     if not rows or not any(rows):
         return
@@ -2084,6 +2404,15 @@ def _add_table(
         equation_counter = [0]
     row_cnt = len(rows)
     col_cnt = max(len(r) for r in rows)
+    source_cells = (source_geometry or {}).get("cell_bounds", [])
+    def axes(indices):
+        values = sorted(float(cell[i]) for row in source_cells for cell in row if cell for i in indices)
+        grouped = []
+        for value in values:
+            if not grouped or value - grouped[-1] > 0.5:
+                grouped.append(value)
+        return grouped
+    source_x, source_y = axes((0, 2)), axes((1, 3))
     cell_line_limit = max(16, 46 // col_cnt)
     table = doc.add_table(
         row_cnt,
@@ -2100,6 +2429,18 @@ def _add_table(
             base = content_width // col_cnt
             widths = [base] * col_cnt
             widths[-1] = content_width - base * (col_cnt - 1)
+            if source_geometry:
+                candidates = [row for row in source_cells
+                              if len(row) == col_cnt and all(row)]
+                source_widths = None
+                if len(source_x) == col_cnt + 1:
+                    source_widths = [b - a for a, b in zip(source_x, source_x[1:])]
+                elif candidates:
+                    source_widths = [max(1.0, cell[2] - cell[0]) for cell in candidates[-1]]
+                if source_widths:
+                    widths = [max(1, round(content_width * value / sum(source_widths)))
+                              for value in source_widths]
+                    widths[-1] += content_width - sum(widths)
             table.set_column_widths(widths)
         except Exception:
             pass
@@ -2132,7 +2473,117 @@ def _add_table(
                 cell_para_pr_id_ref=cell_para_pr_id_ref,
                 min_line_height=min_line_height,
                 cell_line_limit=cell_line_limit,
+                native_paragraphs=native_paragraphs,
+                cell_width=widths[c] if content_width else None,
             )
+    borderless_columns = (source_geometry or {}).get("borderless_columns", [])
+    if borderless_columns:
+        fills = doc.headers[0].element.find(f".//{_HH}borderFills")
+        blank = next((fill.get("id") for fill in fills if all(
+            (edge := fill.find(f"{_HH}{side}Border")) is not None and edge.get("type") == "NONE"
+            for side in ("left", "right", "top", "bottom"))), None)
+        if blank is None:
+            raise ValueError("source table gutter requires a borderless cell style")
+        for r in range(row_cnt):
+            for c in borderless_columns:
+                cell = table.cell(r, c).element
+                cell.set("borderFillIDRef", blank)
+                margin = cell.find(f"{_HP}cellMargin")
+                if margin is not None:
+                    margin.set("left", "0")
+                    margin.set("right", "0")
+    if len(source_x) == col_cnt + 1 and len(source_y) == row_cnt + 1:
+        for r, row in enumerate(source_cells):
+            for c, bounds in enumerate(row):
+                if not bounds:
+                    continue
+                last_col = min(range(len(source_x)), key=lambda i: abs(source_x[i] - bounds[2])) - 1
+                last_row = min(range(len(source_y)), key=lambda i: abs(source_y[i] - bounds[3])) - 1
+                if last_row > r or last_col > c:
+                    table.merge_cells(r, c, last_row, last_col)
+    if background_path := (source_geometry or {}).get("background_path"):
+        from .pdf_source_backgrounds import apply_native_table_background
+        background = storage.resolve_data_image_path(background_path)
+        if background is None:
+            raise ValueError("source decoration asset is unavailable")
+        apply_native_table_background(
+            doc, table, background,
+            preserve_border=bool(source_geometry.get("background_preserve_border")),
+        )
+    for background_cell in (source_geometry or {}).get("background_cells", []):
+        from .pdf_source_backgrounds import apply_native_table_background
+        background = storage.resolve_data_image_path(background_cell["path"])
+        if background is None:
+            raise ValueError("source decoration asset is unavailable")
+        apply_native_table_background(doc, table, background,
+                                      row=background_cell["row"], column=background_cell["column"])
+    for image in (source_geometry or {}).get("images", []):
+        row, col = image["row"], image["column"]
+        path = storage.resolve_data_image_path(image["path"])
+        if path is None:
+            raise ValueError("native table figure asset is unavailable")
+        cell = table.cell(row, col)
+        size = _picture_size(path, max(100, widths[col] - 600))
+        if size is None:
+            raise ValueError("native table figure size is invalid")
+        paragraph = cell.add_paragraph("", char_pr_id_ref=char_pr_id_ref)
+        binary_id = doc.add_image(path.read_bytes(), _IMG_FORMATS.get(path.suffix.lower(), "png"))
+        picture = paragraph.add_picture(binary_id, width=size[0], height=size[1],
+                                        char_pr_id_ref=char_pr_id_ref, treat_as_char=True)
+        margin = picture.element.find(f"{_HP}outMargin")
+        if margin is not None:
+            for side in ("left", "right", "top", "bottom"):
+                margin.set(side, "0")
+        _set_paragraph_element_lineseg(paragraph.element, size[1] + 300,
+                                       width=widths[col] - 600, spacing_ratio=0.0)
+        cell.element.set("dirty", "1")
+        table.mark_dirty()
+
+
+def _add_native_picture_row(
+    doc: "HwpxDocument", pictures: list[tuple[Path, tuple[int, int]]], content_width: int,
+    *, gaps: list[float], leading: float, char_pr_id_ref: str, para_pr_id_ref: str,
+    paragraph_attrs: dict[str, str] | None = None,
+) -> None:
+    """Place source figures in a normal paragraph with measured, visible spacing."""
+    # A genuine inter-figure space makes the row a text flow in readers that
+    # otherwise count each image-only run as a separate vertical block.
+    # Arial's ordinary space is 0.278 em; keep its normal 7.9 pt text size.
+    space_style = doc.ensure_run_style(font="Arial", size=7.9)
+    _apply_char_metrics(doc.headers[0], [space_style], ratio=100, spacing=0)
+    leading_width = max(0, round(content_width * leading))
+    row_para_style = doc.headers[0].ensure_paragraph_format(
+        base_para_pr_id=para_pr_id_ref, alignment="LEFT",
+        margins={"left": leading_width, "right": 0, "prev": 0, "next": 0},
+    )
+    paragraph = doc.add_paragraph(
+        "", include_run=False, inherit_style=False, char_pr_id_ref=char_pr_id_ref,
+        para_pr_id_ref=row_para_style, **(paragraph_attrs or {}),
+    )
+    paragraph.element.set("nativeParagraphWidth", str(content_width - leading_width))
+    space_width = 790 * 0.278
+    remaining_gap_width = max(0, content_width - leading_width - sum(size[0] for _, size in pictures))
+    for index, (path, (width, height)) in enumerate(pictures):
+        if index:
+            gap = float(gaps[index - 1]) if index - 1 < len(gaps) else 0.0
+            count = max(0, round(content_width * gap / space_width))
+            count = min(count, max(0, int(remaining_gap_width / space_width)))
+            if count:
+                paragraph.add_run(" " * count, char_pr_id_ref=space_style)
+                remaining_gap_width -= count * space_width
+        binary_id = doc.add_image(path.read_bytes(), _IMG_FORMATS.get(path.suffix.lower(), "png"))
+        picture = paragraph.add_picture(binary_id, width=width, height=height,
+                                        char_pr_id_ref=char_pr_id_ref, treat_as_char=True)
+        margin = picture.element.find(f"{_HP}outMargin")
+        if margin is not None:
+            margin.set("left", "0")
+            margin.set("right", "0")
+            margin.set("top", "0")
+            margin.set("bottom", "0")
+    _set_paragraph_element_lineseg(
+        paragraph.element, max(size[1] for _, size in pictures) + 300,
+        width=content_width, spacing_ratio=0.0,
+    )
 
 
 def _add_picture(

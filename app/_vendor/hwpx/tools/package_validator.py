@@ -313,7 +313,7 @@ def _first_child_by_local(element: ET.Element, name: str) -> ET.Element | None:
 
 
 def _simple_paragraph_text_length(paragraph: ET.Element) -> int | None:
-    """Return visible text length for plain text-only paragraphs.
+    """Return HWP UTF-16/control units for plain text-only paragraphs.
 
     Paragraphs containing fields, shapes, tables, or other embedded controls are
     skipped to avoid guessing how a specific editor counts their layout units.
@@ -329,8 +329,11 @@ def _simple_paragraph_text_length(paragraph: ET.Element) -> int | None:
         for run_child in child:
             run_child_name = _local_name(run_child).lower()
             if run_child_name == "t":
-                total += len("".join(run_child.itertext()))
-            elif run_child_name in {"tab", "linebreak", "hyphen", "nbspace"}:
+                total += len("".join(run_child.itertext()).encode("utf-16-le")) // 2
+                total += sum(8 if _local_name(n).lower() == "tab" else 1 for n in run_child)
+            elif run_child_name == "tab":
+                total += 8
+            elif run_child_name in {"linebreak", "hyphen", "nbspace"}:
                 total += 1
             else:
                 return None

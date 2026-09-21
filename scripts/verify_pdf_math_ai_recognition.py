@@ -39,7 +39,7 @@ def main() -> int:
     sample = _find_sample()
     if sample is None:
         print("SKIP: no local math exam PDF sample under data/uploads")
-        return 0
+        return 2
 
     os.environ[GEMINI_MATH_MAX_CALLS_ENV] = "2"
     os.environ[GEMINI_MATH_MOCK_RESPONSE_ENV] = json.dumps(

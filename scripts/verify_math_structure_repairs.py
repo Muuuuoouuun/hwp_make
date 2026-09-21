@@ -450,8 +450,8 @@ def check_nested_bars_rebuild_radicals_inside_fraction() -> None:
 def check_nested_bar_without_radical_evidence_is_preserved() -> None:
     """An inner bar with one operand band is not a fraction and not a radical.
 
-    Nothing about the outer bar may be rewritten on that guess: the square is a
-    classified residual.
+    The measured letter band supports an overline. Numeric bands without a
+    radical sign remain classified residuals instead of invented structures.
     """
     lines = [
         _line(
@@ -474,14 +474,21 @@ def check_nested_bar_without_radical_evidence_is_preserved() -> None:
         repr(repaired),
     )
     _check(
-        "해결 불가한 중첩 막대의 사각형이 보존된다",
-        PLACEHOLDER in repaired,
+        "문자 아래밴드 근거가 있는 중첩 막대는 선분 분모로 복원된다",
+        r"\frac{n}{\overline{AB}}" in repaired and PLACEHOLDER not in repaired,
         repr(repaired),
     )
     _check(
         "중첩 막대 아래 텍스트가 사라지지 않는다",
         "AB" in repaired and "n" in repaired,
         repr(repaired),
+    )
+    lines[3] = _line("12", _chars("12", left=145.0, center_y=80.0, size=14.0))
+    unsupported = _repair(lines)
+    _check(
+        "근호 표시도 문자 밴드도 없는 중첩 막대는 미해결로 보존된다",
+        PLACEHOLDER in unsupported and r"\overline" not in unsupported and r"\sqrt" not in unsupported,
+        repr(unsupported),
     )
 
 

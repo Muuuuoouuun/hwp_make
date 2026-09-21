@@ -14,9 +14,10 @@ from typing import Any, Literal
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from .request_limits import RequestBodyLimitMiddleware
 
 from . import (
     ai_api,
@@ -66,18 +67,7 @@ _LOCAL_AUTH = local_auth.LocalWorkspaceAuth(storage.DATA_DIR)
 app.include_router(_LOCAL_AUTH.router())
 
 
-@app.middleware("http")
-async def reject_oversized_request(request: Request, call_next: Any) -> Any:
-    """Reject ordinary oversized JSON uploads before Pydantic/base64 parsing."""
-    declared = request.headers.get("content-length")
-    if declared:
-        try:
-            too_large = int(declared) > MAX_REQUEST_BODY_BYTES
-        except ValueError:
-            too_large = False
-        if too_large:
-            return JSONResponse(status_code=413, content={"detail": "요청 본문이 허용 크기를 초과합니다."})
-    return await call_next(request)
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
 
 app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 # 데이터 루트(DATA_DIR) 전체를 마운트하면 problems.sqlite3·user_settings.json까지 HTTP로
@@ -383,6 +373,7 @@ def _pdf_layout_objective_score(
     if stats.get("layout_mode") == "structured":
         return _pdf_structured_objective_score(
             stats=stats,
+            fidelity=fidelity,
             style_profile=style_profile,
             open_safety=open_safety,
         )
@@ -549,6 +540,7 @@ def _pdf_structured_objective_score(
     stats: dict[str, Any],
     style_profile: dict[str, Any],
     open_safety: dict[str, Any],
+    fidelity: dict[str, Any],
 ) -> dict[str, Any]:
     target = 98.0
     style_available = bool(style_profile.get("available"))
@@ -569,10 +561,11 @@ def _pdf_structured_objective_score(
     expected_page_breaks = int(stats.get("expected_page_breaks") or 0)
     expected_column_breaks = int(stats.get("expected_column_breaks") or 0)
     actual_page_breaks = int(stats.get("page_breaks") or 0)
+    actual_section_breaks = int(stats.get("section_breaks") or 0)
     actual_column_breaks = int(stats.get("column_breaks") or 0)
     two_column_page_tables = int(stats.get("two_column_page_tables") or 0)
     output_page_count = int(stats.get("output_page_count_target") or stats.get("pages") or 0)
-    page_breaks_match = actual_page_breaks == expected_page_breaks
+    page_breaks_match = actual_page_breaks + actual_section_breaks == expected_page_breaks
     allowed_natural_column_breaks = max(1, int(stats.get("output_page_count_target") or 0))
     explicit_column_breaks_match = (
         expected_column_breaks <= actual_column_breaks <= expected_column_breaks + allowed_natural_column_breaks
@@ -585,7 +578,11 @@ def _pdf_structured_objective_score(
     column_breaks_match = explicit_column_breaks_match or page_table_columns_match
 
     structure_score = 0.0
-    structure_score += 25.0 if draw_text_boxes == 0 else 0.0
+    verified_questions = stats.get("verified_question_units") or {}
+    native_structure = draw_text_boxes == 0 or (
+        verified_questions.get("ok") and verified_questions.get("question_count") == draw_text_boxes
+    )
+    structure_score += 25.0 if native_structure else 0.0
     structure_score += 15.0 if paragraph_count > 0 else 0.0
     structure_score += 20.0 if source_layout_coverage >= 0.99 else _clamp_score(source_layout_coverage * 20.0)
     structure_score += 20.0 if page_breaks_match else 0.0
@@ -639,6 +636,7 @@ def _pdf_structured_objective_score(
             "source_layout_coverage_ratio": round(source_layout_coverage, 4),
             "expected_page_breaks": expected_page_breaks,
             "actual_page_breaks": actual_page_breaks,
+            "actual_section_breaks": actual_section_breaks,
             "page_breaks_match": page_breaks_match,
             "expected_column_breaks": expected_column_breaks,
             "actual_column_breaks": actual_column_breaks,
@@ -708,22 +706,43 @@ def _pdf_structured_objective_score(
             "summary": open_safety.get("summary"),
         },
     }
-    objective_score = None
+    structure_objective_score = None
     if style_available:
-        objective_score = round(
+        structure_objective_score = round(
             sum(float(component["score"]) * float(component["weight"]) for component in components.values()),
             2,
         )
+    # Structure alone previously awarded ~95 even when rendered layout scored
+    # ~43. A visual failure must cap the displayed overall result, not be
+    # averaged away by text presence or font-name checks.
+    rendered_layout_score = fidelity.get("overall_harsh_layout_score")
+    score_available = bool(
+        style_available and fidelity.get("available") and not fidelity.get("skipped")
+        and isinstance(rendered_layout_score, (int, float))
+    )
+    objective_score = (
+        round(min(structure_objective_score, _clamp_score(rendered_layout_score)), 2)
+        if score_available else None
+    )
     return {
         "objective_score_target": target,
-        "objective_score_available": style_available,
+        "objective_score_available": score_available,
         "objective_score": objective_score,
+        "structure_objective_score": structure_objective_score,
+        "rendered_layout_score": rendered_layout_score if score_available else None,
+        "objective_score_rule": "minimum_of_structural_weighted_score_and_rendered_harsh_layout",
         "meets_objective_score_target": (objective_score >= target if objective_score is not None else None),
         "score_components": components,
         "meets_font_template_target": components["font"]["score"] >= 98.0,
         "meets_native_math_target": source_math_segments == 0 or (math_coverage >= 0.95 and unresolved_math == 0),
-        "meets_math_visual_sync_target": True,
-        "meets_paging_target": components["paging"]["score"] >= 98.0,
+        # Native equation presence does not measure its rendered geometry.
+        "meets_math_visual_sync_target": None,
+        "math_visual_sync_evaluated": False,
+        "meets_paging_target": bool(
+            components["paging"]["score"] >= 98.0
+            and fidelity.get("available")
+            and not fidelity.get("page_count_mismatch")
+        ),
         "meets_page_standard_target": bool(style_profile.get("page_physical_size_ok")) if style_available else None,
         "meets_open_safety_target": bool(open_safety.get("ok")),
     }
@@ -959,31 +978,18 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
             run_dir.mkdir(parents=True, exist_ok=True)
             source_copy = _unique_path_in_dir(run_dir, f"{source_stem}.pdf")
             source_copy.write_bytes(data)
-            output_suffix = "structured_native" if payload.layout_mode == "structured" else "original_layout"
+            output_suffix = "structured_native"
             output_path = _unique_path_in_dir(run_dir, f"{source_stem}_{output_suffix}.hwpx")
             with storage.scoped_upload_directory(run_dir / "assets"):
-                if payload.layout_mode == "structured":
-                    stats = pdf_layout_writer.write_pdf_structured_hwpx(
-                        source_path,
-                        output_path,
-                        max_pages=payload.max_pages,
-                        native_math=payload.native_math,
-                        math_ai_recognition=payload.math_ai_recognition,
-                        math_ai_model=payload.math_ai_model,
-                        variant_policy=payload.variant_policy,
-                    )
-                else:
-                    stats = pdf_layout_writer.write_pdf_layout_hwpx(
-                        source_path,
-                        output_path,
-                        max_pages=payload.max_pages,
-                        include_images=True,
-                        include_lines=True,
-                        text_mode="line",
-                        native_math=payload.native_math,
-                        math_ai_recognition=payload.math_ai_recognition,
-                        math_ai_model=payload.math_ai_model,
-                    )
+                # Both public UI modes must satisfy the native editing contract.
+                # Keep the old coordinate request value as an API alias only.
+                stats = pdf_layout_writer.write_pdf_structured_hwpx(
+                    source_path, output_path, max_pages=payload.max_pages,
+                    native_math=payload.native_math,
+                    math_ai_recognition=payload.math_ai_recognition,
+                    math_ai_model=payload.math_ai_model,
+                    variant_policy=payload.variant_policy,
+                )
     except HTTPException:
         _cleanup_failed_run()
         raise
@@ -999,19 +1005,29 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
 
         render_dir = run_dir / "fidelity_renders"
         scope = _pdf_export_scope(source_copy, stats, payload)
-        structured_visual_math = stats.get("layout_mode") == "structured_math_visual_overlay"
-        if payload.layout_mode == "structured" and not structured_visual_math:
-            fidelity = {
-                "available": False,
-                "skipped": True,
-                "reason": "structured reflow is scored by editable structure and native-math coverage",
-                "pdf_page_count": int(stats.get("source_pages") or stats.get("pages") or 0),
-                "hwpx_page_count": None,
-                "review_flags": [],
-            }
-        else:
-            fidelity = _pdf_export_fidelity(source_copy, output_path, render_dir, stats, payload, scope)
-            _attach_fidelity_artifact_refs(fidelity, render_dir)
+        from .pdf_editability import inspect_pdf_editability
+
+        editability = inspect_pdf_editability(source_copy, output_path, stats.get("image_provenance") or [],
+                                             page_limit=int(scope["selected_page_count"]),
+                                             require_question_boxes=bool(stats.get("question_grouping", {}).get("question_count")))
+        stats["verified_question_units"] = editability["question_units"]
+        if not editability["ok"]:
+            raise HTTPException(status_code=422, detail={
+                "message": "본문 이미지·문항 분리 오류 또는 원문 누락이 발견되어 편집형 문서를 제공할 수 없습니다.",
+                "editability": editability,
+            })
+        fidelity = _pdf_export_fidelity(source_copy, output_path, render_dir, stats, payload, scope)
+        if editability["question_units"].get("question_count"):
+            from .pdf_question_rendering import inspect_question_rendering
+
+            rendering = inspect_question_rendering(output_path, pdf_layout_fidelity.rhwp)
+            editability["rendering"] = rendering
+            if rendering.get("ok") is False:
+                raise HTTPException(status_code=422, detail={
+                    "message": "문항 글상자 내부의 일부 내용이 실제 렌더에 나타나지 않아 결과물을 제공할 수 없습니다.",
+                    "rendering": rendering,
+                })
+        _attach_fidelity_artifact_refs(fidelity, render_dir)
         style_profile = pdf_layout_writer.inspect_layout_template_profile(output_path)
         open_safety = _inspect_hwpx_open_safety(output_path)
         visual_sync_ratio = fidelity.get("overall_sync_ratio")
@@ -1029,8 +1045,8 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
         full_page_raster_fallback = bool(stats.get("full_page_raster_fallback"))
         quality = {
             "target_sync_ratio": 0.94,
-            "editable_text_coverage_ratio": stats.get("editable_text_coverage_ratio"),
-            "meets_editable_text_target": float(stats.get("editable_text_coverage_ratio") or 0.0) >= 0.9,
+            "editable_text_coverage_ratio": editability["native_source_text_coverage"],
+            "meets_editable_text_target": editability["native_source_text_coverage"] >= 0.98,
             "visual_sync_ratio": visual_sync_ratio,
             "whole_page_visual_sync_ratio": whole_page_visual_sync_ratio,
             "layout_view_sync_ratio": layout_view_sync_ratio,
@@ -1042,7 +1058,7 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
             "full_page_raster_fallback": full_page_raster_fallback,
             "full_page_images": int(stats.get("full_page_images") or 0),
             "visual_sync_requires_human_review": (
-                payload.layout_mode == "coordinate" or structured_visual_math
+                True
             ),
         }
         quality.update(
@@ -1053,9 +1069,23 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
                 open_safety=open_safety,
             )
         )
+        quality["editability"] = editability
+        quality["native_text_coverage_scope"] = "source_pdf_text_layer_excluding_bitmap_lettering"
+        quality["meets_native_editability_target"] = editability["ok"]
+        quality["meets_objective_score_target"] = bool(
+            quality.get("meets_objective_score_target") and editability["ok"]
+            and open_safety.get("ok") and fidelity.get("available")
+            and not fidelity.get("skipped") and not fidelity.get("page_count_mismatch")
+            and fidelity.get("meets_layout_view_sync_target")
+        )
+        if not quality["meets_objective_score_target"]:
+            quality["visual_review_flags"] = list(dict.fromkeys([
+                *quality["visual_review_flags"], "native_output_requires_layout_review"
+            ]))
         report_path = _unique_path_in_dir(run_dir, "layout_report.json")
         report = {
-            "mode": f"pdf_{payload.layout_mode}_hwpx",
+            "mode": "pdf_structured_hwpx",
+            "requested_layout_mode": payload.layout_mode,
             "source": {"name": payload.filename, "upload_path": rel_path, "copy": _export_file_item(source_copy)},
             "scope": scope,
             "export": _export_file_item(output_path),
@@ -1068,6 +1098,7 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
                 "editable_text_coverage_ratio tracks text-line preservation, not pixel-perfect visual similarity.",
                 "layout_view_sync_ratio is the primary 94-point whole-page margin/spacing/scale signal.",
                 f"objective_score_target is {quality.get('objective_score_target')} and combines source page/column fidelity, exam margins and spacing, editable structure, native math coverage, completeness, paging, and editor-open safety.",
+                "For native structured output, the displayed objective score cannot exceed the independently rendered harsh layout score; structure_objective_score retains the uncapped structure diagnostic.",
                 "page_physical_size_ok requires a portrait KICE-style physical page setup; A3-like KICE math sheets are emitted as B4_114 for B4 114% print output.",
                 "whole_page_visual_sync_ratio compares raw full-page luminance and remains a strict renderer-difference diagnostic.",
                 "visual_sync_ratio compares rendered PDF and HWPX content crops; foreground_overlap_ratio is a stricter text-position diagnostic.",
@@ -1079,7 +1110,8 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
 
         return {
             "ok": True,
-            "mode": f"pdf_{payload.layout_mode}_hwpx",
+            "mode": "pdf_structured_hwpx",
+            "requested_layout_mode": payload.layout_mode,
             "source": {"name": payload.filename, "path": rel_path, "copy": _export_file_item(source_copy)},
             "scope": scope,
             "export": _export_file_item(output_path),
@@ -1097,11 +1129,16 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
             ] if not scope["includes_entire_source"] else []) + ([
                 "첫 유형을 확정할 수 없어 전체 선택 범위를 보존했습니다."
             ] if payload.variant_policy == "first" and not scope["variant_selection_applied"] else []) + [
-                "텍스트를 편집 가능한 HWPX로 생성했습니다."
+                "문항은 각각 하나의 글상자로 묶고 내부 문단·표·수식·그림은 편집 가능한 상태로 유지합니다. 내용을 늘리면 글상자 높이를 조절해야 하며 원본 쪽수·배치와 달라질 수 있습니다."
+                if editability["question_units"].get("question_count")
+                else "본문은 편집 가능한 문단·표·수식으로 생성했습니다. 원본 쪽수·배치와 달라질 수 있습니다."
                 if not full_page_raster_fallback
                 else "일부 페이지를 이미지로 보존했습니다. 편집 가능한 텍스트 범위를 검수해 주세요."
             ] + ([f"편집 가능한 수식 {int(stats.get('native_equations') or 0)}개를 생성했습니다."]
-                 if int(stats.get("native_equations") or 0) else []),
+                 if int(stats.get("native_equations") or 0) else []) + ([
+                     "원본 그림은 이미지로 유지되며, 그림 내부의 글자는 문단 편집 범위에 포함되지 않습니다."
+                 ] if any(record.get("role") == "source_figure" for record in (stats.get("image_provenance") or [])) else []) + (["원본 배치 품질 기준을 충족하지 못했습니다. 결과를 확인해 주세요."]
+                 if not quality["meets_objective_score_target"] else []),
         }
 
     except HTTPException:

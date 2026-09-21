@@ -2705,15 +2705,14 @@ async function exportPdfLayoutFiles({ layoutMode = "coordinate", mathAi = null, 
   const controller = new AbortController();
   state.importController = controller;
   const results = [];
-  // 간단 변환은 편집형 기본값인 structured 모드를 쓰고, 스튜디오의 원본 레이아웃
-  // 버튼은 기존처럼 coordinate(원본 좌표 충실) 모드를 유지한다.
+  // coordinate는 호환용 요청 이름이며 서버에서 structured와 같은 편집형 경로를 사용한다.
   const useMathAi = mathAi === null ? Boolean(els.layoutMathAi?.checked) : Boolean(mathAi);
 
-  setButtonBusy(els.layoutExportButton, true, "원본 레이아웃 변환 중...");
+  setButtonBusy(els.layoutExportButton, true, "편집형 HWPX 변환 중...");
   setImportButtonsDisabled([els.importButton, els.quickImportButton, els.layoutExportButton], true);
   try {
     for (const [index, file] of pdfFiles.entries()) {
-      const progressLabel = layoutMode === "structured" ? "편집형 변환 중" : "원본 좌표 변환 중";
+      const progressLabel = "편집형 HWPX 변환 중";
       setImportProgress(`${index + 1}/${pdfFiles.length} · ${file.name} ${progressLabel}`, true);
       const payload = {
         filename: file.name,
@@ -2745,7 +2744,7 @@ async function exportPdfLayoutFiles({ layoutMode = "coordinate", mathAi = null, 
       }
     }
     await loadExportHistory();
-    toast(`${results.length}개 PDF를 원본 레이아웃 HWPX로 만들었습니다.`);
+    toast(`${results.length}개 PDF를 편집형 HWPX로 만들었습니다.`);
     return results.length === pdfFiles.length;
   } catch (error) {
     const message = friendlyErrorMessage(error);

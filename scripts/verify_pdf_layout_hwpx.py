@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -8,9 +9,13 @@ from pathlib import Path
 from lxml import etree
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 VENDOR = ROOT / "app" / "_vendor"
 if str(VENDOR) not in sys.path:
     sys.path.insert(0, str(VENDOR))
+
+from app.pdf_question_markers import QUESTION_START  # noqa: E402
 
 HP = "http://www.hancom.co.kr/hwpml/2011/paragraph"
 HC = "http://www.hancom.co.kr/hwpml/2011/core"
@@ -318,15 +323,53 @@ def _verify_hancom_compatibility(path: Path, *, require_pdf_font_faces: bool = T
 def _verify_no_draw_text_equations(path: Path) -> list[str]:
     issues: list[str] = []
     ns = {"hp": HP}
+    question_ids: set[str] = set()
+
+    def whole_question_box(draw):
+        # Package-only validation checks the real container and native question
+        # start. Source completeness is enforced separately by
+        # inspect_question_units(source, output), never by this name alone.
+        identity = re.fullmatch(r"question:(v[1-9]\d*:q(\d{2}))", draw.get("name", ""))
+        rect = draw.getparent()
+        sub = draw.find("hp:subList", ns)
+        pos = rect.find("hp:pos", ns) if rect is not None else None
+        if (
+            identity is None or identity[1] in question_ids
+            or rect is None or rect.tag != f"{{{HP}}}rect"
+            or pos is None or pos.get("treatAsChar") != "1"
+            or rect.get("lock") == "1" or draw.get("editable") != "1"
+            or sub is None
+        ):
+            return False
+        # Small inline answer labels are genuine editable objects within a
+        # question. Validate their actual text, stroke, geometry and anchors;
+        # a name tag cannot excuse a nested line box or equation image.
+        from app.pdf_inline_labels import inline_label_text
+        if any(nested.getparent().get("lock") == "1"
+               or inline_label_text(nested.getparent()) is None
+               for nested in draw.findall(".//hp:drawText", ns)):
+            return False
+        def direct_text(paragraph):
+            return "".join(t.text or "" for t in paragraph.findall("hp:run/hp:t", ns)).strip()
+        first = next((text for p in sub.findall("hp:p", ns) if (text := direct_text(p))), "")
+        starts = [int(match[1]) for p in sub.findall("hp:p", ns)
+                  if (match := QUESTION_START.match(direct_text(p)))]
+        if not QUESTION_START.match(first) or starts != [int(identity[2])]:
+            return False
+        question_ids.add(identity[1])
+        return True
+
     with zipfile.ZipFile(path) as archive:
         for section_name in _section_names(archive):
             section = etree.fromstring(archive.read(section_name))
             for draw_index, draw in enumerate(section.findall(".//hp:drawText", ns), start=1):
                 equations = draw.findall(".//hp:equation", ns)
-                if equations:
+                claims_question = draw.get("name", "").startswith("question:")
+                valid_question = whole_question_box(draw) if claims_question else False
+                if (equations or claims_question) and not valid_question:
                     issues.append(
                         f"{section_name}: drawText #{draw_index} contains hp:equation; "
-                        "PDF layout export must keep equations out of drawText"
+                        "native equations require a genuine editable whole-question box"
                     )
     return issues
 

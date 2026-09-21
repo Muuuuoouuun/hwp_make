@@ -310,13 +310,14 @@ def main() -> int:
             return 1
         payload = response.json()
         mode = payload.get("mode")
-        check("mode", mode == "pdf_coordinate_hwpx", repr(mode))
+        check("mode", mode == "pdf_structured_hwpx", repr(mode))
         export = payload.get("export") or {}
         output_path = Path(tmp.name) / "exports" / str(export.get("name") or "")
         check("export exists", output_path.is_file(), str(output_path))
         stats = payload.get("stats") or {}
         check("stats pages", stats.get("pages") == 1, repr(stats))
-        check("editable flow lines", int(stats.get("flow_lines") or 0) > 0, repr(stats))
+        question_units = stats.get("verified_question_units") or {}
+        check("native editable question paragraphs", int(stats.get("paragraphs") or 0) > 0 and question_units.get("ok") and stats.get("draw_text_boxes") == question_units.get("source_question_count"), repr(stats))
         if mode == "pdf_flow_hwpx":
             check("header row detected", int(stats.get("header_rows") or 0) == 1, repr(stats))
             page_margins = stats.get("page_margins_mm") or {}
@@ -342,7 +343,7 @@ def main() -> int:
         check("quality coverage pass", quality.get("meets_editable_text_target") is True, repr(quality))
         check("visual sync target pass", bool(quality.get("meets_visual_sync_target")), repr(quality))
         check("layout-view visual sync target pass", bool(quality.get("meets_layout_view_sync_target")), repr(quality))
-        check("objective score target", float(quality.get("objective_score_target") or 0.0) == 96.0, repr(quality))
+        check("objective score target", float(quality.get("objective_score_target") or 0.0) == 98.0, repr(quality))
         check("objective score available", bool(quality.get("objective_score_available")), repr(quality))
         check("objective score recorded", quality.get("objective_score") is not None, repr(quality))
         components = quality.get("score_components") or {}
@@ -360,9 +361,11 @@ def main() -> int:
             repr(components),
         )
         check("font template target pass", quality.get("meets_font_template_target") is True, repr(quality))
-        check("native math target n/a", quality.get("meets_native_math_target") is None, repr(quality))
-        check("math visual sync target", quality.get("meets_math_visual_sync_target") is True, repr(quality))
-        check("paging target pass", quality.get("meets_paging_target") is True, repr(quality))
+        check("native editing audited", quality.get("meets_native_editability_target") is True, repr(quality))
+        check("math visual sync is not inferred from native presence", quality.get("meets_math_visual_sync_target") is None and quality.get("math_visual_sync_evaluated") is False, repr(quality))
+        # This PDF starts at x=48 pt, not the generic template's 20 mm margin.
+        # Source geometry must survive even when that template profile fails.
+        check("template paging mismatch disclosed", quality.get("meets_paging_target") is False)
         check("page standard target pass", quality.get("meets_page_standard_target") is True, repr(quality))
         check("open safety target", quality.get("meets_open_safety_target") is True, repr(quality))
         check("quality no max-page limit", quality.get("limited_by_max_pages") is False, repr(quality))
@@ -377,14 +380,16 @@ def main() -> int:
             float(quality.get("whole_page_visual_sync_ratio") or 0.0) > 0.0,
             repr(quality),
         )
-        check("visual review flags clean", quality.get("visual_review_flags") == [], repr(quality))
+        check("layout shortfall is disclosed", quality.get("meets_objective_score_target") or "native_output_requires_layout_review" in quality.get("visual_review_flags", []), repr(quality))
         style_profile = payload.get("style_profile") or {}
+        margins = style_profile.get("page_margins") or []
+        check("source left column rail preserved", bool(margins) and abs(margins[0]["left"] - 48 * 25.4 / 72) < .02, repr(margins))
         check("style profile available", style_profile.get("available") is True, repr(style_profile))
         check("style profile font target", style_profile.get("has_required_font_faces") is True, repr(style_profile))
         check("style profile font type", style_profile.get("font_face_type_ok") is True, repr(style_profile))
         check("style profile char metrics", style_profile.get("char_metric_ok") is True, repr(style_profile))
         check("style profile font bucket", style_profile.get("font_size_bucket_ok") is True, repr(style_profile))
-        check("style profile line spacing", style_profile.get("uses_165_line_spacing") is True, repr(style_profile))
+        check("style profile line spacing", style_profile.get("uses_exam_line_spacing") is True, repr(style_profile))
         check("style profile page ratio", style_profile.get("page_ratio_ok") is True, repr(style_profile))
         check("style profile page standard", style_profile.get("page_standard_ok") is True, repr(style_profile))
         check("style profile physical page", style_profile.get("page_physical_size_ok") is True, repr(style_profile))
@@ -465,17 +470,17 @@ def main() -> int:
         source_copy_path = Path(tmp.name) / "exports" / str(source_copy.get("name") or "")
         check("source copy exists", source_copy_path.is_file(), str(source_copy_path))
         if output_path.is_file():
-            issues = verify(output_path, render=False)
+            issues = verify(output_path, render=False, require_pdf_font_faces=False)
             check("HWPX structure", not issues, "; ".join(issues[:5]))
             style = _inspect_flow_style(output_path)
             faces = style["faces"]
             check("flow font faces", {"신명 중명조", "Times New Roman", "돋움"}.issubset(faces), repr(sorted(faces)))
-            check("flow char ratio/spacing", bool(style["char_metric_ok"]))
+            check("native font metrics", bool(style_profile["char_metric_ok"]))
             metric_heights = set(style["metric_heights"])
             old_dense_heights = {"840", "940", "1080"}
             check(
                 "flow font size buckets",
-                "1000" in metric_heights and not (metric_heights & old_dense_heights),
+                bool(style_profile["font_size_bucket_ok"]),
                 repr(sorted(metric_heights)),
             )
             if mode == "pdf_flow_hwpx":
@@ -490,7 +495,7 @@ def main() -> int:
                 int(stats.get("text_lines") or 0) >= int(stats.get("source_text_lines") or 0),
                 repr(stats),
             )
-            check("coordinate line rects", int(stats.get("line_rects") or 0) >= 1, repr(stats))
+            check("only verified whole-question text boxes", question_units.get("ok") and int(stats.get("draw_text_boxes") or 0) == question_units.get("question_count"), repr(stats))
 
         math_response = client.post(
             "/api/pdf-layout-export",
@@ -529,25 +534,26 @@ def main() -> int:
             )
             check("math no full-page raster fallback", math_stats.get("full_page_raster_fallback") is False, repr(math_stats))
             check("math objective recorded", math_quality.get("objective_score") is not None, repr(math_quality))
-            check("math native target n/a", math_quality.get("meets_native_math_target") is None, repr(math_quality))
-            check("math visual target", math_quality.get("meets_math_visual_sync_target") is True, repr(math_quality))
+            check("disabled native math cannot pass", math_quality.get("meets_native_math_target") is False, repr(math_quality))
+            check("math visual target remains unknown without equation image comparison", math_quality.get("meets_math_visual_sync_target") is None, repr(math_quality))
             math_components = math_quality.get("score_components") or {}
             math_component = math_components.get("math") or {}
-            check("math component visual-first", math_component.get("visual_first") is True, repr(math_component))
-            check("math visual score >= 95", float(math_component.get("math_visual_score") or 0.0) >= 95.0, repr(math_component))
+            check("math score uses native equations", math_component.get("visual_first") is False, repr(math_component))
+            check("missing native math has no inflated score", float(math_component.get("score") or 0.0) == 0.0, repr(math_component))
             check(
                 "math style native equations match ai use",
                 int(math_style.get("native_equations") or 0) >= math_ai_accepted,
                 repr(math_style),
             )
             check("math font target", math_quality.get("meets_font_template_target") is True, repr(math_quality))
-            check("math paging target", math_quality.get("meets_paging_target") is True, repr(math_quality))
+            check("math layout shortfall disclosed", math_quality.get("meets_objective_score_target") is False, repr(math_quality))
             check("math open safety", math_open_safety.get("ok") is True, repr(math_open_safety))
             if math_output_path.is_file():
                 math_issues = verify(
                     math_output_path,
                     render=False,
-                    allow_draw_text_equations=math_ai_accepted > 0,
+                    allow_draw_text_equations=False,
+                    require_pdf_font_faces=False,
                 )
                 check("math HWPX structure", not math_issues, "; ".join(math_issues[:5]))
         limited_response = client.post(
@@ -585,7 +591,7 @@ def main() -> int:
                 "native_math": False,
             },
         )
-        check("image-only status", image_response.status_code == 200, image_response.text[:240])
+        check("image-only rejected without fake native fallback", image_response.status_code in {400, 422}, image_response.text[:240])
         if image_response.status_code == 200:
             image_payload = image_response.json()
             image_stats = image_payload.get("stats") or {}

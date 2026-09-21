@@ -1,0 +1,25 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 5032f9d..5d232a4 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "rhwp-python"
+-version = "0.7.0"
++version = "0.7.0+nativecell1"
+ edition = "2021"
+ # ^ rust-version 미명시 — 상위 rhwp crate 정책(stable Rust, MSRV unclaimed) 준수.
+ #   PyO3 0.28 이 Rust 1.83+ 요구하지만, 이는 README 에 문서로 안내
+@@ -42,10 +42,10 @@ crate-type = ["cdylib", "rlib"]
+ extension-module = ["pyo3/extension-module"]
+ 
+ [dependencies]
+-pyo3 = { version = "0.28", features = ["abi3-py310"] }
++pyo3 = { version = "0.28", features = ["abi3-py310", "generate-import-lib"] }
+ # ^ native-skia: 상류 SkiaLayerRenderer (PR #599 PNG 게이트웨이) 활성화.
+ #   skia-safe binary-cache 가 빌드 시점 약 30 MB pre-built binary 다운로드.
+-rhwp = { path = "external/rhwp", features = ["native-skia"] }
++rhwp = { path = "../rhwp-core-patched", features = ["native-skia"] }
+ 
+ [profile.release]
+ lto = "fat"

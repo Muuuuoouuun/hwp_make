@@ -250,6 +250,31 @@ def _foreground_mask(image: Image.Image, threshold: int = 245) -> Image.Image:
     return gray.point(lambda pixel: 255 if pixel < threshold else 0, mode="L")
 
 
+def _max_filter(mask: Image.Image, size: int) -> Image.Image:
+    """Exact square dilation with Pillow's edge clamping, in two linear passes.
+
+    QA repeatedly dilates large grayscale masks. A square maximum is separable;
+    taking horizontal then vertical maxima preserves every pixel while avoiding
+    the rank filter's repeated square-window work. No scoring policy changes.
+    """
+    if mask.mode != "L" or size < 1 or size % 2 != 1:
+        raise ValueError("maximum filter requires an L image and a positive odd size")
+    if size == 1 or not mask.width or not mask.height:
+        return mask.copy()
+    values = np.asarray(mask)
+    radius = size // 2
+    height, width = values.shape
+    padded = np.pad(values, ((0, 0), (radius, radius)), mode="edge")
+    horizontal = padded[:, :width].copy()
+    for offset in range(1, size):
+        np.maximum(horizontal, padded[:, offset:offset + width], out=horizontal)
+    padded = np.pad(horizontal, ((radius, radius), (0, 0)), mode="edge")
+    result = padded[:height].copy()
+    for offset in range(1, size):
+        np.maximum(result, padded[offset:offset + height], out=result)
+    return Image.fromarray(result)
+
+
 def _foreground_count(mask: Image.Image) -> int:
     histogram = mask.histogram()
     return int(histogram[255]) if len(histogram) > 255 else 0
@@ -414,10 +439,10 @@ def _line_band_match_score(source: np.ndarray, output: np.ndarray) -> float:
 
 def _occupancy_grid_score(source_mask: Image.Image, output_mask: Image.Image) -> float:
     target_size = (80, 113)
-    source_soft = source_mask.filter(ImageFilter.MaxFilter(5)).resize(
+    source_soft = _max_filter(source_mask, 5).resize(
         target_size, Image.Resampling.BOX
     )
-    output_soft = output_mask.filter(ImageFilter.MaxFilter(5)).resize(
+    output_soft = _max_filter(output_mask, 5).resize(
         target_size, Image.Resampling.BOX
     )
     source = np.asarray(source_soft, dtype=np.float32) / 255.0
@@ -516,8 +541,8 @@ def _strict_alignment_metrics(
     elif source_fg == 0 or output_fg == 0:
         foreground_overlap = 0.0
     else:
-        source_dilated = source_mask_crop.filter(ImageFilter.MaxFilter(7))
-        output_dilated = output_mask_crop.filter(ImageFilter.MaxFilter(7))
+        source_dilated = _max_filter(source_mask_crop, 7)
+        output_dilated = _max_filter(output_mask_crop, 7)
         source_covered = _intersection_count(source_mask_crop, output_dilated) / source_fg
         output_covered = _intersection_count(output_mask_crop, source_dilated) / output_fg
         foreground_overlap = (source_covered + output_covered) / 2.0
@@ -590,8 +615,8 @@ def _page_metrics(source: Image.Image, output: Image.Image) -> dict[str, Any]:
     normalized_candidates: list[tuple[float, int]] = []
     for kernel_size in (3, 7, 9, 15, 17, 21):
         normalized_detailed = _detailed_geometry_metrics(
-            source_mask.filter(ImageFilter.MaxFilter(kernel_size)),
-            output_mask.filter(ImageFilter.MaxFilter(kernel_size)),
+            _max_filter(source_mask, kernel_size),
+            _max_filter(output_mask, kernel_size),
             foreground_overlap=foreground_overlap,
         )
         normalized_candidates.append(
@@ -1294,7 +1319,7 @@ def _page_duplicate_fingerprint(image: Image.Image) -> np.ndarray:
     gray = image.convert("L")
     y0, y1 = int(gray.height * 0.07), max(int(gray.height * 0.95), int(gray.height * 0.07) + 1)
     body = gray.crop((0, y0, gray.width, y1))
-    mask = _foreground_mask(body).filter(ImageFilter.MaxFilter(3))
+    mask = _max_filter(_foreground_mask(body), 3)
     reduced = mask.resize((192, 256), Image.Resampling.BOX)
     return np.asarray(reduced, dtype=np.uint8) >= 64
 

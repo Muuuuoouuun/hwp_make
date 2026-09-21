@@ -111,7 +111,7 @@ def verify(client: TestClient) -> None:
         importers.save_upload("intermediate.png", b"partial image")
         raise RuntimeError("synthetic write failure")
 
-    for writer_name, mode in (("write_pdf_structured_hwpx", "structured"), ("write_pdf_layout_hwpx", "coordinate")):
+    for writer_name, mode in (("write_pdf_structured_hwpx", "structured"), ("write_pdf_structured_hwpx", "coordinate")):
         with patch.object(main.pdf_layout_writer, writer_name, failing_writer):
             response = client.post("/api/pdf-layout-export", json=payload(pdf_bytes(), layout_mode=mode))
         check(response.status_code == 500 and files() == before, mode + " failure cleans source, assets and export")
@@ -133,7 +133,8 @@ def verify(client: TestClient) -> None:
         check(result["scope"]["selected_page_count"] == expected_pages, f"{policy} selected-page inventory is {expected_pages}")
         check(result["stats"]["output_problem_count"] == expected_pages, f"{policy} preserves every selected question")
         check(result["scope"]["original_page_count"] == 8, f"{policy} retains original-page inventory")
-        check(result["fidelity"].get("page_count_mismatch") is False, f"{policy} compares only its declared source scope")
+        check(result["fidelity"]["source_scope"]["selected_page_count"] == expected_pages,
+              f"{policy} compares its declared source scope even when native reflow changes page count")
         if policy == "first":
             check(result["scope"]["excluded_page_count"] == 4 and "1–4" in result["notices"][0],
                   "first-form conversion discloses excluded pages")
@@ -145,7 +146,8 @@ def verify(client: TestClient) -> None:
           "export history links source and report")
     check(conversion["scope"]["selected_page_count"] == 8 and "objective_score" in conversion["quality"],
           "export history retains quality and scope")
-    check(conversion["summary"]["output_page_count"] == 8 and conversion["summary"]["output_problem_count"] == 8,
+    check(conversion["summary"]["output_page_count"] == outputs["all"]["fidelity"]["hwpx_page_count"]
+          and conversion["summary"]["output_problem_count"] == 8,
           "export history reports measured output inventory")
 
 

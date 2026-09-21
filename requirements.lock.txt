@@ -14,7 +14,8 @@ lxml==6.1.1
 httpx==0.28.1
 reportlab==4.5.0
 olefile==0.47
-rhwp-python==0.7.0
+./packaging/renderer/wheels/rhwp_python-0.7.0+nativecell1-cp310-abi3-win_amd64.whl ; sys_platform == 'win32' and platform_machine == 'AMD64'
+rhwp-python==0.7.0 ; sys_platform != 'win32' or platform_machine != 'AMD64'
 PyMuPDF==1.27.2.2
 #
 # --- 핵심 전이 의존성 ---
