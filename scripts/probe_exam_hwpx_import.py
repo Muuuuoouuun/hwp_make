@@ -43,6 +43,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("files", nargs="+", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--strict-answer-endnotes", action="store_true",
+                        help="Fail when a numbered answer-endnote exam loses question boundaries or note content.")
     args = parser.parse_args()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = args.output_dir.resolve() / f"{stamp}_{uuid.uuid4().hex[:8]}"
@@ -81,6 +83,24 @@ def main():
                 "seconds": round(time.perf_counter() - started, 3),
                 "notices": result.get("notices", []),
             })
+            if args.strict_answer_endnotes:
+                note_numbers = [n.get("number") for n in notes]
+                note_texts = ["".join(n.itertext()) for n in notes]
+                answer_note_count = sum("[답]" in text for text in note_texts)
+                if (
+                    len(notes) < 2
+                    or note_numbers != [str(i) for i in range(1, len(notes) + 1)]
+                    or answer_note_count < len(notes) * 0.8
+                ):
+                    report["errors"].append({"file": str(path), "error": "not a numbered answer-endnote exam"})
+                elif (
+                    len(rows) != len(notes)
+                    or [row.get("number") for row in rows] != note_numbers
+                    or sum(bool(row.get("answer")) for row in rows) < answer_note_count
+                    or sum(bool(row.get("explanation")) for row in rows) < answer_note_count
+                    or any(any(probe in row.get("stem", "") for row in rows) for probe in probes)
+                ):
+                    report["errors"].append({"file": str(path), "error": "answer-endnote import lost boundaries, fields, or leaked notes"})
         except Exception as exc:
             report["errors"].append({"file": str(path), "error": str(exc)})
     target = run_dir / "report.json"
