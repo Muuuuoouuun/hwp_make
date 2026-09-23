@@ -2053,6 +2053,8 @@ def _create_from_chunks(
     sink = _Sink()
     for sequence, chunk in enumerate(chunks, start=1):
         text, answer, explanation = _split_answer_explanation(chunk["text"])
+        answer = str(chunk.get("answer") or answer)
+        explanation = str(chunk.get("explanation") or explanation)
         text, choices = _split_stem_and_choices(text)
         number = (
             str(chunk.get("number_hint") or "")
@@ -2246,6 +2248,67 @@ def _hwpx_manifest_map(archive: zipfile.ZipFile) -> dict[str, str]:
     return mapping
 
 
+def _hwpx_endnote_fields(note: Any) -> tuple[str, str]:
+    """Read answer-leading exam endnotes without leaking them into the stem."""
+    lines: list[str] = []
+    for para in note.iter():
+        if _local_name(para) != "p":
+            continue
+        parts: list[str] = []
+        for node in para.iter():
+            if _inside_hwpx_container(node, {"equation"}):
+                continue
+            if _local_name(node) == "t" and node.text:
+                parts.append(node.text)
+            elif _local_name(node) == "equation":
+                parts.append(_hwpx_equation_text(node))
+        line = "".join(parts).strip()
+        if line:
+            lines.append(line)
+    answer = ""
+    explanation: list[str] = []
+    for line in lines:
+        if line.startswith("[답]"):
+            answer = line.removeprefix("[답]").strip()
+        elif line.startswith("[풀이]"):
+            rest = line.removeprefix("[풀이]").strip()
+            if rest:
+                explanation.append(rest)
+        else:
+            explanation.append(line)
+    return answer, _clean_text("\n".join(explanation))
+
+
+def _hwpx_answer_endnote_chunks(
+    paragraphs: list[tuple[str, list[str], list[list[list[str]]]]],
+    markers: list[tuple[int, str, str, str]],
+) -> list[dict[str, Any]] | None:
+    """Use numbered answer endnotes as boundaries only for a complete exam sequence."""
+    if len(markers) < 2:
+        return None
+    numbers = [number for _, number, _, _ in markers]
+    if numbers != [str(index) for index in range(1, len(markers) + 1)]:
+        return None
+    if sum(bool(answer) for _, _, answer, _ in markers) < len(markers) * 0.8:
+        return None
+    chunks: list[dict[str, Any]] = []
+    for index, (start, number, answer, explanation) in enumerate(markers):
+        end = markers[index + 1][0] if index + 1 < len(markers) else len(paragraphs)
+        blocks = paragraphs[start:end]
+        if index == 0:
+            blocks = [*paragraphs[:start], *blocks]
+        body = _clean_text("\n".join(text for text, _, _ in blocks if text))
+        images = [image for _, paths, _ in blocks for image in paths]
+        tables = [table for _, _, grids in blocks for table in grids]
+        if not body and not images and not tables:
+            return None
+        chunks.append({
+            "text": body, "images": images, "tables": tables,
+            "number_hint": number, "answer": answer, "explanation": explanation,
+        })
+    return chunks
+
+
 def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
     save_upload(filename, payload)
     notices: list[str] = []
@@ -2262,6 +2325,7 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
         bin_map = _hwpx_manifest_map(archive)
         saved_bins: dict[str, str | None] = {}
         paragraphs: list[tuple[str, list[str], list[list[list[str]]]]] = []
+        answer_endnotes: list[tuple[int, str, str, str]] = []
         image_count = 0
         for section_name in sections:
             try:
@@ -2273,16 +2337,24 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
             for para in root:
                 if _local_name(para) != "p":
                     continue
+                for note in para.iter():
+                    if _local_name(note) != "endNote":
+                        continue
+                    answer, explanation = _hwpx_endnote_fields(note)
+                    answer_endnotes.append((len(paragraphs), note.get("number") or "", answer, explanation))
                 tables = [
-                    _hwpx_table_rows(node) for node in para.iter() if _local_name(node) == "tbl"
+                    _hwpx_table_rows(node) for node in para.iter()
+                    if _local_name(node) == "tbl" and not _inside_hwpx_container(node, {"endNote"})
                 ]
                 tables = [rows for rows in tables if rows]
                 texts: list[str] = []
                 images: list[str] = []
                 for node in para.iter():
+                    name = _local_name(node)
                     if _inside_hwpx_container(node, {"tbl", "equation"}):
                         continue
-                    name = _local_name(node)
+                    if name != "img" and _inside_hwpx_container(node, {"endNote"}):
+                        continue
                     if name == "t" and node.text:
                         texts.append(node.text)
                     elif name == "equation":
@@ -2303,12 +2375,19 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
                             image_count += 1
                 paragraphs.append(("".join(texts).strip(), images, tables))
 
-    chunks = _paragraphs_to_chunks(paragraphs)
+    answer_note_chunks = _hwpx_answer_endnote_chunks(paragraphs, answer_endnotes)
+    chunks = answer_note_chunks or _paragraphs_to_chunks(paragraphs)
     if not chunks:
         return {"created": [], "notices": ["HWPX에서 내용을 찾지 못했습니다."]}
     sink = _create_from_chunks(chunks, "hwpx", filename, metadata)
     if image_count:
         notices.append(f"이미지 {image_count}개를 함께 가져왔습니다.")
+    if answer_note_chunks:
+        table_questions = sum(bool(chunk["tables"]) for chunk in answer_note_chunks)
+        if table_questions:
+            notices.append(
+                f"표가 있는 문항 {table_questions}개는 표 내부의 선택지·수식이 개별 선택지 칸으로 분리되지 않았을 수 있습니다."
+            )
     notices.extend(_dedup_notices(sink))
     return {"created": sink.created, "existing": sink.existing, "ordered_ids": sink.ordered_ids, "notices": notices}
 
