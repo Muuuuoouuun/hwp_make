@@ -324,6 +324,7 @@ def _verify_no_draw_text_equations(path: Path) -> list[str]:
     issues: list[str] = []
     ns = {"hp": HP}
     question_ids: set[str] = set()
+    graph_labels: set = set()
 
     def whole_question_box(draw):
         # Package-only validation checks the real container and native question
@@ -345,8 +346,10 @@ def _verify_no_draw_text_equations(path: Path) -> list[str]:
         # question. Validate their actual text, stroke, geometry and anchors;
         # a name tag cannot excuse a nested line box or equation image.
         from app.pdf_inline_labels import inline_label_text
+        from app.pdf_graph_inspection import graph_annotation_text
         if any(nested.getparent().get("lock") == "1"
-               or inline_label_text(nested.getparent()) is None
+               or (inline_label_text(nested.getparent()) is None
+                   and graph_annotation_text(nested.getparent()) is None)
                for nested in draw.findall(".//hp:drawText", ns)):
             return False
         def direct_text(paragraph):
@@ -366,7 +369,11 @@ def _verify_no_draw_text_equations(path: Path) -> list[str]:
                 equations = draw.findall(".//hp:equation", ns)
                 claims_question = draw.get("name", "").startswith("question:")
                 valid_question = whole_question_box(draw) if claims_question else False
-                if (equations or claims_question) and not valid_question:
+                if valid_question:
+                    from app.pdf_graph_inspection import graph_annotation_text
+                    graph_labels.update(nested for nested in draw.findall('.//hp:drawText',ns)
+                                        if graph_annotation_text(nested.getparent()) is not None)
+                if (equations or claims_question) and not valid_question and draw not in graph_labels:
                     issues.append(
                         f"{section_name}: drawText #{draw_index} contains hp:equation; "
                         "native equations require a genuine editable whole-question box"

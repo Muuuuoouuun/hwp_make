@@ -35,7 +35,7 @@ def _paragraph_minimum_height(paragraph):
     objects = []
     for run in paragraph.findall(HP + "run"):
         for child in run:
-            if child.tag in {HP + "pic", HP + "rect", HP + "equation", HP + "tbl"}:
+            if child.tag in {HP + "pic", HP + "rect", HP + "equation", HP + "tbl", HP + "container"}:
                 height = _number(child.find(HP + "sz"), "height")
                 pos = child.find(HP + "pos")
                 if (child.tag == HP + "pic" and pos is not None

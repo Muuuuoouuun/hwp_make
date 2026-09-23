@@ -18,7 +18,7 @@ HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
 HC = "{http://www.hancom.co.kr/hwpml/2011/core}"
 QUESTION = re.compile(r"question:v\d+:q\d{2}$")
-OBJECTS = {HP + x for x in ("equation", "tbl", "pic", "rect")}
+OBJECTS = {HP + x for x in ("equation", "tbl", "pic", "rect", "container")}
 
 
 def number(node, name, default=0):

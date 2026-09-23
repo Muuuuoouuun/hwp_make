@@ -162,7 +162,7 @@ def _flow_height(paragraph):
         child
         for run in paragraph.findall(f"{HP}run")
         for child in run
-        if child.tag in {f"{HP}tbl", f"{HP}pic", f"{HP}rect"}
+        if child.tag in {f"{HP}tbl", f"{HP}pic", f"{HP}rect", f"{HP}container"}
     ]
     return max(height, *(
         _number(obj.find(f"{HP}sz"), "height")
@@ -643,11 +643,11 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
                 shared_table_paragraphs += background_paragraphs
                 item_layouts[-1]['source_bbox_pt'] = layout['native_tables'][0]['bbox_pt']
                 para_by_id.update({p.get("id"): p for p in paras})
-            elif (layout.get('question_group_kind') == 'shared_passage' or inline_label_count
+            elif (layout.get('source_frame_has_grid')
+                or layout.get('question_group_kind') == 'shared_passage' or inline_label_count
                 or root_paragraph.find('.//' + HP + 'tbl//' + HP + 'equation') is not None):
-                # A shared passage or a complete mixed-math cell can recover
-                # measured paragraphs. Ordinary question callouts may contain
-                # partial frames and need their spacing reconciled as a group.
+                # A measured frame split by a real grid can recover its text
+                # fragments without altering a separate prose-only callout.
                 from .pdf_table_paragraphs import restore_table_paragraphs
                 shared_table_paragraphs += restore_table_paragraphs(root_paragraph, layout, header, page_width, para_style)
                 para_by_id.update({p.get("id"): p for p in paras})
@@ -669,6 +669,9 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
             from .pdf_picture_geometry import restore_single_picture_paragraph
             for paragraph, layout in zip(flow_paragraphs, item_layouts):
                 restore_single_picture_paragraph(paragraph, layout, page_width, default_width, para_style)
+            from .pdf_graph_writer import restore_graph_groups
+            flow_paragraphs, item_layouts, _ = restore_graph_groups(
+                section, flow_paragraphs, item_layouts, header, page_width, default_width, para_style)
             from .pdf_question_units import wrap_question_units
 
             paragraph_sources = list(zip(flow_paragraphs, item_layouts))

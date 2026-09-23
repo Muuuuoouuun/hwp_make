@@ -311,13 +311,27 @@ def inspect_source_images(document, assets: dict[str, bytes], provenance: list[d
                         result = proof
                     else:
                         result["native_background_proof"] = proof
+                elif record.get('source_kind') == 'bitmap_objects':
+                    from .pdf_source_backgrounds import compose_source_background
+                    source_png = compose_source_background(page, region, record.get('source_image_numbers', []))
+                    # This path deterministically decodes embedded bitmaps. It
+                    # does not have MuPDF's page-render JPEG sampling ambiguity.
+                    # Even a small extra glyph must not hide behind crop-error
+                    # tolerances and duplicate an editable annotation.
+                    try:
+                        with Image.open(io.BytesIO(source_png)) as expected_image, Image.open(io.BytesIO(actual)) as actual_image:
+                            exact = (expected_image.size == actual_image.size and
+                                     expected_image.convert('RGBA').tobytes() == actual_image.convert('RGBA').tobytes())
+                        result = {'ok':exact,'exact_bitmap_object_pixels':exact}
+                    except (OSError,ValueError,Image.DecompressionBombError):
+                        result = {'ok':False,'reason':'undecodable_picture'}
                 else:
                     source_png = render_source_crop(source, page_number-1, region)
                     result = compare_source_crop(source_png, actual)
             detail = {"index": index, "page": page_number, "bbox_pt": list(region), **result}
             pixel_checks.append(detail)
             if result["ok"]:
-                if record.get("role") == "source_background_frame":
+                if record.get("role") == "source_background_frame" or record.get('source_kind') == 'bitmap_objects':
                     numbers = set(record.get("source_image_numbers", []))
                     # A bounding union must not accidentally satisfy a separate
                     # foreground figure that was never embedded in this asset.

@@ -292,7 +292,8 @@ def inspect_pdf_editability(
     issues.extend(paragraph_flow["issues"])
     if text_boxes and (
         not question_units["ok"]
-        or question_units["question_count"] + question_units.get("source_inline_label_count", 0) != text_boxes
+        or question_units["question_count"] + question_units.get("source_inline_label_count", 0)
+           + question_units.get('source_graph_annotation_count', 0) != text_boxes
     ):
         issues.append("text_in_drawing_boxes")
     if positioned_tables:
@@ -338,7 +339,7 @@ def inspect_pdf_editability(
                     raise ValueError("invalid source bounds")
                 if region.get_area() >= page.rect.get_area() * 0.5:
                     issues.append("large_source_raster")
-                if item.get("role") == "source_figure":
+                if item.get("role") == "source_figure" and item.get('source_kind') != 'bitmap_objects':
                     regions.setdefault(page_number, []).append(region)
             except (KeyError, TypeError, ValueError, ZeroDivisionError):
                 issues.append("invalid_picture_provenance")

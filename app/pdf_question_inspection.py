@@ -213,6 +213,9 @@ def inspect_question_units(
         }
         roots = [etree.fromstring(archive.read(name)) for name in archive.namelist()
                  if re.fullmatch(r"Contents/section\d+\.xml", name)]
+        from .pdf_graph_inspection import inspect_graph_annotations
+        graph_annotations, verified_graph_draws = inspect_graph_annotations(source, roots, hrefs, archive, provenance)
+        issues.extend(graph_annotations['issues'])
         from .pdf_inline_labels import inspect_inline_label_preservation, inline_label_text
         inline_labels = inspect_inline_label_preservation(source, roots, page_limit=page_limit)
         if inline_labels['missing_label_frames']:
@@ -251,6 +254,8 @@ def inspect_question_units(
             for draw in (n for n in body_elements(root) if n.tag == HP + 'drawText'):
                 match = NAME.fullmatch(draw.get("name", ""))
                 if match is None:
+                    if draw in verified_graph_draws:
+                        continue
                     # A source-confirmed answer frame is an inline object of
                     # an existing question paragraph, not another question or
                     # a separately positioned body-text line. Its name alone
@@ -326,6 +331,8 @@ def inspect_question_units(
             "issues": issues,
             "question_count": 0,
             "source_inline_label_count": inline_label_count,
+            "source_graph_annotation_count": graph_annotations['annotation_count'],
+            "graph_annotations": graph_annotations,
             "inline_label_frames": inline_labels,
             "required": False,
         }
@@ -367,7 +374,8 @@ def inspect_question_units(
                 page.rect.height / record["page_height_px"],
             )
             region = fitz.Rect(x * sx, y * sy, (x + width) * sx, (y + height) * sy)
-            figures.setdefault(page_number, []).append(region)
+            if record.get('source_kind') != 'bitmap_objects':
+                figures.setdefault(page_number, []).append(region)
             figure_records.append((page_number, region, record.get("sha256")))
         source_regions = _source_regions_from_markers(document, raw_lines, expected)
         grids_by_page = {}
@@ -533,6 +541,8 @@ def inspect_question_units(
         "issues": sorted(set(issues)),
         "question_count": len(boxes),
         "source_inline_label_count": inline_label_count,
+        "source_graph_annotation_count": graph_annotations['annotation_count'],
+        "graph_annotations": graph_annotations,
         "inline_label_frames": inline_labels,
         "source_question_count": len(expected),
         "container_type": "native_text_box",

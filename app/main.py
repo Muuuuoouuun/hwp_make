@@ -580,7 +580,11 @@ def _pdf_structured_objective_score(
     structure_score = 0.0
     verified_questions = stats.get("verified_question_units") or {}
     native_structure = draw_text_boxes == 0 or (
-        verified_questions.get("ok") and verified_questions.get("question_count") == draw_text_boxes
+        verified_questions.get("ok") and (
+            int(verified_questions.get("question_count") or 0)
+            + int(verified_questions.get("source_inline_label_count") or 0)
+            + int(verified_questions.get("source_graph_annotation_count") or 0)
+        ) == draw_text_boxes
     )
     structure_score += 25.0 if native_structure else 0.0
     structure_score += 15.0 if paragraph_count > 0 else 0.0

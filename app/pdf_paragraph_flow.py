@@ -50,7 +50,7 @@ def inspect_paragraph_flow(source: Path, output: Path, *, page_limit=None) -> di
                 units = sum(len((t.text or "").encode("utf-16-le")) // 2
                             + sum(8 if child.tag == HP + "tab" else 1 for child in t)
                             for t in p.findall(HP + "run/" + HP + "t"))
-                units += 8 * sum(child.tag in {HP + tag for tag in ("equation", "tbl", "pic", "rect", "ctrl", "tab")}
+                units += 8 * sum(child.tag in {HP + tag for tag in ("equation", "tbl", "pic", "rect", "container", "ctrl", "tab")}
                                  for run in p.findall(HP + "run") for child in run)
                 units += sum(child.tag == HP + 'lineBreak' for run in p.findall(HP + 'run') for child in run)
                 offsets = [int(line.get("textpos", "0")) for line in p.findall(HP + "linesegarray/" + HP + "lineseg")]

@@ -102,7 +102,7 @@ _PARAGRAPH_START = re.compile(
 )
 
 
-def _semantic_line_groups(lines: list[dict], figures=()) -> list[list[dict]]:
+def _semantic_line_groups(lines: list[dict], figures=(), *, framed_callout=False) -> list[list[dict]]:
     """Join printed line wraps; retain labels and actual paragraph boundaries."""
     from . import pdf_layout_writer as w
 
@@ -161,6 +161,16 @@ def _semantic_line_groups(lines: list[dict], figures=()) -> list[list[dict]]:
             new_first_indent = bool(short_last_line and following is not None
                                     and abs(following.x0 - old.x0) < size * .3
                                     and 0 < following.y0 - new.y0 <= maximum_gap)
+            # Decorative notices use bullets and short section headings as
+            # real paragraph boundaries. A PDF baseline alone cannot convey
+            # those boundaries once the native document is edited.
+            callout_break = bool(framed_callout and (
+                re.match(r"^[∙•●]\s", text)
+                or (re.match(r"^[∙•●]\s", previous_text)
+                    and short_last_line and text[:1].isupper())
+                or (re.fullmatch(r"[A-Z][A-Za-z &]{2,32}", text)
+                    and re.match(r"^[A-Z][A-Za-z &]{2,24}:", previous_text))
+            ))
             if len(groups[-1]) == 1 and (QUESTION_START.match(previous_text) or _PARAGRAPH_START.match(previous_text)):
                 new_indent = False  # hanging question/choice label
             returns_below_figure = any(
@@ -171,7 +181,8 @@ def _semantic_line_groups(lines: list[dict], figures=()) -> list[list[dict]]:
                 for picture in figures
             )
             continuation = (
-                not _PARAGRAPH_START.match(text)
+                not callout_break
+                and not _PARAGRAPH_START.match(text)
                 and not QUESTION_START.match(text)
                 and not (sentence_end and (short_last_line or new_indent))
                 and not (new_indent and (new_first_indent or len(groups[-1]) > 1))
@@ -356,6 +367,8 @@ def _group_native_image_rows(items: list[dict]) -> list[dict]:
             )
             if (
                 old_bounds
+                and not layout.get('source_native_graph')
+                and not old_layout.get('source_native_graph')
                 and not previous.get("stem")
                 and not previous.get("tables")
                 and item.get("source_page") == previous.get("source_page")
@@ -1290,8 +1303,10 @@ def extract_native_content(
                             for row in table["cell_bounds"] for bounds in row if bounds]
             raster_backgrounds = []
             native_images, raster_frames = _native_images_and_frames(page, lines, cell_regions, raster_backgrounds)
+            from .pdf_graph_annotations import associate_graph_annotations
+            graph_labels = associate_graph_annotations(page, native_images, lines, table_regions)
             from .pdf_figure_labels import include_diagram_labels
-            diagram_labels = include_diagram_labels(page, native_images, lines, table_regions)
+            diagram_labels = include_diagram_labels(page, [p for p in native_images if not p.get('native_graph')], lines, table_regions)
             # PDF producers can encode one decorative frame as overlapping
             # bitmap strips. Unite their frame geometry before assigning prose.
             united = []
@@ -1342,7 +1357,7 @@ def extract_native_content(
                           if len(span.get("text", "").strip()) >= 12
                           and float(span.get("size", 0)) > 0]
             body_font_size = median(body_sizes) if body_sizes else 0
-            retained_labels = diagram_labels | {id(line) for line in lines
+            retained_labels = graph_labels | diagram_labels | {id(line) for line in lines
                                if retained_figure_label(line, native_images,
                                                         body_font_size=body_font_size)}
             line_items = [
@@ -1395,9 +1410,13 @@ def extract_native_content(
                     for row in table.get("cells", [])
                 ]
 
-            def save_figure(region):
+            def save_figure(region, graph=None):
                 from .pdf_source_image_validation import render_source_crop
-                data = render_source_crop(pdf_path, page_index, region)
+                if graph:
+                    from .pdf_source_backgrounds import compose_source_background
+                    data = compose_source_background(page, region, graph['source_image_numbers'])
+                else:
+                    data = render_source_crop(pdf_path, page_index, region)
                 path = importers._save_image_bytes(f"native_p{page_index + 1}_{len(provenance)}.png", data)
                 if not path:
                     raise ValueError("source figure could not be saved")
@@ -1405,6 +1424,8 @@ def extract_native_content(
                                    "page": page_index + 1,
                                    "bbox_px": [region.x0, region.y0, region.width, region.height],
                                    "page_width_px": page.rect.width, "page_height_px": page.rect.height})
+                if graph:
+                    provenance[-1].update(source_kind='bitmap_objects', source_image_numbers=graph['source_image_numbers'])
                 return path
 
             def save_background(region):
@@ -1512,7 +1533,8 @@ def extract_native_content(
                         region = w._item_bbox(picture)
                         # Render only the actual embedded figure bounds. PDF
                         # soft masks must be composited or charts lose strokes.
-                        path = save_figure(region)
+                        graph = picture.get('native_graph')
+                        path = save_figure(region, graph)
                         item["image_paths"] = [path]
                         column_width = float(
                             block.get("column_right_pt") or page.rect.width * 0.45
@@ -1521,6 +1543,10 @@ def extract_native_content(
                             1.0, region.width / max(1.0, column_width)
                         )
                         item["layout"]["source_bbox_pt"] = list(region)
+                        if graph:
+                            item['layout']['source_native_graph'] = {
+                                k: v for k, v in graph.items() if k != 'lines'}
+                            item['layout']['source_native_graph']['annotation_count'] = len(graph['lines'])
                         if picture.get("diagram_labels"):
                             item["layout"]["source_diagram_labels"] = picture["diagram_labels"]
                     elif kind == "native_table":
@@ -1537,15 +1563,23 @@ def extract_native_content(
                             for line in block.get("lines", [])
                             if line.get("type") == "line"
                         ]
+                        text_region = (w._union_rect([w._item_bbox(line) for line in typography_lines])
+                                       if typography_lines else fitz.Rect())
+                        frames = [entry["region"] for entry in raster_backgrounds
+                                  if typography_lines and entry["region"].contains(text_region)]
+                        frame_has_grid = any(
+                            frame.contains(w._item_bbox(table))
+                            and len(table.get("cell_bounds") or []) >= 2
+                            and max((len(row) for row in table["cell_bounds"]), default=0) >= 2
+                            for frame in frames for table in tables
+                        )
                         text_lines = [
                             join_source_paragraph(group, space_fonts)
-                            for group in _semantic_line_groups(typography_lines)
+                            for group in _semantic_line_groups(typography_lines,
+                                                               framed_callout=frame_has_grid)
                         ]
                         if text_lines:
                             item["tables"].append([["\n".join(text_lines)]])
-                            text_region = w._union_rect([w._item_bbox(line) for line in typography_lines])
-                            frames = [entry["region"] for entry in raster_backgrounds
-                                      if entry["region"].contains(text_region)]
                             region = fitz.Rect(frames[0]) if frames else (fitz.Rect(block["rect"]) if block.get("rect") else None)
                             if region is not None:
                                 for source_table in tables:
@@ -1565,6 +1599,11 @@ def extract_native_content(
                                         w._pdf_output_text(w._line_text(line)) for line in lines
                                         if region.contains(w._item_bbox(line))),
                                     "bbox_pt": list(region), "cell_bounds": [[list(region)]]})
+                                # A source frame with an internal data grid is
+                                # split into text fragments by that grid. Only
+                                # those measured fragments may use the partial
+                                # paragraph cache in the writer.
+                                item["layout"]["source_frame_has_grid"] = frame_has_grid
                         for nested in block.get("lines", []):
                             if nested.get("type") == "native_table":
                                 append_table(item, nested)
@@ -1592,6 +1631,14 @@ def extract_native_content(
                             item["layout"]["source_inline_labels"] = labels
                     if item["stem"] or item["tables"] or item["image_paths"]:
                         output.append(item)
+                        if kind == 'image' and picture.get('native_graph'):
+                            for line in picture['native_graph']['lines']:
+                                output.append({**item, 'stem': join_source_paragraph([line], space_fonts),
+                                    'image_paths': [], 'tables': [], 'layout': {
+                                        **{k: v for k, v in item['layout'].items()
+                                           if k not in ('source_native_graph', 'source_bbox_pt', 'image_width_ratio')},
+                                        'source_graph_annotation': graph['key'],
+                                        'source_typography': _source_typography([line], block)}})
             from .pdf_background_figures import remove_covered_bitmap_figures
             output[page_start:], provenance = remove_covered_bitmap_figures(
                 page, output[page_start:], provenance)

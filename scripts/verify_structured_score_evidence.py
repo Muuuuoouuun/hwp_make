@@ -23,6 +23,16 @@ def main():
                      {"available": True, "skipped": True, "overall_harsh_layout_score": 100}):
         result = score(fidelity)
         assert result["objective_score"] is None and not result["objective_score_available"], result
+    stats['draw_text_boxes'] = 20
+    stats['verified_question_units'] = {
+        'ok':True,'question_count':2,'source_inline_label_count':8,'source_graph_annotation_count':10}
+    verified = score({'available':True,'overall_harsh_layout_score':100})
+    stats['verified_question_units']['source_graph_annotation_count'] = 9
+    mismatch = score({'available':True,'overall_harsh_layout_score':100})
+    assert verified['score_components']['layout']['score'] == mismatch['score_components']['layout']['score']+25
+    stats['verified_question_units'].update(ok=False,source_graph_annotation_count=10)
+    failed = score({'available':True,'overall_harsh_layout_score':100})
+    assert failed['score_components']['layout']['score'] == mismatch['score_components']['layout']['score']
     print("STRUCTURED_SCORE_EVIDENCE_OK: visual loss caps overall score; missing render remains unverified")
 
 
