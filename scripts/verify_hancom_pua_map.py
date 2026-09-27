@@ -49,6 +49,14 @@ def main() -> int:
     check("벡터 악센트 E06E", m.get(chr(0xE06E)) == "⃗")
     # 그리스
     check("그리스 α,π,θ,Δ", all(m.get(chr(c)) == s for c, s in [(0xE09D, "α"), (0xE0AC, "π"), (0xE0A4, "θ"), (0xE088, "Δ")]))
+    check(
+        "그리스 순서 채움 γ,μ,ω,Ω,Σ",
+        all(m.get(chr(c)) == s for c, s in [(0xE09F, "γ"), (0xE0A8, "μ"), (0xE0B4, "ω"), (0xE09C, "Ω"), (0xE096, "Σ")]),
+    )
+    check(
+        "그리스 순서가 육안 확정값과 일치",
+        all(m.get(chr(c)) == s for c, s in [(0xE09E, "β"), (0xE0A7, "λ"), (0xE0AD, "ρ"), (0xE0AE, "σ"), (0xE099, "Φ")]),
+    )
     # 폰트 스코프
     check("폰트 스코프 HyhwpEQ=참, Arial=거짓", is_hancom_eq_font("ABCDEE+HyhwpEQ") and not is_hancom_eq_font("Arial"))
     check("구조 placeholder E06D→□", recover_pua_char(chr(0xE06D)) == "□")
