@@ -22,6 +22,7 @@ from .exam_templates import (
     quick_answer_lines,
     resolve_export_title,
 )
+from .hancom_eqn_latex import hancom_script_to_latex, looks_like_hancom_script
 from .math_text import normalize_math_token, split_math_text, strip_math_delimiters
 
 CIRCLED_NUMBERS = ("①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨")
@@ -105,7 +106,34 @@ _COMMAND_TEXT = {
     "log": "log",
     "ln": "ln",
     "lim": "lim",
+    # Wider symbol coverage so LaTeX (and Hancom scripts converted to LaTeX)
+    # does not leak raw command names into Word equations.
+    "epsilon": "ε", "varepsilon": "ε", "zeta": "ζ", "eta": "η", "iota": "ι", "kappa": "κ",
+    "nu": "ν", "xi": "ξ", "rho": "ρ", "tau": "τ", "upsilon": "υ", "phi": "φ", "varphi": "φ",
+    "chi": "χ", "psi": "ψ", "Gamma": "Γ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ", "Pi": "Π",
+    "Sigma": "Σ", "Upsilon": "Υ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
+    "le": "≤", "ge": "≥", "ne": "≠", "ll": "≪", "gg": "≫", "sim": "∼", "simeq": "≃",
+    "cong": "≅", "equiv": "≡", "propto": "∝", "to": "→", "rightarrow": "→",
+    "longrightarrow": "⟶", "leftarrow": "←", "gets": "←", "leftrightarrow": "↔",
+    "Rightarrow": "⇒", "Leftarrow": "⇐", "Leftrightarrow": "⇔", "implies": "⇒", "iff": "⇔",
+    "mapsto": "↦", "uparrow": "↑", "downarrow": "↓", "in": "∈", "notin": "∉", "ni": "∋",
+    "owns": "∋", "subset": "⊂", "supset": "⊃", "subseteq": "⊆", "supseteq": "⊇", "cup": "∪",
+    "cap": "∩", "setminus": "∖", "emptyset": "∅", "varnothing": "∅", "forall": "∀",
+    "exists": "∃", "partial": "∂", "circ": "∘", "ast": "∗", "bullet": "•", "star": "⋆",
+    "bigstar": "★", "cdots": "⋯", "ldots": "…", "dots": "…", "vdots": "⋮", "ddots": "⋱",
+    "prime": "′", "degree": "°", "land": "∧", "lor": "∨", "wedge": "∧", "vee": "∨",
+    "neg": "¬", "lnot": "¬", "oplus": "⊕", "ominus": "⊖", "otimes": "⊗", "odot": "⊙",
+    "mid": "|", "vert": "|", "|": "∥", "Vert": "∥", "lceil": "⌈", "rceil": "⌉",
+    "lfloor": "⌊", "rfloor": "⌋", "langle": "⟨", "rangle": "⟩", "{": "{", "}": "}",
+    "lbrace": "{", "rbrace": "}", "%": "%", "$": "$", "exp": "exp", "max": "max", "min": "min",
+    "det": "det", "gcd": "gcd", "arg": "arg", "arcsin": "arcsin", "arccos": "arccos",
+    "arctan": "arctan", "sinh": "sinh", "cosh": "cosh", "tanh": "tanh", "bmod": "mod",
+    "measuredangle": "∡", "square": "□", "Box": "□",
 }
+# Spacing commands carry no glyph.
+_SPACING_COMMANDS = {",", ";", ":", "!", " ", "quad", "qquad", "displaystyle", "textstyle", "limits"}
+# Text-mode wrappers: the argument is shown literally (upright text).
+_TEXT_COMMANDS = {"text", "textrm", "mbox", "mathrm", "operatorname", "mathbf", "mathit", "mathsf", "boldsymbol"}
 _NARY_SYMBOLS = {"sum": "∑", "prod": "∏", "int": "∫", "iint": "∫∫"}
 _ACCENT_CHARS = {
     "overline": "\u0305",
@@ -545,6 +573,36 @@ def _math_children_from_source(source: str) -> list[Any]:
                     children.append(_omml_accent(_ACCENT_CHARS[name], base[0]))
                     cursor = base[1]
                     continue
+            if name in _SPACING_COMMANDS:
+                cursor = next_cursor
+                continue
+            if name in _TEXT_COMMANDS:
+                base = _read_braced(expr, _skip_spaces(expr, next_cursor))
+                if base is not None:
+                    atom = [_m_run(base[0])]
+                    sub, sup, cursor = _scripts_after(expr, base[1])
+                    children.append(_omml_script(atom, sub, sup) if sub or sup else atom[0])
+                    continue
+            if name in {"binom", "dbinom", "tbinom"}:
+                top = _read_braced(expr, next_cursor)
+                bottom = _read_braced(expr, top[1]) if top is not None else None
+                if top is not None and bottom is not None:
+                    stack = _omml_fraction(top[0], bottom[0])
+                    fraction_pr = _m_element("fPr")
+                    bar_type = _m_element("type")
+                    bar_type.set(qn("m:val"), "noBar")
+                    fraction_pr.append(bar_type)
+                    stack.insert(0, fraction_pr)
+                    children.append(_omml_delimiter("(", ")", children=[stack]))
+                    cursor = bottom[1]
+                    continue
+            if name == "overset":
+                over = _read_braced(expr, next_cursor)
+                base = _read_braced(expr, over[1]) if over is not None else None
+                if over is not None and base is not None and over[0].strip() == "\\frown":
+                    children.append(_omml_accent("\u0311", base[0]))
+                    cursor = base[1]
+                    continue
             if name in _COMMAND_TEXT:
                 atom = [_m_run(_COMMAND_TEXT[name])]
                 sub, sup, cursor = _scripts_after(expr, next_cursor)
@@ -562,6 +620,10 @@ def _math_children_from_source(source: str) -> list[Any]:
 
 
 def _omml_math(token: str) -> Any | None:
+    # HWP/HWPX imports keep Hancom equation scripts; the OMML builder reads LaTeX.
+    source = strip_math_delimiters(token)
+    if looks_like_hancom_script(source):
+        token = hancom_script_to_latex(source)
     children = _math_children_from_source(token)
     if not children:
         return None
