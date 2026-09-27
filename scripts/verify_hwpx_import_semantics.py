@@ -57,7 +57,7 @@ def section(body: str) -> bytes:
     return f'<?xml version="1.0" encoding="UTF-8"?><hs:sec {NS}>{body}</hs:sec>'.encode("utf-8")
 
 
-def make_hwpx(sections: dict[str, bytes], spine: list[str] | None = None) -> bytes:
+def make_hwpx(sections: dict[str, bytes], spine: list[str] | None = None, header: str | None = None) -> bytes:
     items = "".join(
         f'<opf:item id="{Path(name).stem}" href="{name}" media-type="application/xml"/>' for name in sections
     )
@@ -70,6 +70,8 @@ def make_hwpx(sections: dict[str, bytes], spine: list[str] | None = None) -> byt
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("mimetype", "application/hwp+zip", compress_type=zipfile.ZIP_STORED)
         archive.writestr("Contents/content.hpf", hpf)
+        if header is not None:
+            archive.writestr("Contents/header.xml", header)
         for name, payload in sections.items():
             archive.writestr(name, payload)
     return buffer.getvalue()
@@ -244,7 +246,36 @@ def main() -> int:
         str(ordered),
     )
 
-    # 5. Distribution-only HWP (flag 0x4): the fallback path explains why only
+    # 5. Hancom automatic paragraph numbering supplies question numbers.
+    header = (
+        '<?xml version="1.0" encoding="UTF-8"?><hh:head xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head">'
+        '<hh:refList><hh:numberings itemCnt="1"><hh:numbering id="1" start="0">'
+        '<hh:paraHead start="1" level="1" numFormat="DIGIT">^1.</hh:paraHead>'
+        '<hh:paraHead start="1" level="2" numFormat="HANGUL_SYLLABLE">^2)</hh:paraHead>'
+        "</hh:numbering></hh:numberings><hh:paraProperties itemCnt=\"2\">"
+        '<hh:paraPr id="5"><hh:heading type="NUMBER" idRef="1" level="0"/></hh:paraPr>'
+        '<hh:paraPr id="6"><hh:heading type="NUMBER" idRef="1" level="1"/></hh:paraPr>'
+        "</hh:paraProperties></hh:refList></hh:head>"
+    )
+
+    def numbered(pr_id: str, value: str) -> str:
+        return f'<hp:p id="0" paraPrIDRef="{pr_id}"><hp:run charPrIDRef="0">{text(value)}</hp:run></hp:p>'
+
+    body = (
+        numbered("5", "첫째 문항의 값은?")
+        + numbered("6", "조건 가")
+        + numbered("6", "조건 나")
+        + numbered("5", "둘째 문항의 값은?")
+        + numbered("6", "다시 가")
+        + numbered("5", "셋째 문항의 값은?")
+    )
+    problems = imported("numbering.hwpx", make_hwpx({"Contents/section0.xml": section(body)}, header=header))
+    stems = [problem["stem"] for problem in problems]
+    check("자동 문단번호로 3문항 분리", len(problems) == 3, str(stems))
+    check("자동 문단번호 문항 번호", [problem["number"] for problem in problems] == ["1", "2", "3"], str([p["number"] for p in problems]))
+    check("하위 번호 가/나 복원·재시작", "가) 조건 가" in stems[0] and "나) 조건 나" in stems[0] and "가) 다시 가" in "\n".join(stems), str(stems))
+
+    # 6. Distribution-only HWP (flag 0x4): the fallback path explains why only
     #    the preview text came through instead of silently truncating.
     check("배포용 HWP 안내", _distribution_hwp_notice())
 

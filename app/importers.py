@@ -2490,6 +2490,133 @@ def _hwpx_answer_endnote_chunks(
     return chunks
 
 
+_HANGUL_INITIALS = (0, 2, 3, 5, 6, 7, 9, 11, 12, 14, 15, 16, 17, 18)
+_HANGUL_MEDIALS = (0, 4, 8, 13, 18, 20)  # ㅏ ㅓ ㅗ ㅜ ㅡ ㅣ: 가…하, 거…허, 고…
+
+
+def _roman_numeral(value: int, upper: bool) -> str:
+    if value <= 0 or value > 3999:
+        return str(value)
+    pairs = (
+        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"), (90, "XC"),
+        (50, "L"), (40, "XL"), (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+    )
+    out = []
+    for number, symbol in pairs:
+        while value >= number:
+            out.append(symbol)
+            value -= number
+    text = "".join(out)
+    return text if upper else text.lower()
+
+
+def _format_head_number(value: int, num_format: str) -> str:
+    """Hancom paraHead counter → text (rules from kordoc para-heading.ts)."""
+    if value == 0 and num_format == "DIGIT":
+        return "0"
+    value = max(1, value)
+    index = value - 1
+    if num_format == "CIRCLED_DIGIT":
+        if index < 20:
+            return chr(0x2460 + index)
+        if index < 35:
+            return chr(0x3251 + index - 20)
+        if index < 50:
+            return chr(0x32B1 + index - 35)
+        return f"({value})"
+    if num_format in {"HANGUL_SYLLABLE", "CIRCLED_HANGUL_SYLLABLE"}:
+        if num_format == "CIRCLED_HANGUL_SYLLABLE" and index < 14:
+            return chr(0x326E + index)
+        vowel = _HANGUL_MEDIALS[min(index // 14, len(_HANGUL_MEDIALS) - 1)]
+        return chr(0xAC00 + _HANGUL_INITIALS[index % 14] * 588 + vowel * 28)
+    if num_format in {"HANGUL_JAMO", "CIRCLED_HANGUL_JAMO"}:
+        if num_format == "CIRCLED_HANGUL_JAMO" and index < 14:
+            return chr(0x3260 + index)
+        return "ㄱㄴㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎ"[index % 14]
+    if num_format == "LATIN_CAPITAL":
+        return chr(0x41 + index % 26)
+    if num_format == "LATIN_SMALL":
+        return chr(0x61 + index % 26)
+    if num_format == "CIRCLED_LATIN_CAPITAL" and index < 26:
+        return chr(0x24B6 + index)
+    if num_format == "CIRCLED_LATIN_SMALL" and index < 26:
+        return chr(0x24D0 + index)
+    if num_format == "ROMAN_CAPITAL":
+        return _roman_numeral(value, True)
+    if num_format == "ROMAN_SMALL":
+        return _roman_numeral(value, False)
+    return str(value)
+
+
+class _HwpxParagraphNumbering:
+    """Hancom automatic paragraph numbers (paraPr heading type NUMBER).
+
+    The number is drawn by Hancom, not stored in ``hp:t``; exams numbered
+    this way lost their question numbers on import. Counters follow Hancom:
+    one counter per level of each numbering, deeper levels reset when a level
+    advances, and empty numbered paragraphs still consume a number.
+    """
+
+    def __init__(self, archive: zipfile.ZipFile) -> None:
+        self.headings: dict[str, tuple[str, int]] = {}
+        self.numberings: dict[str, dict[int, tuple[str, str, int]]] = {}
+        self.counters: dict[str, list[int]] = {}
+        try:
+            root = etree.fromstring(
+                archive.read("Contents/header.xml"), etree.XMLParser(resolve_entities=False, no_network=True)
+            )
+        except Exception:
+            return
+        for node in root.iter():
+            name = _local_name(node)
+            if name == "paraPr" and node.get("id") is not None:
+                heading = next((child for child in node.iter() if _local_name(child) == "heading"), None)
+                if heading is not None and heading.get("type") == "NUMBER" and heading.get("idRef"):
+                    try:
+                        level = int(heading.get("level") or 0)
+                    except ValueError:
+                        level = 0
+                    self.headings[node.get("id")] = (heading.get("idRef"), min(max(level, 0) + 1, 10))
+            elif name == "numbering" and node.get("id"):
+                heads: dict[int, tuple[str, str, int]] = {}
+                for head in node:
+                    if _local_name(head) != "paraHead":
+                        continue
+                    try:
+                        level = int(head.get("level") or "")
+                        start = int(head.get("start") or 1)
+                    except ValueError:
+                        continue
+                    if 1 <= level <= 10:
+                        heads[level] = (head.get("numFormat") or "DIGIT", "".join(head.itertext()), start)
+                if heads:
+                    self.numberings[node.get("id")] = heads
+
+    def prefix(self, paragraph: Any) -> str:
+        heading = self.headings.get(paragraph.get("paraPrIDRef") or "")
+        if heading is None:
+            return ""
+        numbering_id, level = heading
+        heads = self.numberings.get(numbering_id)
+        if not heads:
+            return ""
+        counters = self.counters.setdefault(numbering_id, [-1] * 11)
+        head = heads.get(level)
+        counters[level] = (head[2] if head else 1) if counters[level] < 0 else counters[level] + 1
+        for deeper in range(level + 1, 11):
+            counters[deeper] = -1
+        template = head[1].strip() if head else f"^{level}."
+
+        def expand(match: re.Match[str]) -> str:
+            ref_level = int(match.group(1))
+            ref_head = heads.get(ref_level)
+            value = counters[ref_level] if counters[ref_level] >= 0 else (ref_head[2] if ref_head else 1)
+            return _format_head_number(value, ref_head[0] if ref_head else "DIGIT")
+
+        text = re.sub(r"\^(10|[1-9])", expand, template)
+        return re.sub(r"\^(?![^\W_])", "", text).strip()
+
+
 def _hwpx_section_order(archive: zipfile.ZipFile, names: list[str]) -> list[str]:
     """Section parts in reading order: content.hpf spine, else numeric order.
 
@@ -2535,6 +2662,7 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
         if not sections:
             return {"created": [], "notices": ["HWPX 안에서 section XML을 찾지 못했습니다."]}
         bin_map = _hwpx_manifest_map(archive)
+        numbering = _HwpxParagraphNumbering(archive)
         saved_bins: dict[str, str | None] = {}
         paragraphs: list[tuple[str, list[str], list[list[list[str]]]]] = []
         answer_endnotes: list[tuple[int, str, str, str]] = []
@@ -2584,7 +2712,11 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
                         if saved_bins[ref]:
                             images.append(saved_bins[ref])
                             image_count += 1
-                paragraphs.append(("".join(texts).strip(), images, tables))
+                number_prefix = numbering.prefix(para)
+                text = "".join(texts).strip()
+                if number_prefix and text:
+                    text = f"{number_prefix} {text}"
+                paragraphs.append((text, images, tables))
 
     answer_note_chunks = _hwpx_answer_endnote_chunks(paragraphs, answer_endnotes)
     chunks = answer_note_chunks or _paragraphs_to_chunks(paragraphs)
