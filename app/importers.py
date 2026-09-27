@@ -2173,9 +2173,32 @@ def _local_name(element: Any) -> str:
     return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
 
 
+def _hwpx_cell_text(tc: Any) -> str:
+    parts: list[str] = []
+    for kind, value in _hwpx_inline_items(tc):
+        if kind == "text":
+            parts.append(value)
+        elif kind == "equation":
+            parts.append(_hwpx_equation_text(value))
+    return "".join(parts).strip()
+
+
+def _hwpx_int_attr(node: Any, name: str) -> int | None:
+    try:
+        return int(node.get(name))
+    except (TypeError, ValueError):
+        return None
+
+
 def _hwpx_table_rows(tbl: Any) -> list[list[str]]:
-    """hp:tbl 엘리먼트에서 행×열 셀 텍스트를 뽑아 2차원 배열로 돌려준다."""
-    rows: list[list[str]] = []
+    """hp:tbl 엘리먼트에서 행×열 셀 텍스트를 뽑아 2차원 배열로 돌려준다.
+
+    셀 주소(cellAddr)와 병합(cellSpan)이 있으면 격자에 배치해 병합으로 가려진
+    칸은 빈 문자열로 둔다. 주소가 없거나 모순되면 행마다 순서대로 잇는다.
+    """
+    placed: list[tuple[int, int, int, int, str]] = []
+    sequential: list[list[str]] = []
+    addressed = True
     for tr in tbl:
         if _local_name(tr) != "tr":
             continue
@@ -2183,19 +2206,150 @@ def _hwpx_table_rows(tbl: Any) -> list[list[str]]:
         for tc in tr:
             if _local_name(tc) != "tc":
                 continue
-            texts: list[str] = []
-            for node in tc.iter():
-                name = _local_name(node)
-                if name != "equation" and _inside_hwpx_container(node, {"equation"}):
-                    continue
-                if name == "t" and node.text:
-                    texts.append(node.text)
-                elif name == "equation":
-                    texts.append(_hwpx_equation_text(node))
-            cells.append("".join(texts).strip())
+            text = _hwpx_cell_text(tc)
+            cells.append(text)
+            addr = next((child for child in tc if _local_name(child) == "cellAddr"), None)
+            span = next((child for child in tc if _local_name(child) == "cellSpan"), None)
+            row = _hwpx_int_attr(addr, "rowAddr") if addr is not None else None
+            col = _hwpx_int_attr(addr, "colAddr") if addr is not None else None
+            if row is None or col is None or row < 0 or col < 0:
+                addressed = False
+                continue
+            row_span = max(1, _hwpx_int_attr(span, "rowSpan") or 1) if span is not None else 1
+            col_span = max(1, _hwpx_int_attr(span, "colSpan") or 1) if span is not None else 1
+            placed.append((row, col, row_span, col_span, text))
         if cells:
-            rows.append(cells)
-    return rows
+            sequential.append(cells)
+    if not addressed or not placed:
+        return sequential
+    row_count = max(row + row_span for row, _, row_span, _, _ in placed)
+    col_count = max(col + col_span for _, col, _, col_span, _ in placed)
+    # 비정상적으로 큰 주소(손상 파일)는 격자 대신 순서 배열로 둔다.
+    if row_count * col_count > 20000:
+        return sequential
+    grid: list[list[str | None]] = [[None] * col_count for _ in range(row_count)]
+    for row, col, row_span, col_span, text in placed:
+        for r in range(row, min(row + row_span, row_count)):
+            for c in range(col, min(col + col_span, col_count)):
+                if grid[r][c] is not None:
+                    return sequential
+                grid[r][c] = text if (r, c) == (row, col) else ""
+    return [[cell or "" for cell in row] for row in grid if any(cell is not None for cell in row)]
+
+
+_HWPX_SPACE_ELEMENTS = {"nbSpace", "fwSpace", "hwSpace"}
+
+
+def _hwpx_click_here_guide(field: Any) -> str | None:
+    """Unfilled click-here field guide text (shown dimmed, never printed)."""
+    if str(field.get("type") or "").upper() != "CLICK_HERE" or field.get("dirty") == "1":
+        return None
+    from_command = None
+    for param in field.iter():
+        if _local_name(param) != "stringParam":
+            continue
+        name = param.get("name")
+        value = param.text or ""
+        if name == "Direction" and value:
+            return value
+        if name == "Command":
+            match = re.search(r"Direction:wstring:(\d+):", value)
+            if match:
+                from_command = value[match.end() : match.end() + int(match.group(1))] or None
+    return from_command
+
+
+def _hwpx_inline_items(
+    node: Any,
+    *,
+    skip: frozenset[str] = frozenset(),
+    images_only: frozenset[str] = frozenset(),
+) -> list[tuple[str, Any]]:
+    """Document-order text/equation/image items of an HWPX subtree.
+
+    - ``hp:t`` mixed content keeps the text after tab/lineBreak/space children.
+    - ``hp:switch`` renders one branch (the first ``hp:case``, else
+      ``hp:default``) the way Hancom does, so alternates are not duplicated.
+    - Hidden comments and untouched click-here guide text are not body text.
+    - Subtrees named in ``skip`` are ignored; in ``images_only`` subtrees only
+      pictures are kept.
+    """
+    items: list[tuple[str, Any]] = []
+
+    def walk(element: Any, pictures_only: bool) -> None:
+        name = _local_name(element)
+        if name in skip or name == "hiddenComment":
+            return
+        if name in images_only:
+            pictures_only = True
+        if name == "img":
+            items.append(("img", element))
+            return
+        if pictures_only:
+            for child in element:
+                walk(child, True)
+            return
+        if name == "equation":
+            items.append(("equation", element))
+            return
+        if name == "t":
+            if element.text:
+                items.append(("text", element.text))
+            for child in element:
+                child_name = _local_name(child)
+                if child_name == "tab":
+                    items.append(("text", "\t"))
+                elif child_name == "lineBreak":
+                    items.append(("text", "\n"))
+                elif child_name in _HWPX_SPACE_ELEMENTS:
+                    items.append(("text", " "))
+                if child.tail:
+                    items.append(("text", child.tail))
+            return
+        if name == "fieldBegin":
+            guide = _hwpx_click_here_guide(element)
+            items.append(("field_begin", (element.get("id") or "", guide)))
+            return
+        if name == "fieldEnd":
+            items.append(("field_end", element.get("beginIDRef") or ""))
+            return
+        if name == "switch":
+            children = list(element)
+            branch = next((child for child in children if _local_name(child) == "case"), None)
+            if branch is None:
+                branch = next((child for child in children if _local_name(child) == "default"), None)
+            if branch is not None:
+                walk(branch, pictures_only)
+            return
+        for child in element:
+            walk(child, pictures_only)
+
+    walk(node, False)
+    return _drop_click_here_guides(items)
+
+
+def _drop_click_here_guides(items: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
+    result: list[tuple[str, Any]] = []
+    open_fields: list[tuple[str, str | None, int]] = []
+    for kind, value in items:
+        if kind == "field_begin":
+            field_id, guide = value
+            open_fields.append((field_id, guide, len(result)))
+            continue
+        if kind == "field_end":
+            for index in range(len(open_fields) - 1, -1, -1):
+                field_id, guide, start = open_fields[index]
+                if field_id != value and value:
+                    continue
+                del open_fields[index:]
+                inside = result[start:]
+                inside_text = "".join(v for k, v in inside if k == "text").strip()
+                if guide and inside_text == guide.strip() and all(k == "text" for k, _ in inside):
+                    del result[start:]
+                break
+            continue
+        result.append((kind, value))
+    return result
 
 
 def _inside_hwpx_container(node: Any, names: set[str]) -> bool:
@@ -2248,30 +2402,57 @@ def _hwpx_manifest_map(archive: zipfile.ZipFile) -> dict[str, str]:
     return mapping
 
 
+_ENDNOTE_LEADING_ANSWER_RE = re.compile(
+    r"^\s*((?:[①②③④⑤⑥⑦⑧⑨⑩](?:\s*[,，·]\s*[①②③④⑤⑥⑦⑧⑨⑩])*)|\d{1,3})(?=\s|$)"
+)
+
+
+def _hwpx_top_paragraphs(root: Any) -> list[Any]:
+    """Paragraphs of ``root`` that are not nested inside another paragraph."""
+    found: list[Any] = []
+
+    def walk(element: Any) -> None:
+        for child in element:
+            if _local_name(child) == "p":
+                found.append(child)
+            else:
+                walk(child)
+
+    walk(root)
+    return found
+
+
 def _hwpx_endnote_fields(note: Any) -> tuple[str, str]:
-    """Read answer-leading exam endnotes without leaking them into the stem."""
+    """Read answer-leading exam endnotes without leaking them into the stem.
+
+    Two layouts are recognized: explicit ``[답]``/``[풀이]`` labels, and the
+    education-office form whose note number is drawn by ``hp:autoNum`` (for
+    example ``문3）``) and whose first text is the answer (`` ④``).
+    """
     lines: list[str] = []
-    for para in note.iter():
-        if _local_name(para) != "p":
-            continue
+    for para in _hwpx_top_paragraphs(note):
         parts: list[str] = []
-        for node in para.iter():
-            if _inside_hwpx_container(node, {"equation"}):
-                continue
-            if _local_name(node) == "t" and node.text:
-                parts.append(node.text)
-            elif _local_name(node) == "equation":
-                parts.append(_hwpx_equation_text(node))
+        for kind, value in _hwpx_inline_items(para):
+            if kind == "text":
+                parts.append(value)
+            elif kind == "equation":
+                parts.append(_hwpx_equation_text(value))
         line = "".join(parts).strip()
         if line:
             lines.append(line)
     answer = ""
     explanation: list[str] = []
-    for line in lines:
+    labelled = any(line.startswith("[답]") for line in lines)
+    for index, line in enumerate(lines):
         if line.startswith("[답]"):
             answer = line.removeprefix("[답]").strip()
         elif line.startswith("[풀이]"):
             rest = line.removeprefix("[풀이]").strip()
+            if rest:
+                explanation.append(rest)
+        elif index == 0 and not labelled and (match := _ENDNOTE_LEADING_ANSWER_RE.match(line)):
+            answer = match.group(1).strip()
+            rest = line[match.end() :].strip()
             if rest:
                 explanation.append(rest)
         else:
@@ -2309,6 +2490,37 @@ def _hwpx_answer_endnote_chunks(
     return chunks
 
 
+def _hwpx_section_order(archive: zipfile.ZipFile, names: list[str]) -> list[str]:
+    """Section parts in reading order: content.hpf spine, else numeric order.
+
+    A plain string sort would put section10 before section2.
+    """
+    sections = [name for name in names if re.fullmatch(r"Contents/section\d+\.xml", name)]
+    numeric = sorted(sections, key=lambda name: int(re.search(r"(\d+)\.xml$", name).group(1)))
+    try:
+        root = etree.fromstring(
+            archive.read("Contents/content.hpf"), etree.XMLParser(resolve_entities=False, no_network=True)
+        )
+    except Exception:
+        return numeric
+    hrefs: dict[str, str] = {}
+    for item in root.iter():
+        if _local_name(item) == "item" and item.get("id") and item.get("href"):
+            hrefs[item.get("id")] = item.get("href")
+    ordered: list[str] = []
+    for ref in root.iter():
+        if _local_name(ref) != "itemref":
+            continue
+        href = hrefs.get(ref.get("idref") or "", "")
+        for candidate in (href, f"Contents/{href}", href.removeprefix("../")):
+            if candidate in sections and candidate not in ordered:
+                ordered.append(candidate)
+                break
+    if not ordered:
+        return numeric
+    return ordered + [name for name in numeric if name not in ordered]
+
+
 def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
     save_upload(filename, payload)
     notices: list[str] = []
@@ -2319,7 +2531,7 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
 
     with archive:
         names = archive.namelist()
-        sections = sorted(name for name in names if re.fullmatch(r"Contents/section\d+\.xml", name))
+        sections = _hwpx_section_order(archive, names)
         if not sections:
             return {"created": [], "notices": ["HWPX 안에서 section XML을 찾지 못했습니다."]}
         bin_map = _hwpx_manifest_map(archive)
@@ -2342,24 +2554,23 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
                         continue
                     answer, explanation = _hwpx_endnote_fields(note)
                     answer_endnotes.append((len(paragraphs), note.get("number") or "", answer, explanation))
+                # 바깥 표만 표로 만든다. 중첩 표의 글은 바깥 표 셀 글에 이미 들어간다.
                 tables = [
                     _hwpx_table_rows(node) for node in para.iter()
-                    if _local_name(node) == "tbl" and not _inside_hwpx_container(node, {"endNote"})
+                    if _local_name(node) == "tbl" and not _inside_hwpx_container(node, {"endNote", "tbl"})
                 ]
                 tables = [rows for rows in tables if rows]
                 texts: list[str] = []
                 images: list[str] = []
-                for node in para.iter():
-                    name = _local_name(node)
-                    if _inside_hwpx_container(node, {"tbl", "equation"}):
-                        continue
-                    if name != "img" and _inside_hwpx_container(node, {"endNote"}):
-                        continue
-                    if name == "t" and node.text:
-                        texts.append(node.text)
-                    elif name == "equation":
+                # 미주 안 그림은 해당 문항에 붙이고, 미주 글은 정답·풀이로만 쓴다.
+                for kind, node in _hwpx_inline_items(
+                    para, skip=frozenset({"tbl"}), images_only=frozenset({"endNote"})
+                ):
+                    if kind == "text":
+                        texts.append(node)
+                    elif kind == "equation":
                         texts.append(_hwpx_equation_text(node))
-                    elif name == "img":
+                    elif kind == "img":
                         ref = node.get("binaryItemIDRef") or node.get("binaryItemIDRef".lower()) or ""
                         if ref not in saved_bins:
                             zip_path = bin_map.get(ref)
