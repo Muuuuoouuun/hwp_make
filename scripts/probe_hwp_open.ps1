@@ -8,6 +8,15 @@ param(
 
     [string]$ExportPdfDirectory = "",
 
+    # Hancom-resaved HWPX keeps Hancom's own line layout (hp:linesegarray),
+    # which scripts can use as a line/page-break ground truth without a GUI.
+    [string]$ExportHwpxDirectory = "",
+
+    # Open a copy under %TEMP%: Hancom treats the user temp folder as trusted,
+    # so the file-path security prompt does not appear even without the
+    # FilePathChecker module. Off by default so prompt measurements stay real.
+    [switch]$CopyToTemp,
+
     [int]$TimeoutSeconds = 45
 )
 
@@ -180,6 +189,10 @@ param(
 
     [string]$OutputPdfPath = "",
 
+    [string]$OutputHwpxPath = "",
+
+    [string]$CopyToTemp = "False",
+
     [Parameter(Mandatory = $true)]
     [string]$ResultPath
 )
@@ -191,7 +204,15 @@ function Write-ProbeResult($Value) {
 }
 
 $hwp = $null
+$tempCopyDir = $null
 try {
+    $openPath = $TargetPath
+    if ([System.Convert]::ToBoolean($CopyToTemp)) {
+        $tempCopyDir = Join-Path ([System.IO.Path]::GetTempPath()) ("hwp_make_open_{0}" -f ([guid]::NewGuid().ToString("N")))
+        [void](New-Item -ItemType Directory -Path $tempCopyDir -Force)
+        $openPath = Join-Path $tempCopyDir (Split-Path -Leaf $TargetPath)
+        Copy-Item -LiteralPath $TargetPath -Destination $openPath -Force
+    }
     try {
         $hwp = New-Object -ComObject "HWPFrame.HwpObject"
     } catch {
@@ -206,7 +227,7 @@ try {
     try { $securityModuleRegistered = [bool]$hwp.RegisterModule("FilePathCheckDLL", "FilePathCheckerModule") } catch {}
     try { $hwp.XHwpWindows.Item(0).Visible = $true } catch {}
 
-    $opened = $hwp.Open($TargetPath, "", "")
+    $opened = $hwp.Open($openPath, "", "")
     if ($opened -eq $false) {
         Write-ProbeResult @{
             Status = "fail"
@@ -236,6 +257,25 @@ try {
         $pdfBytes = (Get-Item -LiteralPath $OutputPdfPath).Length
     }
 
+    $savedHwpx = $null
+    $hwpxBytes = $null
+    if ($OutputHwpxPath) {
+        if (Test-Path -LiteralPath $OutputHwpxPath) {
+            Remove-Item -LiteralPath $OutputHwpxPath -Force
+        }
+        $savedHwpx = $hwp.SaveAs($OutputHwpxPath, "HWPX", "")
+        if ($savedHwpx -eq $false -or -not (Test-Path -LiteralPath $OutputHwpxPath)) {
+            Write-ProbeResult @{
+                Status = "fail"
+                Message = "Hwp.SaveAs HWPX returned false or produced no file"
+                OutputHwpxPath = $OutputHwpxPath
+                SecurityModuleRegistered = $securityModuleRegistered
+            }
+            exit 1
+        }
+        $hwpxBytes = (Get-Item -LiteralPath $OutputHwpxPath).Length
+    }
+
     if (-not [System.Convert]::ToBoolean($VisibleWindow)) {
         try { $hwp.XHwpWindows.Item(0).Visible = $false } catch {}
     }
@@ -249,6 +289,10 @@ try {
         SavedPdf = $savedPdf
         OutputPdfPath = $OutputPdfPath
         PdfBytes = $pdfBytes
+        SavedHwpx = $savedHwpx
+        OutputHwpxPath = $OutputHwpxPath
+        HwpxBytes = $hwpxBytes
+        OpenedFromTempCopy = [bool]$tempCopyDir
         SecurityModuleRegistered = $securityModuleRegistered
     }
     exit 0
@@ -261,8 +305,13 @@ try {
     exit 1
 } finally {
     if ($null -ne $hwp) {
+        # Clear(1) discards the document without a save prompt before quitting.
+        try { $hwp.Clear(1) | Out-Null } catch {}
         try { $hwp.Quit() | Out-Null } catch {}
         try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($hwp) | Out-Null } catch {}
+    }
+    if ($tempCopyDir) {
+        try { Remove-Item -LiteralPath $tempCopyDir -Recurse -Force -ErrorAction SilentlyContinue } catch {}
     }
 }
 '@
@@ -275,6 +324,8 @@ try {
 function Invoke-HwpOpenProcess(
     [string]$ResolvedPath,
     [string]$OutputPdfPath,
+    [string]$OutputHwpxPath,
+    [bool]$UseTempCopy,
     [bool]$ShowWindow,
     [int]$TimeoutSec,
     [bool]$AllowPrompt
@@ -292,6 +343,9 @@ function Invoke-HwpOpenProcess(
         "-VisibleWindow", ([string]$ShowWindow),
         "-ResultPath", $resultPath
     )
+    # Added only when requested so existing invocations keep their exact shape.
+    if ($OutputHwpxPath) { $args += @("-OutputHwpxPath", $OutputHwpxPath) }
+    if ($UseTempCopy) { $args += @("-CopyToTemp", "True") }
 
     $proc = $null
     $promptActions = 0
@@ -301,7 +355,7 @@ function Invoke-HwpOpenProcess(
         $lastPromptNudge = (Get-Date).AddSeconds(-10)
         while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
             if ($AllowPrompt) {
-                if (Invoke-HwpAccessPrompt @($ResolvedPath, $OutputPdfPath)) {
+                if (Invoke-HwpAccessPrompt @($ResolvedPath, $OutputPdfPath, $OutputHwpxPath)) {
                     $promptActions += 1
                 }
                 if (((Get-Date) - $lastPromptNudge).TotalSeconds -ge 2) {
@@ -364,6 +418,17 @@ if ($ExportPdfDirectory) {
     }
 }
 
+$resolvedHwpxDirectory = ""
+if ($ExportHwpxDirectory) {
+    try {
+        $hwpxDirectory = New-Item -ItemType Directory -Path $ExportHwpxDirectory -Force
+        $resolvedHwpxDirectory = $hwpxDirectory.FullName
+    } catch {
+        Write-Host "FAIL $ExportHwpxDirectory - cannot create HWPX output directory: $($_.Exception.Message)"
+        exit 1
+    }
+}
+
 foreach ($inputPath in $Path) {
     $resolved = $null
     try {
@@ -382,8 +447,13 @@ foreach ($inputPath in $Path) {
         $pdfName = ([System.IO.Path]::GetFileNameWithoutExtension($resolved)) + ".pdf"
         $pdfOutputPath = Join-Path $resolvedPdfDirectory $pdfName
     }
+    $hwpxOutputPath = ""
+    if ($resolvedHwpxDirectory) {
+        $hwpxName = ([System.IO.Path]::GetFileNameWithoutExtension($resolved)) + ".hancom.hwpx"
+        $hwpxOutputPath = Join-Path $resolvedHwpxDirectory $hwpxName
+    }
     try {
-        $result = Invoke-HwpOpenProcess $resolved $pdfOutputPath ([bool]$Visible) $TimeoutSeconds ([bool]$AllowAccessPrompt)
+        $result = Invoke-HwpOpenProcess $resolved $pdfOutputPath $hwpxOutputPath ([bool]$CopyToTemp) ([bool]$Visible) $TimeoutSeconds ([bool]$AllowAccessPrompt)
         $status = [string]$result.Status
 
         if ($status -eq "ok") {
@@ -399,7 +469,11 @@ foreach ($inputPath in $Path) {
             if ($result.OutputPdfPath) {
                 $pdfSuffix = " pdf=$($result.OutputPdfPath) bytes=$($result.PdfBytes)"
             }
-            Write-Host "OK $resolved$pageSuffix$pdfSuffix$promptSuffix"
+            $hwpxSuffix = ""
+            if ($result.OutputHwpxPath) {
+                $hwpxSuffix = " hwpx=$($result.OutputHwpxPath) bytes=$($result.HwpxBytes)"
+            }
+            Write-Host "OK $resolved$pageSuffix$pdfSuffix$hwpxSuffix$promptSuffix"
         } elseif ($status -eq "skip") {
             Write-Host "SKIP $resolved - $($result.Message)"
             $skipped = $true
