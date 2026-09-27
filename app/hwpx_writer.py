@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import mimetypes
+import contextvars
 import re
 import zipfile
 from pathlib import Path
@@ -239,6 +240,88 @@ def _split_latex_columns(row: str) -> list[str]:
 
 def _display_delimiter(token: str) -> str:
     return "" if token == "." else token
+
+
+# Delimiters seen after LEFT/RIGHT in Hancom-saved exam scripts.  Only these
+# are emitted as auto-sized pairs; anything else keeps the plain glyph form.
+_HANCOM_SIZED_DELIMITERS = frozenset("()[]{}|⌈⌉⌊⌋")
+_CASES_BODY_ENVIRONMENTS = frozenset({"array", "matrix", "aligned", "gathered", "split", "cases"})
+
+
+def _hancom_left_right_script(begin_token: str, body: str, end_token: str) -> str | None:
+    """Translate ``\left X body \right Y`` without losing the size or pairing.
+
+    Hancom groups with ``{}``, so a bare ``{`` glyph silently disappears or
+    unbalances the script; the auto-sized ``LEFT {`` form keeps it literal.
+    A one-sided left brace is the piecewise idiom, which Hancom draws with
+    its native ``cases`` layout.
+    """
+    if begin_token == "{" and end_token == ".":
+        stripped = body.strip()
+        environment = _read_environment(stripped, 0)
+        if environment is not None and environment[2] == len(stripped):
+            env_name, env_body, _ = environment
+            if env_name.rstrip("*") in _CASES_BODY_ENVIRONMENTS:
+                return _hancom_environment_script("cases", _strip_array_alignment(env_name.rstrip("*"), env_body))
+        rows = _split_latex_rows(stripped)
+        row_scripts = []
+        for row in rows:
+            cells = [_hancom_eqn_script(cell) or cell.strip() for cell in _split_latex_columns(row)]
+            row_scripts.append(" & ".join(cells))
+        return "cases{" + " # ".join(row_scripts) + "}" if row_scripts else None
+    body_script = _hancom_eqn_script(body) if body.strip() else ""
+    if body_script is None:
+        return None
+    if begin_token in _HANCOM_SIZED_DELIMITERS and end_token in _HANCOM_SIZED_DELIMITERS:
+        return f"LEFT {begin_token} {body_script} RIGHT {end_token}"
+    visible = (_display_delimiter(begin_token), _display_delimiter(end_token))
+    if any(token in {"{", "}"} for token in visible):
+        return None
+    return f"{visible[0]}{body_script}{visible[1]}"
+
+
+def _split_infix_over(source: str) -> tuple[str, str] | None:
+    """Split plain-TeX ``a \\over b`` at the top level of the current group."""
+    depth = 0
+    cursor = 0
+    while cursor < len(source):
+        char = source[cursor]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(0, depth - 1)
+        elif char == "\\":
+            command = _read_command(source, cursor)
+            if command is not None:
+                if depth == 0 and command[0] == "over":
+                    return source[:cursor], source[command[1] :]
+                cursor = command[1]
+                continue
+        cursor += 1
+    return None
+
+
+def _read_escaped_brace_group(source: str, index: int) -> tuple[str, int] | None:
+    """Read a literal ``\{ ... \}`` (or ``\lbrace ... \rbrace``) set."""
+    command = _read_command(source, index)
+    if command is None or command[0] not in {"{", "lbrace"}:
+        return None
+    depth = 1
+    body_start = command[1]
+    cursor = body_start
+    while cursor < len(source):
+        nested = _read_command(source, cursor)
+        if nested is None:
+            cursor += 1
+            continue
+        if nested[0] in {"{", "lbrace"}:
+            depth += 1
+        elif nested[0] in {"}", "rbrace"}:
+            depth -= 1
+            if depth == 0:
+                return source[body_start:cursor], nested[1]
+        cursor = nested[1]
+    return None
 
 
 def _strip_array_alignment(env: str, body: str) -> str:
@@ -544,6 +627,59 @@ _EQN_COMMANDS = {
     "rfloor": "⌋",
     "langle": "〈",
     "rangle": "〉",
+    # Common exam/textbook commands that previously dropped the whole
+    # equation to raw LaTeX text.
+    "Vert": "∥",
+    "dots": "…",
+    "dotsc": "…",
+    "dotsb": "⋯",
+    "vdots": "⋮",
+    "ddots": "⋱",
+    "prime": "prime",
+    "degree": "°",
+    "hbar": "ℏ",
+    "ell": "ℓ",
+    "Re": "ℜ",
+    "Im": "ℑ",
+    "aleph": "ℵ",
+    "gets": "larrow",
+    "iff": "LRARROW",
+    "implies": "RARROW",
+    "impliedby": "LARROW",
+    "rightleftharpoons": "⇌",
+    "setminus": "∖",
+    "complement": "∁",
+    "neg": "¬",
+    "lnot": "¬",
+    "wedge": "LAND",
+    "vee": "LOR",
+    "cdotp": "cdot",
+    "colon": ":",
+    "star": "⋆",
+    "ast": "*",
+    "bullet": "•",
+    "dagger": "†",
+    "ddagger": "‡",
+    "square": "□",
+    "Box": "□",
+    "blacksquare": "■",
+    "bigtriangleup": "△",
+    "measuredangle": "∡",
+    "leqslant": "LEQ",
+    "geqslant": "GEQ",
+    "nleq": "≰",
+    "ngeq": "≱",
+    "lesssim": "≲",
+    "gtrsim": "≳",
+    "ni": "∋",
+    "owns": "∋",
+    "subsetneq": "⊊",
+    "supsetneq": "⊋",
+    "nmid": "∤",
+    "bot": "⊥",
+    "top": "⊤",
+    "vdash": "⊢",
+    "models": "⊨",
 }
 
 
@@ -554,6 +690,7 @@ _NARY_EQN = {
     "iint": "dint",
     "iiint": "tint",
     "oint": "oint",
+    "smallint": "int",
 }
 _FUNCTION_COMMANDS = {
     "sin",
@@ -640,11 +777,12 @@ _ACCENT_EQN = {
     "dot": "dot",
     "ddot": "ddot",
     "check": "check",
+    "overarc": "arch",
+    "wideparen": "arch",
 }
 _TEXT_WRAPPER_COMMANDS = {
     "mathrm",
     "mathbf",
-    "text",
     "operatorname",
     "mathcal",
     "mathsf",
@@ -652,7 +790,23 @@ _TEXT_WRAPPER_COMMANDS = {
     "mathit",
     "mathnormal",
     "boldsymbol",
+    "bm",
 }
+# LaTeX text-mode wrappers become Hancom quoted strings: the words stay
+# literal (``int`` is not turned into an integral sign) and spaces survive.
+_LITERAL_TEXT_COMMANDS = {"text", "textrm", "textnormal", "mbox"}
+# Letter runs that Hancom reads as commands.  In LaTeX input these are plain
+# italic variables, so they are quoted to keep them from turning into
+# integrals, fractions or accents.
+_HANCOM_RESERVED_LETTER_RUNS = frozenset(
+    {
+        "int", "dint", "tint", "oint", "sum", "prod", "over", "atop", "root", "of",
+        "sqrt", "bar", "vec", "hat", "dot", "ddot", "tilde", "under", "arch", "dyad",
+        "acute", "grave", "check", "inf", "cases", "matrix", "pmatrix", "bmatrix",
+        "dmatrix", "eqalign", "choose", "not", "times", "div", "it", "rm", "bold",
+        "LEFT", "RIGHT", "BOX", "TIMES", "OVERBRACE", "UNDERBRACE",
+    }
+)
 _MATHBB_MAP = str.maketrans(
     {
         "N": "ℕ",
@@ -711,6 +865,7 @@ _EQN_SPACED_TOKENS = {
     "perp",
     "because",
     "therefore",
+    "prime",
 }
 
 
@@ -800,12 +955,37 @@ def _is_hancom_eqn_script(expr: str) -> bool:
     return any(marker in value for marker in markers)
 
 
+# Set while converting a LaTeX source so nested groups (``T_{int}``) keep
+# treating bare letter runs as LaTeX variables rather than Hancom commands.
+_LATEX_SOURCE_CONTEXT: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "hancom_eqn_latex_source", default=False
+)
+
+
 def _hancom_eqn_script(source: str) -> str | None:
+    if _LATEX_SOURCE_CONTEXT.get() or "\\" not in str(source or ""):
+        return _hancom_eqn_script_impl(source)
+    token = _LATEX_SOURCE_CONTEXT.set(True)
+    try:
+        return _hancom_eqn_script_impl(source)
+    finally:
+        _LATEX_SOURCE_CONTEXT.reset(token)
+
+
+def _hancom_eqn_script_impl(source: str) -> str | None:
     expr = normalize_math_token(strip_math_delimiters(source)).strip()
     if not expr:
         return None
     if _is_hancom_eqn_script(expr):
         return _normalize_hancom_eqn_script(expr)
+    infix = _split_infix_over(expr)
+    if infix is not None:
+        numerator = _hancom_eqn_script(infix[0]) if infix[0].strip() else ""
+        denominator = _hancom_eqn_script(infix[1]) if infix[1].strip() else ""
+        if numerator is None or denominator is None:
+            return None
+        return f"{{{numerator}}} over {{{denominator}}}"
+    latex_source = _LATEX_SOURCE_CONTEXT.get()
     output: list[str] = []
     cursor = 0
     while cursor < len(expr):
@@ -873,12 +1053,53 @@ def _hancom_eqn_script(source: str) -> str | None:
                 if wrapped is None:
                     return None
                 begin_token, body, end_token, cursor = wrapped
-                body_script = _hancom_eqn_script(body)
+                script = _hancom_left_right_script(begin_token, body, end_token)
+                if script is None:
+                    return None
+                if script[:1].isalpha() and output and output[-1][-1:].isalnum():
+                    output.append(" ")
+                output.append(script)
+                continue
+            if name in {"{", "lbrace"}:
+                grouped = _read_escaped_brace_group(expr, cursor)
+                if grouped is None:
+                    return None
+                body, cursor = grouped
+                body_script = _hancom_eqn_script(body) if body.strip() else ""
                 if body_script is None:
                     return None
-                output.append(f"{_display_delimiter(begin_token)}{body_script}{_display_delimiter(end_token)}")
+                if output and output[-1][-1:].isalnum():
+                    output.append(" ")
+                output.append(f"LEFT {{ {body_script} RIGHT }}")
                 continue
-            if name in {"frac", "dfrac", "tfrac"}:
+            if name in _LITERAL_TEXT_COMMANDS:
+                base = _read_braced(expr, _skip_spaces(expr, next_cursor))
+                if base is None:
+                    return None
+                literal = base[0].replace('"', "")
+                output.append(f'"{literal}"' if literal.strip() else "~")
+                cursor = base[1]
+                continue
+            if name in {"overset", "stackrel"}:
+                over = _read_latex_arg(expr, next_cursor)
+                base = _read_latex_arg(expr, over[1]) if over is not None else None
+                if over is None or base is None or over[0].strip() not in {r"\frown", "⌒"}:
+                    return None
+                body = _hancom_eqn_script(base[0])
+                if body is None:
+                    return None
+                output.append(f"arch {{{body}}}")
+                cursor = base[1]
+                continue
+            if name == "hspace":
+                size = _read_braced(expr, _skip_spaces(expr, next_cursor))
+                if size is None:
+                    return None
+                if output and not output[-1].endswith(" "):
+                    output.append(" ")
+                cursor = size[1]
+                continue
+            if name in {"frac", "dfrac", "tfrac", "cfrac"}:
                 numerator = _read_latex_arg(expr, next_cursor)
                 if numerator is None:
                     return None
@@ -940,10 +1161,17 @@ def _hancom_eqn_script(source: str) -> str | None:
                     return None
                 body = _hancom_eqn_script(base[0])
                 command_name = "OVERBRACE" if name == "overbrace" else "UNDERBRACE"
-                output.append(
-                    f"{command_name} {{{body}}}" if body is not None else f"{command_name} {{{base[0].strip()}}}"
-                )
+                # Hancom's brace takes the body and a label group; LaTeX puts
+                # the label in the following ^/_ script.  An explicit empty
+                # label keeps the next token from being consumed as one.
+                label = ""
                 cursor = base[1]
+                label_cursor = _skip_spaces(expr, cursor)
+                if label_cursor < len(expr) and expr[label_cursor] == ("^" if name == "overbrace" else "_"):
+                    label_value, cursor = _read_script_arg(expr, label_cursor + 1)
+                    label = _hancom_eqn_script(label_value) or label_value.strip()
+                body_text = body if body is not None else base[0].strip()
+                output.append(f"{command_name} {{{body_text}}} {{{label}}}")
                 continue
             if name in _ACCENT_EQN:
                 base = _read_braced(expr, next_cursor)
@@ -995,6 +1223,15 @@ def _hancom_eqn_script(source: str) -> str | None:
             body = _hancom_eqn_script(value) or value
             output.append(("^" if char == "^" else "_") + "{" + body + "}")
             continue
+        if latex_source and char.isascii() and char.isalpha() and not (cursor and expr[cursor - 1].isalpha()):
+            run_end = cursor
+            while run_end < len(expr) and expr[run_end].isascii() and expr[run_end].isalpha():
+                run_end += 1
+            run = expr[cursor:run_end]
+            if run in _HANCOM_RESERVED_LETTER_RUNS:
+                output.append(f'"{run}"')
+                cursor = run_end
+                continue
         if char == "√":
             base = _read_radical_arg(expr, cursor + 1)
             if base is None:
