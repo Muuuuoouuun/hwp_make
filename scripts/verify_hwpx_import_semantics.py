@@ -94,6 +94,51 @@ def imported(name: str, payload: bytes) -> list[dict]:
     return [storage.get_problem(problem_id) for problem_id in ids]
 
 
+def _distribution_hwp_notice() -> bool:
+    import struct
+
+    import olefile
+
+    class _Stream:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def read(self) -> bytes:
+            return self.payload
+
+    class _DistributionOle:
+        def __init__(self, *_args: object) -> None:
+            header = bytearray(256)
+            header[:17] = b"HWP Document File"
+            struct.pack_into("<I", header, 36, 0x1 | 0x4)
+            self.streams = {"FileHeader": bytes(header), "PrvText": "1. 첫 문항\n".encode("utf-16-le")}
+
+        def __enter__(self) -> "_DistributionOle":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def exists(self, name: str) -> bool:
+            return name in self.streams
+
+        def openstream(self, name: str) -> _Stream:
+            return _Stream(self.streams[name])
+
+        def listdir(self) -> list[list[str]]:
+            return [["FileHeader"], ["PrvText"], ["ViewText", "Section0"]]
+
+    saved = (importers._import_hwp_via_ir, importers.rhwp, olefile.OleFileIO)
+    importers._import_hwp_via_ir = lambda *_args, **_kwargs: None
+    importers.rhwp = None
+    olefile.OleFileIO = _DistributionOle
+    try:
+        result = importers.import_hwp("distribution.hwp", b"hwp", {})
+    finally:
+        importers._import_hwp_via_ir, importers.rhwp, olefile.OleFileIO = saved
+    return any("배포용" in notice for notice in result.get("notices", []))
+
+
 def main() -> int:
     # 1. hp:t tail text, hp:switch single branch, hidden comment, click-here guide.
     caption = text("[그림 5] 그래프")
@@ -198,6 +243,10 @@ def main() -> int:
         ordered == [f"Contents/section{index}.xml" for index in (0, 1, 2, 10)],
         str(ordered),
     )
+
+    # 5. Distribution-only HWP (flag 0x4): the fallback path explains why only
+    #    the preview text came through instead of silently truncating.
+    check("배포용 HWP 안내", _distribution_hwp_notice())
 
     if failures:
         print("FAIL: " + ", ".join(failures))

@@ -2791,6 +2791,8 @@ def import_hwp(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[
         compressed = bool(flags & 0x1)
         if flags & 0x2:
             return {"created": [], "notices": ["암호가 걸린 HWP는 가져올 수 없습니다."]}
+        # 배포용 문서(flag 0x4)는 본문이 ViewText 에 암호화돼 BodyText 가 없다.
+        distribution = bool(flags & 0x4)
 
         # 본문 텍스트 1순위: rhwp 엔진 (설치된 경우)
         paragraphs: list[tuple[str, list[str], list[list[list[str]]]]] = []
@@ -2829,7 +2831,18 @@ def import_hwp(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[
         if not any(text for text, _, _ in paragraphs) and ole.exists("PrvText"):
             preview = ole.openstream("PrvText").read().decode("utf-16-le", errors="ignore")
             paragraphs = [(line.strip(), [], []) for line in preview.splitlines()]
-            notices.append("본문 레코드 대신 미리보기 텍스트를 사용했습니다.")
+            if distribution:
+                notices.append(
+                    "배포용(읽기 전용) HWP라 본문이 암호화되어 있어 미리보기 텍스트(문서 앞부분)만 가져왔습니다. "
+                    "전체를 가져오려면 배포용 설정을 해제한 원본이나 HWPX/PDF로 다시 올려 주세요."
+                )
+            else:
+                notices.append("본문 레코드 대신 미리보기 텍스트를 사용했습니다.")
+        elif distribution and not any(text for text, _, _ in paragraphs):
+            return {
+                "created": [],
+                "notices": ["배포용(읽기 전용) HWP라 본문이 암호화되어 있어 가져올 수 없습니다. 원본이나 HWPX/PDF로 올려 주세요."],
+            }
 
         # 첨부 이미지: BinData 스토리지 전체 추출
         images: list[str] = []
