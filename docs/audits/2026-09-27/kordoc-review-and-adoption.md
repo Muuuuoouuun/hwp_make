@@ -33,7 +33,14 @@ kordoc을 그대로 호출하지는 않는다. 우리 산출물의 핵심인 2�
 
 ## 회귀
 
-전체 회귀(`scripts/run_all_verify.py`) 실행 중. 결과는 다음 커밋에 기록한다.
+같은 환경에서 `scripts/run_all_verify.py`를 수정 전 커밋(3f04bb6)과 수정 후에 각각 실행했다. 이 컨테이너는 rhwp가 시스템 FreeType과 맞지 않아 `LD_PRELOAD`로 최신 libfreetype을 지정했고, 깨진 시스템 `cryptography`를 다시 설치했다.
+
+| | PASS | SKIP | FAIL |
+| --- | ---: | ---: | ---: |
+| 수정 전 | 86 | 20 | 9 |
+| 수정 후 | 89 | 20 | 9 |
+
+늘어난 PASS 3개는 신규 검증 스크립트 3개다. FAIL 9개는 수정 전과 같은 항목이고 실패 메시지도 동일하다. 원인은 개인 샘플 PDF 부재(`data/uploads/25수능 수학.pdf` 등), pytest 미설치, OCR 키 없음 같은 환경 문제다. 기존 기대값 가운데 `\left(x+1\right)` → `(x+1)` 계열 8건과 `verify_importers.py`의 1건은 새 출력(`LEFT ( x+1 RIGHT )` 등)으로 갱신했다.
 
 ## Windows에서 이어서 할 일
 
