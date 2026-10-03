@@ -24,6 +24,9 @@ MATH_OPERAND = (
     rf"|[+\-]?\d*(?:\.\d+)?{IDENTIFIER}[{PRIME_CHARS}]*(?:\([^()\n]{{0,120}}\))?(?:[_^](?:\{{[^{{}}\n]{{1,80}}\}}|[a-zA-Z0-9]+))*"
     rf"|{IDENTIFIER}[{PRIME_CHARS}]*\([^()\n]{{0,120}}\)(?:[_^](?:\{{[^{{}}\n]{{1,80}}\}}|[a-zA-Z0-9]+))*"
     rf"|\([^()\n]{{1,120}}\)"
+    # 2026-10-03: a unicode radical operand keeps its radicand ("√4", "√(x+1)");
+    # a bare "√" operand used to end the token and leave the radicand as prose.
+    rf"|√\s*[□▢]*\s*(?:{IDENTIFIER}|\([^()\n]{{1,120}}\)|\d+(?:\.\d+)?)"
     rf"|{MATH_SYMBOL})"
 )
 LATEX_GROUP_CONTENT = r"(?:[^{}\n]|\\[A-Za-z]+(?:\{[^{}\n]{0,120}\})?|\{[^{}\n]{0,120}\}){0,180}"
@@ -857,13 +860,15 @@ def _scan_math_spans(text: str) -> list[MathSpan]:
     # from the original value below. Short variables and known functions
     # (x_1, AB_1, log_2) retain the existing implicit-math behavior.
     for name in re.finditer(
-        r"(?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9]*)(?:_[A-Za-z0-9]+)+(?![A-Za-z0-9_])",
+        r"(?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9]*|\d{4,})(?:_[A-Za-z0-9]+)+(?![A-Za-z0-9_])",
         value,
     ):
         base = name[1]
         if (name.start() and value[name.start() - 1] == "\\"
             and re.match(LATEX_COMMAND_PATTERN, value[name.start() - 1:])):
             continue
+        # 2026-10-03: "20261003_013809_9d4c3ba5_long_42p" (an upload stamp) is a
+        # name as well; a four-digit-or-longer base is never a subscript base.
         if len(base) >= 3 and base.lower() not in MATH_LATIN_WORD_ALLOWLIST:
             scan[name.start():name.end()] = "\ufffc" * len(name[0])
     scan = "".join(scan)
@@ -936,6 +941,70 @@ def _is_explicit_math_token(token: str) -> bool:
     )
 
 
+_HANCOM_DELIMITER_BRACE_RE = re.compile(r"\b(?:left|right|LEFT|RIGHT)\s*([{}])")
+
+
+def unmatched_brace_positions(token: str) -> list[int]:
+    """Offsets of ``{``/``}`` in ``token`` that have no partner.
+
+    ``\\{`` and the Hancom delimiter braces of ``left{ … right}`` are not
+    grouping braces: an equation split across source runs legitimately holds
+    only one side of such a pair.
+    """
+    delimiters = {match.start(1) for match in _HANCOM_DELIMITER_BRACE_RE.finditer(token)}
+    stack: list[int] = []
+    unmatched: list[int] = []
+    for index, char in enumerate(token):
+        if index in delimiters or (index and token[index - 1] == "\\"):
+            continue
+        if char == "{":
+            stack.append(index)
+        elif char == "}":
+            if stack:
+                stack.pop()
+            else:
+                unmatched.append(index)
+    unmatched.extend(stack)
+    return sorted(unmatched)
+
+
+def _split_ranges_at_unmatched_braces(
+    value: str, ranges: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    # 2026-10-03: a set brace next to a formula ("{a_n}", "(x+1){x²+…}",
+    # system-of-inequalities "{") used to be swallowed into the implicit token
+    # and reach the equation editor unbalanced. Cut the token at every unmatched
+    # brace so the brace stays prose and each side is emitted on its own.
+    result: list[tuple[int, int]] = []
+    for start, end in ranges:
+        token = value[start:end]
+        if _is_explicit_math_token(token):
+            result.append((start, end))
+            continue
+        cuts = unmatched_brace_positions(token)
+        if not cuts:
+            result.append((start, end))
+            continue
+        cursor = start
+        for cut in cuts:
+            if start + cut > cursor:
+                result.append((cursor, start + cut))
+            cursor = start + cut + 1
+        if cursor < end:
+            result.append((cursor, end))
+    cleaned: list[tuple[int, int]] = []
+    for start, end in result:
+        piece = value[start:end]
+        if not piece.strip():
+            continue
+        # A fragment left behind by the cut must still look like a formula.
+        stripped = piece.strip()
+        if len(stripped) <= 1 and not MATH_SYMBOL_TOKEN_RE.match(stripped):
+            continue
+        cleaned.append((start, end))
+    return cleaned
+
+
 def split_math_text(text: str) -> list[tuple[str, bool]]:
     value = str(text or "")
     if not value:
@@ -964,6 +1033,7 @@ def split_math_text(text: str) -> list[tuple[str, bool]]:
     if not current_explicit and MATH_TAIL_RE.match(final_tail):
         current_end = len(value)
     ranges.append((current_start, current_end))
+    ranges = _split_ranges_at_unmatched_braces(value, ranges)
 
     parts: list[tuple[str, bool]] = []
     cursor = 0

@@ -3,6 +3,7 @@
 import re
 from statistics import median
 from lxml import etree
+from .pdf_source_page_memo import source_text_dict
 
 HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
@@ -13,7 +14,7 @@ def measure_source_masthead(page, body_top):
 
     lines = [
         line
-        for block in page.get_text("dict")["blocks"]
+        for block in source_text_dict(page)["blocks"]
         for line in block.get("lines", [])
         if line["bbox"][3] < body_top
     ]

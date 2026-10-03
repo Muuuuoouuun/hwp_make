@@ -12,23 +12,29 @@ from docx.shared import Cm, Pt
 
 from . import storage
 from .exam_templates import (
+    ANSWER_KEY_TITLE,
     ANSWER_SHEET_TITLE,
     ExamTemplate,
     answer_blank_text,
+    answer_key_rows,
     explanation_entries,
     format_answer,
     get_template,
     needs_answer_blank,
+    numbered_stem_paragraphs,
     quick_answer_lines,
     resolve_export_title,
+    wants_answer_key,
 )
 from .math_text import normalize_math_token, split_math_text, strip_math_delimiters
 
 CIRCLED_NUMBERS = ("①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨")
 QUESTION_PREFIX_RE = re.compile(r"^\s*(?:문제\s*)?(\d{1,3})\s*[\.\)]\s*")
+# 선지 번호 접두만 떼어 낸다: ①~⑨, 1)~9), (1)~(9), 1.~9.(뒤에 숫자가 오지 않을 때).
+# 예전 규칙(\d+[.)] 또는 '숫자+공백')은 '0.5'→'5', '2 cm'→'cm', '12.5%'→'5%'처럼 값 자체를 훼손했다.
 CHOICE_PREFIX_RE = re.compile(
     r"^\s*(?:[①②③④⑤⑥⑦⑧⑨❶❷❸❹❺❻❼❽❾➀➁➂➃➄➅➆➇➈]|"
-    r"\d+\s*[\.\)]|[1-9](?=\s))\s*"
+    r"\(\s*[1-9]\s*\)|[1-9]\s*\)|[1-9]\s*\.(?!\d))\s*"
 )
 
 # XML에서 허용되지 않는 제어문자. python-docx는 이런 문자가 있으면 저장 시 예외를 던진다.
@@ -681,6 +687,13 @@ def _add_answer_sheet(document: Document, problems: list[dict[str, Any]], templa
             _add_text_paragraph(document, line)
 
 
+def _add_answer_key(document: Document, problems: list[dict[str, Any]], template: ExamTemplate) -> None:
+    document.add_page_break()
+    heading = document.add_heading(ANSWER_KEY_TITLE, level=1)
+    _set_font(heading, 14, True)
+    _add_table(document, answer_key_rows(problems, template))
+
+
 def _set_section_columns(document: Document, columns: int) -> None:
     if columns <= 1:
         return
@@ -704,6 +717,7 @@ def write_docx(
     problems: list[dict[str, Any]],
     template_key: str = "basic",
     include_answer_sheet: bool = False,
+    answer_key_appendix: bool | None = None,
 ) -> None:
     template = get_template(template_key)
     title = _clean(resolve_export_title(title, template))
@@ -724,7 +738,19 @@ def write_docx(
 
         stem = problem.get("stem") or ""
         stem_lines = stem.splitlines()
-        if template.merge_question_number:
+        if template.source_number_line:
+            for text, style in numbered_stem_paragraphs(
+                stem_lines, label, numbered=bool(problem.get("number")),
+                prepared=bool(problem.get("_numbering_prepared")),
+            ):
+                paragraph = document.add_paragraph()
+                if style == "heading":
+                    _add_text_runs(paragraph, text, 11, True)
+                else:
+                    _add_text_runs(paragraph, text)
+            if meta:
+                _add_text_paragraph(document, f"[{meta}]", 9, False)
+        elif template.merge_question_number:
             first_line = (
                 (stem_lines[0] if problem.get("_numbering_prepared")
                  else _strip_question_prefix(stem_lines[0], label))
@@ -781,5 +807,7 @@ def write_docx(
 
     if include_answer_sheet:
         _add_answer_sheet(document, problems, template)
+    elif wants_answer_key(problems, template, include_answer_sheet, answer_key_appendix):
+        _add_answer_key(document, problems, template)
 
     document.save(path)

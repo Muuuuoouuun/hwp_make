@@ -62,10 +62,15 @@ def _loopback(value: str) -> bool:
         return False
 
 
-def _check_same_origin(request: Request) -> None:
+def same_origin_problem(request: Request) -> bool:
+    """Origin 이 이 서버 주소와 다르거나 브라우저가 교차 사이트 요청이라고 알리면 True."""
     origin = request.headers.get("origin", "")
     expected = str(request.base_url).rstrip("/")
-    if origin != expected or request.headers.get("sec-fetch-site") == "cross-site":
+    return origin != expected or request.headers.get("sec-fetch-site") == "cross-site"
+
+
+def _check_same_origin(request: Request) -> None:
+    if same_origin_problem(request):
         raise _error(403, "same_origin_required", "이 앱 화면에서 로그인 요청을 다시 실행해 주세요.")
 
 

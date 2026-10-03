@@ -3,6 +3,7 @@ import re
 import math
 
 import fitz
+from .pdf_source_page_memo import source_text_dict
 
 HP = '{http://www.hancom.co.kr/hwpml/2011/paragraph}'
 LABEL = re.compile(r'\([가-힣]\)')
@@ -21,7 +22,7 @@ def source_inline_labels(page, drawings=None):
     from .pdf_layout_writer import _pdf_output_text
 
     glyphs = []
-    for block in page.get_text('rawdict')['blocks']:
+    for block in source_text_dict(page, 'rawdict')['blocks']:
         for line in block.get('lines', []):
             for span in line['spans']:
                 for char in span['chars']:

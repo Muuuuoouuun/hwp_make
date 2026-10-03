@@ -27,8 +27,34 @@ GREEK = {
 }
 
 
+# 한컴 수식 예약어. 공백 없는 'LEQx'처럼 변수 앞에 붙어 base 로 흡수되면
+# 원본 'x^{4}'와 출력 'LEQx^{4}'가 다른 키가 되어 미탐·오탐이 생긴다
+# (2026-10-03 GAP2-03). 긴 것부터 벗겨 변수만 base 로 남긴다.
+_RESERVED = sorted(
+    {
+        "LEQ", "GEQ", "NEQ", "times", "over", "sqrt", "root", "lim", "sum",
+        "int", "oint", "prod", "log", "ln", "sinh", "cosh", "tanh", "sin",
+        "cos", "tan", "sec", "csc", "cot", "exp", "max", "min", "cdot",
+        "infty", "inf", "left", "right", "rarrow", "larrow", "pm", "div",
+        "cap", "cup",
+    },
+    key=len,
+    reverse=True,
+)
+_RESERVED_PREFIX = re.compile("^(?:" + "|".join(_RESERVED) + ")")
+
+
 def _symbol(value):
     return "".join(GREEK.get(char, char) for char in value)
+
+
+def _script_base(value):
+    """Strip leading equation keywords so only the attached variable remains."""
+    while True:
+        match = _RESERVED_PREFIX.match(value)
+        if not match or match.end() >= len(value):
+            return value
+        value = value[match.end():]
 
 
 def source_script_attachments(lines: list[dict]) -> list[dict]:
@@ -76,7 +102,7 @@ def source_script_attachments(lines: list[dict]) -> list[dict]:
                 continue
             found.append(
                 {
-                    "base": _symbol(token[1]),
+                    "base": _script_base(_symbol(token[1])),
                     "operator": "^" if delta > 0 else "_",
                     "value": value.replace("−", "-"),
                     "source_bbox_pt": [
@@ -103,7 +129,7 @@ def inspect_script_attachments(expected: list[dict], native_scripts: list[str]) 
         )
         compact = re.sub(r"\{([A-Za-z]+)\}(?=[_^])", r"\1", compact)
         for match in pattern.finditer(compact):
-            actual[(match[1], match[2], match[3] or match[4])] += 1
+            actual[(_script_base(match[1]), match[2], match[3] or match[4])] += 1
     missing = [
         {"base": base, "operator": operator, "value": value}
         for base, operator, value in (required - actual).elements()

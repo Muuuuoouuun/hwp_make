@@ -10,6 +10,7 @@ from statistics import median
 from xml.etree import ElementTree
 
 from lxml import etree
+from .pdf_source_page_memo import source_text_dict
 
 HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
@@ -33,7 +34,7 @@ def measure_running_furniture(page, body_top, subject):
         return None
     fields = {'subject': [], 'grade': [], 'page': []}
     rules = []
-    for block in page.get_text('rawdict')['blocks']:
+    for block in source_text_dict(page, 'rawdict')['blocks']:
         for line in block.get('lines', []):
             if line['bbox'][3] >= body_top:
                 continue

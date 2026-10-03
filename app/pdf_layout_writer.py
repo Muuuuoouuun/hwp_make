@@ -6,6 +6,7 @@ page coordinates using editable HWPX drawing text boxes.
 """
 from __future__ import annotations
 
+import functools
 import io
 import hashlib
 import math
@@ -35,6 +36,7 @@ _VENDOR = Path(__file__).resolve().parent / "_vendor"
 if str(_VENDOR) not in sys.path:
     sys.path.insert(0, str(_VENDOR))
 from hwpx import HwpxDocument  # noqa: E402
+from .pdf_source_page_memo import source_text_dict
 
 HP = "http://www.hancom.co.kr/hwpml/2011/paragraph"
 HS = "http://www.hancom.co.kr/hwpml/2011/section"
@@ -124,7 +126,14 @@ _MATH_VISUAL_PLACEHOLDER_CHARS = {
 
 def _pdf_output_text(text: str) -> str:
     """Normalize PDF math glyph recovery output before writing editable text."""
-    normalized = math_text.normalize_recognized_math_layout_text(str(text or ""))
+    # 2026-10-03 speed: pure string function called ~100k times per exam with
+    # heavy repetition (same source lines re-read by every stage); memoized.
+    return _pdf_output_text_cached(str(text or ""))
+
+
+@functools.lru_cache(maxsize=65536)
+def _pdf_output_text_cached(text: str) -> str:
+    normalized = math_text.normalize_recognized_math_layout_text(text)
     return "".join(
         char
         for char in normalized
@@ -2278,7 +2287,7 @@ def _text_visual_overlay_rects(
         if rect.width <= 3.0 and rect.height >= page_rect.height * 0.38:
             continue
         drawing_rects.append(rect)
-    for block in page.get_text("dict").get("blocks", []):
+    for block in source_text_dict(page).get("blocks", []):
         if block.get("type") != 1:
             continue
         rect = fitz.Rect(block.get("bbox") or (0, 0, 0, 0))
@@ -2418,7 +2427,7 @@ def _column_visual_overlay_rects(page: fitz.Page) -> list[fitz.Rect]:
 
 def _iter_text_spans(page: fitz.Page) -> list[dict[str, Any]]:
     spans: list[dict[str, Any]] = []
-    for block in page.get_text("dict").get("blocks", []):
+    for block in source_text_dict(page).get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
@@ -2437,6 +2446,16 @@ def _iter_text_spans(page: fitz.Page) -> list[dict[str, Any]]:
 
 
 def _iter_text_lines(page: fitz.Page) -> list[dict[str, Any]]:
+    # 2026-10-03 speed: one conversion extracted the same page text layer ~20
+    # times (writer, editability, flow/question inspections).  The extraction
+    # is pure per page content, so it is memoized and each caller gets its own
+    # deep copy; callers may still mutate spans exactly as before.
+    from .pdf_source_page_memo import copy_text_lines, page_memo
+
+    return page_memo(page, "text_lines", lambda: _iter_text_lines_uncached(page), copy_text_lines)
+
+
+def _iter_text_lines_uncached(page: fitz.Page) -> list[dict[str, Any]]:
     lines: list[dict[str, Any]] = []
     for block in page.get_text("rawdict", flags=fitz.TEXTFLAGS_RAWDICT & ~fitz.TEXT_PRESERVE_IMAGES).get("blocks", []):
         if block.get("type") != 0:
@@ -5068,7 +5087,7 @@ def _append_cell_paragraph_lines(
 
 def _iter_flow_images(page: fitz.Page) -> list[dict[str, Any]]:
     images: list[dict[str, Any]] = []
-    for block in page.get_text("dict").get("blocks", []):
+    for block in source_text_dict(page).get("blocks", []):
         if block.get("type") != 1:
             continue
         bbox = fitz.Rect(block.get("bbox") or (0, 0, 0, 0))
@@ -5629,7 +5648,7 @@ def _iter_flow_table_images(
 ) -> list[dict[str, Any]]:
     if drawings is None:
         drawings = page.get_drawings()
-    blocks = [block for block in page.get_text("dict").get("blocks", []) if block.get("type") == 0]
+    blocks = [block for block in source_text_dict(page).get("blocks", []) if block.get("type") == 0]
     used: set[int] = set()
     table_images: list[dict[str, Any]] = []
     matrix = fitz.Matrix(2.0, 2.0)
@@ -6694,6 +6713,14 @@ def _flow_gap_height_pt(raw_gap_pt: float, *, preserve: bool = False) -> float:
 
 
 def _page_body_top(page: fitz.Page) -> float:
+    # 2026-10-03 speed: pure per page content (drawings + text lines); memoized
+    # so the writer and the verifiers compute it once per page.
+    from .pdf_source_page_memo import page_memo
+
+    return page_memo(page, "body_top", lambda: _page_body_top_uncached(page))
+
+
+def _page_body_top_uncached(page: fitz.Page) -> float:
     candidates: list[float] = []
     for drawing in page.get_drawings():
         for item in drawing.get("items", []):
@@ -7291,7 +7318,83 @@ def _flow_subject_title(pdf_path: Path) -> str | None:
         if match:
             variant = f"({match.group(1).upper()}형)"
         return f"수학 영역{variant}"
-    return None
+    # 2026-10-03: the file name says nothing; use the area printed on page 1.
+    return detect_source_subject(pdf_path).get("area") or None
+
+
+_SOURCE_AREA_LINE_RE = re.compile(r".{1,16}영역(?:\s*\([^\n]+\))?")
+_SOURCE_SUBJECT_RE = re.compile(r"(국어|수학|영어|한국사|사회탐구|과학탐구|직업탐구|제2외국어)")
+_SOURCE_PERIOD_RE = re.compile(r"제\s*([1-5])\s*교시")
+# KICE timetable: 1교시 국어, 2교시 수학, 3교시 영어. 4교시 mixes 한국사 and 탐구,
+# so it never decides the area on its own.
+_PERIOD_SUBJECTS = {"1": "국어", "2": "수학", "3": "영어"}
+_SUBJECT_TEMPLATES = {
+    "국어": "kice_korean",
+    "수학": "kice_math",
+    "영어": "kice_english",
+    "한국사": "kice_social",
+    "사회탐구": "kice_social",
+    "직업탐구": "kice_social",
+    "제2외국어": "kice_social",
+    "과학탐구": "kice_science",
+}
+_UPLOAD_STORAGE_PREFIX_RE = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{8}_")
+
+
+def source_display_stem(pdf_path: Path, source_name: str | None = None) -> str:
+    """The teacher's own file name without extension.
+
+    Uploads are stored as ``YYYYMMDD_HHMMSS_<hash>_<name>``; that storage
+    prefix is never part of a document title.
+    """
+    if source_name:
+        stem = Path(str(source_name)).stem
+        if stem:
+            return stem
+    return _UPLOAD_STORAGE_PREFIX_RE.sub("", Path(pdf_path).stem) or Path(pdf_path).stem
+
+
+def detect_source_subject(pdf_path: str | Path) -> dict[str, str]:
+    """Read the exam area from page 1 of the PDF itself.
+
+    Priority: a printed "○○ 영역" line (masthead first, then the body), then
+    the "제N 교시" period of the KICE timetable. Returns ``area`` (shown in the
+    masthead; empty when unknown), ``subject`` and ``template_key``.
+    """
+    empty = {"area": "", "subject": "", "template_key": "", "period": ""}
+    try:
+        with fitz.open(str(pdf_path)) as document:
+            if not document:
+                return empty
+            page = document[0]
+            body_top = _page_body_top(page)
+            lines = _iter_text_lines(page)
+            head: list[str] = []
+            body: list[str] = []
+            for line in lines:
+                text = _pdf_output_text(_line_text(line)).strip()
+                if not text:
+                    continue
+                (head if _item_bbox(line).y1 < body_top + 1 else body).append(text)
+    except Exception:
+        return empty
+    period_match = _SOURCE_PERIOD_RE.search(" ".join(head) or " ".join(body))
+    period = period_match.group(1) if period_match else ""
+    for texts in (head, body):
+        areas = [
+            text for text in texts
+            if _SOURCE_AREA_LINE_RE.fullmatch(text) and _SOURCE_SUBJECT_RE.search(text)
+        ]
+        if areas:
+            area = max(areas, key=len)
+            subject = _SOURCE_SUBJECT_RE.search(area).group(1)
+            return {"area": area, "subject": subject,
+                    "template_key": _SUBJECT_TEMPLATES.get(subject, ""), "period": period}
+    subject = _PERIOD_SUBJECTS.get(period, "")
+    if subject:
+        return {"area": f"{subject} 영역", "subject": subject,
+                "template_key": _SUBJECT_TEMPLATES[subject], "period": period}
+    return {**empty, "period": period}
 
 
 def _append_spacer_table(
@@ -7762,7 +7865,7 @@ def write_pdf_flow_hwpx(
 
     with fitz.open(pdf_path) as pdf_doc:
         if not pdf_doc:
-            raise ValueError(f"empty PDF: {pdf_path}")
+            raise ValueError(f"empty PDF: {Path(pdf_path).name}")
         first = pdf_doc[0]
         first_page_lines = _iter_text_lines(first)
         first_page_text = " ".join(_line_text(line) for line in first_page_lines)
@@ -8191,7 +8294,11 @@ def write_pdf_flow_hwpx(
     }
 
 
-def _structured_pdf_template_key(filename: str, exam_title: str) -> str:
+def _structured_pdf_template_key(filename: str, exam_title: str, subject_template: str | None = None) -> str:
+    # 2026-10-03: the area printed on page 1 decides first; the file name and
+    # the generic title "대학수학능력시험" (which contains "수학") only follow.
+    if subject_template:
+        return subject_template
     name = filename.lower()
     if any(word in name for word in ("과학", "물리", "화학", "생명", "science")):
         return "kice_science"
@@ -8203,7 +8310,7 @@ def _structured_pdf_template_key(filename: str, exam_title: str) -> str:
         return "kice_english"
     if "수학" in name or "math" in name:
         return "kice_math"
-    hint = f"{filename} {exam_title}".lower()
+    hint = f"{filename} {exam_title}".lower().replace("대학수학능력시험", "")
     if "수학" in hint or "math" in hint:
         return "kice_math"
     if "영어" in hint or "english" in hint:
@@ -8333,7 +8440,7 @@ def _structured_page_continuation_text(
     start_y = float(page.rect.height) * 0.13
     end_y = max(start_y, float(first_problem_top_px) / max(0.01, scale) - 4.0)
     selected_lines: list[tuple[float, float, str]] = []
-    for block in page.get_text("dict").get("blocks") or []:
+    for block in source_text_dict(page).get("blocks") or []:
         if int(block.get("type") or 0) != 0:
             continue
         for line in block.get("lines") or []:
@@ -8416,7 +8523,7 @@ def _structured_page_postamble_text(
     if start_y >= end_y:
         return ""
     selected_lines: list[tuple[float, float, str]] = []
-    for block in page.get_text("dict").get("blocks") or []:
+    for block in source_text_dict(page).get("blocks") or []:
         if int(block.get("type") or 0) != 0:
             continue
         for line in block.get("lines") or []:
@@ -8454,7 +8561,7 @@ def _structured_pdf_body_lines(page: fitz.Page) -> list[dict[str, Any]]:
     start_y = float(page.rect.height) * 0.13
     end_y = float(page.rect.height) * 0.92
     lines: list[dict[str, Any]] = []
-    for block in page.get_text("dict").get("blocks") or []:
+    for block in source_text_dict(page).get("blocks") or []:
         if int(block.get("type") or 0) != 0:
             continue
         for line in block.get("lines") or []:
@@ -9689,7 +9796,7 @@ def _write_structured_math_page_tables(
 
     with fitz.open(pdf_path) as source_pdf:
         if not source_pdf:
-            raise ValueError(f"empty PDF: {pdf_path}")
+            raise ValueError(f"empty PDF: {Path(pdf_path).name}")
         source_width_mm = _pt_to_mm(source_pdf[0].rect.width)
         coordinate_scale = width_mm / max(1.0, source_width_mm)
         margin_left_pt = margin_left_mm * 72.0 / 25.4 / coordinate_scale
@@ -9932,6 +10039,7 @@ def write_pdf_structured_hwpx(
     math_ai_recognition: bool = False,
     math_ai_model: str | None = None,
     variant_policy: str = "all",
+    source_name: str | None = None,
 ) -> dict[str, Any]:
     """Write editable HWPX with deterministic math recovery.
 
@@ -9950,9 +10058,14 @@ def write_pdf_structured_hwpx(
     payload = pdf_path.read_bytes()
     recognized = recognize_pdf(payload, filename=pdf_path.name)
     if not recognized.found:
-        raise ValueError(f"structured PDF recognition found no editable problems: {pdf_path}")
-    title = str(getattr(recognized, "exam_title", "") or pdf_path.stem)
-    resolved_template = template_key or _structured_pdf_template_key(pdf_path.name, title)
+        raise ValueError(f"structured PDF recognition found no editable problems: {Path(pdf_path).name}")
+    # 2026-10-03: the fallback title is the teacher's file name, not the upload
+    # storage name; the subject comes from page 1 before any name heuristics.
+    display_stem = source_display_stem(pdf_path, source_name)
+    title = str(getattr(recognized, "exam_title", "") or display_stem)
+    source_subject = detect_source_subject(pdf_path)
+    resolved_template = template_key or _structured_pdf_template_key(
+        source_name or pdf_path.name, title, source_subject.get("template_key"))
 
     # Some supplied exam PDFs concatenate odd/even forms. Their question
     # numbers restart halfway through and nearly every stem is duplicated.
@@ -10008,6 +10121,7 @@ def write_pdf_structured_hwpx(
                                                  variant_page_limit or total_recognized_pages),
             native_math=native_math, variant_policy=variant_policy,
             variant_page_limit=variant_page_limit, variant_overlap_ratio=variant_overlap_ratio,
+            subject_area=source_subject.get("area", ""),
         )
 
     items: list[dict[str, Any]] = []
@@ -10218,7 +10332,7 @@ def write_pdf_structured_hwpx(
         )
 
     if not items:
-        raise ValueError(f"structured PDF recognition produced no output problems: {pdf_path}")
+        raise ValueError(f"structured PDF recognition produced no output problems: {Path(pdf_path).name}")
 
     problem_item_count = len(items)
     direct_text_flow = resolved_template in {"kice_korean", "kice_english"}
@@ -10234,7 +10348,7 @@ def write_pdf_structured_hwpx(
             page_limit=flow_page_limit,
         )
         if not items:
-            raise ValueError(f"structured PDF text flow produced no output content: {pdf_path}")
+            raise ValueError(f"structured PDF text flow produced no output content: {Path(pdf_path).name}")
 
     continuation_count = 0
     continuation_lines = 0
@@ -10655,7 +10769,7 @@ def write_pdf_layout_hwpx(
 
     with fitz.open(pdf_path) as pdf_doc:
         if not pdf_doc:
-            raise ValueError(f"empty PDF: {pdf_path}")
+            raise ValueError(f"empty PDF: {Path(pdf_path).name}")
 
         total_pages = len(pdf_doc) if max_pages is None else min(len(pdf_doc), max_pages)
         for page_index in range(total_pages):
@@ -11377,7 +11491,7 @@ def write_pdf_raster_hwpx(
 
     with fitz.open(pdf_path) as pdf_doc:
         if not pdf_doc:
-            raise ValueError(f"empty PDF: {pdf_path}")
+            raise ValueError(f"empty PDF: {Path(pdf_path).name}")
         total_pages = len(pdf_doc) if max_pages is None else min(len(pdf_doc), max_pages)
         current_section = doc.sections[0]
         current_signature: tuple[int, int, str] | None = None

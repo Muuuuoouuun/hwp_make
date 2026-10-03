@@ -61,6 +61,8 @@ def convert(directory: Path):
                 ids=ids,
                 title=Path(spec["filename"]).stem,
                 format=spec["format"],
+                # 기본 변환 전용 양식: 원번호·원문자 선지 유지, 정답은 끝 정답표로만.
+                template_key="simple",
                 native_math=True,
             )
         )

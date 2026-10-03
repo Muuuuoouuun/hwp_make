@@ -14,6 +14,7 @@ import re
 import fitz
 import numpy as np
 from PIL import Image, ImageFilter
+from .pdf_source_page_memo import source_text_dict
 
 
 def render_source_crop(source: str | Path | bytes, page_index: int, region: fitz.Rect) -> bytes:
@@ -191,7 +192,7 @@ def _native_frame_reconstruction(page, image, bounds, verified, table_texts) -> 
     if (ink & ~straight_rows[:, None] & ~straight_cols[None, :]).any():
         return None
     fragments = []
-    for block in page.get_text("dict").get("blocks", []):
+    for block in source_text_dict(page).get("blocks", []):
         for line in block.get("lines", []):
             rectangle = fitz.Rect(line["bbox"])
             if not bounds.contains(rectangle):
@@ -337,7 +338,7 @@ def inspect_source_images(document, assets: dict[str, bytes], provenance: list[d
                     # foreground figure that was never embedded in this asset.
                     verified_regions.setdefault(page_number, []).extend(
                         fitz.Rect(block["bbox"]) & region
-                        for block in page.get_text("dict").get("blocks", [])
+                        for block in source_text_dict(page).get("blocks", [])
                         if block.get("type") == 1 and block.get("number") in numbers
                     )
                 else:
@@ -356,7 +357,7 @@ def inspect_source_images(document, assets: dict[str, bytes], provenance: list[d
         # Text extraction reports the visible, PDF-clipped image bounds.
         # get_image_info() instead includes invisible bitmap margins outside
         # clipping paths, which would falsely report cropped-off source ink.
-        image_blocks = [image for image in page.get_text("dict").get("blocks", [])
+        image_blocks = [image for image in source_text_dict(page).get("blocks", [])
                         if image.get("type") == 1 and image.get("image")]
         tiled_frames = _native_tiled_frame_reconstructions(
             page, image_blocks, verified_regions.get(index+1, []), native_table_texts or [])

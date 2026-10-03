@@ -32,6 +32,7 @@ function harness() {
     window: { location: { pathname: "/premium/studio" } },
     EXT_KINDS: { txt: "text", pdf: "pdf", docx: "docx" }, MAX_CLIENT_UPLOAD_BYTES: 64 * 1024 * 1024,
     DEFAULT_EXPORT_TITLE: "새 시험지",
+    SIMPLE_EXPORT_TEMPLATE: /^const SIMPLE_EXPORT_TEMPLATE = "([^"]+)";$/m.exec(source)?.[1],
     DataTransfer: class { constructor() { this.files = []; this.items = { add: f => this.files.push(f) }; } },
     clearSimpleResult() { state.simpleNotices = []; }, setSimpleQualityNote() {}, setButtonBusy() {},
     friendlyErrorMessage: e => e.message, isPdfFile: f => /\.pdf$/i.test(f?.name || ""),
@@ -43,7 +44,7 @@ function harness() {
     visibleModals: () => [], flushActiveDraft: async () => true, validateUploadSizes: () => true,
     showSimpleQuality() {}, showSimpleResult() {}, showSelectedFiles() {},
   });
-  for (const name of ["isPremiumWorkspace", "simpleFileExtension", "formatSimpleFileSize", "assignSingleFile",
+  for (const name of ["isPremiumWorkspace", "isPdfFile", "simpleFileExtension", "formatSimpleFileSize", "assignSingleFile",
     "setSimpleConversionStatus", "renderWorkspaceStage", "setSimpleFile", "recognizeSimpleFile",
     "refreshSession", "authenticateLocalSession", "enterPremiumEditor", "applyUiMode", "runSimpleConversion"]) {
     vm.runInContext(implementation(name), c);
@@ -108,7 +109,8 @@ async function run() {
   c.exportSelected = async (...args) => { exported = args; return true; };
   await c.runSimpleConversion();
   assert.deepEqual(plain(exported[0]), [1, 2], "basic output uses source recognition order, not edited basket");
-  assert.equal(exported[1].templateKey, "basic");
+  // 2026-10-03 4단계: 간단 변환은 전용 'simple' 양식으로 내보낸다(스튜디오 기본 양식 basic 과 별개).
+  assert.equal(exported[1].templateKey, "simple");
   assert.equal(state.workspaceStage, "results");
   assert.equal(requests.filter(r => r.url === "/api/import").length, 1, "basic output never imports the same File twice");
 

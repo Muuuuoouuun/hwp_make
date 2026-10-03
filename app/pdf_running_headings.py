@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from statistics import median
 import re
+from .pdf_source_page_memo import source_text_dict
 
 HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 
@@ -14,7 +15,7 @@ def measure_running_heading(page, body_top, subject):
     if not subject:
         return None
     matches = []
-    for block in page.get_text("dict")["blocks"]:
+    for block in source_text_dict(page)["blocks"]:
         for line in block.get("lines", []):
             if line["bbox"][3] >= body_top:
                 continue

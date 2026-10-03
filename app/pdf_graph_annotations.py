@@ -3,6 +3,7 @@ from statistics import median
 import re
 
 import fitz
+from .pdf_source_page_memo import source_text_dict
 
 
 def associate_graph_annotations(page, figures, lines, table_regions=()):
@@ -14,7 +15,7 @@ def associate_graph_annotations(page, figures, lines, table_regions=()):
     """
     from . import pdf_layout_writer as w
 
-    bitmaps = [b for b in page.get_text('dict')['blocks'] if b.get('type') == 1]
+    bitmaps = [b for b in source_text_dict(page)['blocks'] if b.get('type') == 1]
     selected = set()
     for index, figure in enumerate(figures):
         region = w._item_bbox(figure)

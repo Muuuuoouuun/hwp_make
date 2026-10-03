@@ -271,6 +271,154 @@ def _inspect_flow_style(path: Path) -> dict[str, object]:
         "margin_ok": margin_ok,
     }
 
+def check_review_contract(client: TestClient) -> None:
+    """2026-10-03 contract: local (per-question) audit failures ship the file with
+    a per-question review (200); only fatal conditions or strict=true stay 422."""
+    from unittest.mock import patch
+
+    from app import pdf_editability, pdf_question_rendering
+    from app import pdf_layout_writer as writer
+    from app.pdf_export_review import build_export_review
+
+    exports = Path(tmp.name) / "exports"
+    body = {
+        "filename": "review_contract.pdf",
+        "data_base64": base64.b64encode(make_pdf()).decode("ascii"),
+        "layout_mode": "structured",
+        "native_math": False,
+    }
+    real_inspect = pdf_editability.inspect_pdf_editability
+
+    def flagged_inspect(*args, **kwargs):
+        # The synthetic PDF passes every audit; inject one per-question semantics
+        # defect so only the route's gate/review logic is pinned here.
+        result = real_inspect(*args, **kwargs)
+        units = result["question_units"]
+        first = (units.get("question_ids") or ["v1:q01"])[0]
+        units["wrong_question_semantics"] = [{"id": first, "ok": False, "missing_math_fragments": [{"tokens": ["x", "^", "2"]}]}]
+        units.setdefault("source_semantic_regions", []).append({"id": first, "page": 1, "bbox": [0, 0, 595, 842]})
+        result["issues"] = sorted({*result["issues"], "source_question_semantics_mismatch", "text_in_drawing_boxes"})
+        result["ok"] = False
+        return result
+
+    with patch.object(pdf_editability, "inspect_pdf_editability", flagged_inspect):
+        before = set(exports.rglob("*.hwpx"))
+        flagged = client.post("/api/pdf-layout-export", json=body)
+        check("review: per-question defect is delivered (200, not 422)", flagged.status_code == 200, flagged.text[:240])
+        if flagged.status_code == 200:
+            payload = flagged.json()
+            review = payload.get("review") or {}
+            questions = review.get("flagged_questions") or []
+            check("review: ok false with one flagged question",
+                  review.get("ok") is False and review.get("flag_count") == 1 and len(questions) == 1, repr(review))
+            if questions:
+                check("review: flagged entry shape",
+                      questions[0].get("id") == "v1:q01" and questions[0].get("issues") == ["math"]
+                      and questions[0].get("page") == 1 and questions[0].get("summary", "").startswith("1번:"),
+                      repr(questions[0]))
+            check("review: derived document code folded into question flag",
+                  review.get("document_issues") == [], repr(review.get("document_issues")))
+            check("review: teacher message names the question",
+                  "문항 1개" in str(review.get("message")) and "1번" in str(review.get("message")), repr(review.get("message")))
+            check("review: message is the first notice",
+                  (payload.get("notices") or [None])[0] == review.get("message"), repr(payload.get("notices")))
+            quality = payload.get("quality") or {}
+            check("review: quality.flags and quality.review",
+                  quality.get("flags") == ["editability_review_required"] and quality.get("review") == review,
+                  repr(quality.get("flags")))
+            check("review: editability target not met",
+                  quality.get("meets_native_editability_target") is False
+                  and quality.get("meets_objective_score_target") is False,
+                  repr(quality.get("meets_native_editability_target")))
+            check("review: stats carry review", (payload.get("stats") or {}).get("review") == review)
+            output = exports / str((payload.get("export") or {}).get("name") or "")
+            check("review: delivered HWPX exists", output.is_file() and output.read_bytes()[:2] == b"PK", str(output))
+            report_path = exports / str(((payload.get("run") or {}).get("report") or {}).get("name") or "")
+            if report_path.is_file():
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                check("review: layout_report stores review",
+                      report.get("review") == review and report.get("stats", {}).get("review") == review)
+            else:
+                check("review: layout_report exists", False, str(report_path))
+            history = client.get("/api/exports").json().get("items") or []
+            item = next((entry for entry in history
+                         if entry.get("name") == (payload.get("export") or {}).get("name")), {})
+            check("review: export history exposes review",
+                  ((item.get("conversion") or {}).get("quality") or {}).get("review") == review,
+                  repr(list((item.get("conversion") or {}).keys())))
+        strict = client.post("/api/pdf-layout-export", json={**body, "strict": True})
+        detail = (strict.json() if strict.status_code == 422 else {}).get("detail") or {}
+        check("review: strict=true keeps legacy 422",
+              strict.status_code == 422
+              and "source_question_semantics_mismatch" in (detail.get("editability") or {}).get("issues", []),
+              strict.text[:240])
+        check("review: strict rejection leaves no new HWPX", len(set(exports.rglob("*.hwpx")) - before) == 1)
+
+    real_render = pdf_question_rendering.inspect_question_rendering
+
+    def hidden_render(*args, **kwargs):
+        result = real_render(*args, **kwargs)
+        return {**result, "ok": False,
+                "invisible_native_content": [{"question": "question:v1:q02", "kind": "text", "text": "hidden"}]}
+
+    with patch.object(pdf_question_rendering, "inspect_question_rendering", hidden_render):
+        rendered = client.post("/api/pdf-layout-export", json=body)
+        review = (rendered.json().get("review") if rendered.status_code == 200 else None) or {}
+        check("review: rendering defect is delivered with question flag",
+              rendered.status_code == 200 and review.get("flag_count") == 1
+              and (review.get("flagged_questions") or [{}])[0].get("issues") == ["rendering"], rendered.text[:240])
+        strict = client.post("/api/pdf-layout-export", json={**body, "strict": True})
+        check("review: strict rendering failure keeps 422",
+              strict.status_code == 422 and "rendering" in (strict.json().get("detail") or {}), strict.text[:240])
+
+    def empty_inspect(*args, **kwargs):
+        result = real_inspect(*args, **kwargs)
+        result["question_units"] = {**result["question_units"], "question_count": 0}
+        return {**result, "ok": False, "body_paragraphs": 0, "issues": ["no_reflowing_body_paragraphs"]}
+
+    with patch.object(pdf_editability, "inspect_pdf_editability", empty_inspect):
+        before = set(exports.rglob("*.hwpx"))
+        empty = client.post("/api/pdf-layout-export", json=body)
+        detail = (empty.json() if empty.status_code == 422 else {}).get("detail") or {}
+        check("fatal: no editable content stays 422",
+              empty.status_code == 422 and detail.get("fatal") == "no_editable_content", empty.text[:240])
+        check("fatal: no editable content leaves no HWPX", set(exports.rglob("*.hwpx")) == before)
+
+    real_writer = writer.write_pdf_structured_hwpx
+
+    def broken_writer(source, output, **kwargs):
+        stats = real_writer(source, output, **kwargs)
+        Path(output).write_bytes(b"PK\x03\x04 broken package")
+        return stats
+
+    with patch.object(writer, "write_pdf_structured_hwpx", broken_writer):
+        before = set(exports.rglob("*.hwpx"))
+        broken = client.post("/api/pdf-layout-export", json=body)
+        detail = (broken.json() if broken.status_code == 422 else {}).get("detail") or {}
+        check("fatal: broken HWPX package stays 422",
+              broken.status_code == 422 and detail.get("fatal") == "package_integrity", broken.text[:240])
+        check("fatal: broken package is cleaned up", set(exports.rglob("*.hwpx")) == before)
+
+    # Pure mapping: paragraph-flow records map to the owning question region,
+    # multi-variant documents label questions with their page, unmapped codes stay document-level.
+    mapped = build_export_review({
+        "issues": ["source_paragraph_split_at_visual_line", "question_number_mismatch"],
+        "question_units": {
+            "question_ids": ["v1:q23", "v2:q23"],
+            "source_semantic_regions": [{"id": "v1:q23", "page": 3, "bbox": [0, 0, 300, 400]},
+                                        {"id": "v2:q23", "page": 11, "bbox": [0, 0, 300, 400]}],
+            "wrong_question_semantics": [{"id": "v2:q23"}],
+        },
+        "paragraph_flow": {"fragmented_paragraphs": [{"page": 3, "bbox": [10, 10, 200, 40]}]},
+    })
+    labels = [q["label"] for q in mapped["flagged_questions"]]
+    check("review mapping: paragraph record owned by its question", labels == ["23번(3쪽)", "23번(11쪽)"], repr(labels))
+    check("review mapping: unmapped code stays document-level",
+          [d["code"] for d in mapped["document_issues"]] == ["question_number_mismatch"], repr(mapped["document_issues"]))
+    clean = build_export_review({"issues": [], "question_units": {}})
+    check("review mapping: clean audit is ok with no message",
+          clean["ok"] is True and clean["flag_count"] == 0 and clean["message"] == "", repr(clean))
+
 
 def main() -> int:
     try:
@@ -648,6 +796,7 @@ def main() -> int:
                     skipped_report_payload.get("fidelity") == skipped_fidelity,
                     repr(skipped_report_payload.get("fidelity")),
                 )
+        check_review_contract(client)
         history = client.get("/api/exports")
         check("export history status", history.status_code == 200, history.text[:240])
         if history.status_code == 200:

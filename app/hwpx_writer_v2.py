@@ -29,15 +29,19 @@ from hwpx import HwpxDocument  # noqa: E402
 
 from . import layout_model, storage  # noqa: E402
 from .exam_templates import (  # noqa: E402
+    ANSWER_KEY_TITLE,
     ANSWER_SHEET_TITLE,
     ExamTemplate,
     answer_blank_text,
+    answer_key_rows,
     explanation_entries,
     format_answer,
     get_template,
     needs_answer_blank,
+    numbered_stem_paragraphs,
     quick_answer_lines,
     resolve_export_title,
+    wants_answer_key,
 )
 from .hwpx_writer import (  # noqa: E402  (포맷 로직 재사용)
     COLUMN_GAP,
@@ -50,6 +54,7 @@ from .hwpx_writer import (  # noqa: E402  (포맷 로직 재사용)
     _hancom_eqn_script,
     _native_math_height,
     _strip_question_prefix,
+    hancom_eqn_script_parts,
 )
 from .math_text import split_math_text  # noqa: E402
 
@@ -923,6 +928,26 @@ def _append_equation_run(
     run.append(equation)
 
 
+def _demoted_math_text(segment: str) -> str:
+    value = str(segment or "")
+    stripped = value.strip()
+    if len(stripped) >= 2 and stripped.startswith("$") and stripped.endswith("$"):
+        inner = stripped[1:-1]
+        return inner if inner.strip() else " "
+    return value
+
+
+def _strip_stray_math_delimiter(segment: str, previous_was_equation: bool) -> str:
+    """Drop a "$" left behind when a wrapper lost its partner (never currency)."""
+    value = str(segment or "")
+    if not previous_was_equation or "$" not in value:
+        return value
+    if value.strip() == "$":
+        return ""
+    # ")$의 값은" / "}$로": the delimiter trails the bracket the scanner left outside.
+    return re.sub(r"^([)}\]]*)\$(?!\s*\d)", r"\1", value, count=1)
+
+
 def _replace_paragraph_runs(
     paragraph: Any,
     text: str,
@@ -939,10 +964,16 @@ def _replace_paragraph_runs(
             paragraph.element.remove(child)
 
     wrote = False
+    previous_was_equation = False
     for segment, is_math in split_math_text(text):
         if native_math and is_math:
-            script = _hancom_eqn_script(segment)
-            if script:
+            parts = hancom_eqn_script_parts(segment)
+            if parts:
+                leading, script, trailing = parts
+                # 2026-10-03: set braces the scanner swallowed ("{a_n}") stay
+                # visible as prose around a balanced equation.
+                if leading:
+                    paragraph.add_run(leading, char_pr_id_ref=char_pr_id_ref)
                 equation_counter[0] += 1
                 _append_equation_run(
                     paragraph,
@@ -952,8 +983,19 @@ def _replace_paragraph_runs(
                     compact_placeholder=compact_math_placeholder,
                     equation_counter=equation_counter,
                 )
+                if trailing:
+                    paragraph.add_run(trailing, char_pr_id_ref=char_pr_id_ref)
                 wrote = True
+                previous_was_equation = True
                 continue
+            # A token the editor cannot take is demoted to prose; its "$"
+            # delimiters are ours, not the teacher's text.
+            segment = _demoted_math_text(segment)
+        elif not is_math:
+            segment = _strip_stray_math_delimiter(segment, previous_was_equation)
+        previous_was_equation = False
+        if not segment:
+            continue
         paragraph.add_run(
             segment,
             char_pr_id_ref=math_char_pr_id_ref if is_math else char_pr_id_ref,
@@ -1034,6 +1076,7 @@ def write_hwpx(
     include_answer_sheet: bool = False,
     native_math: bool = False,
     preserve_source_layout: bool = False,
+    answer_key_appendix: bool | None = None,
 ) -> None:
     template = get_template(template_key)
     title = resolve_export_title(title, template)
@@ -1859,6 +1902,14 @@ def write_hwpx(
             total += estimate_para_height(stem_lines[0] if stem_lines else label, "heading")
             for line in stem_lines[1:]:
                 total += estimate_para_height(line, "body")
+        elif template.source_number_line:
+            for text, style in numbered_stem_paragraphs(
+                stem_lines, label, numbered=bool(problem.get("number")),
+                prepared=bool(problem.get("_numbering_prepared")),
+            ):
+                total += estimate_para_height(text, style)
+            if meta:
+                total += estimate_para_height(f"[{meta}]", "small")
         elif template.merge_question_number:
             first_line = (
                 stem_lines[0] if problem.get("_numbering_prepared")
@@ -2063,19 +2114,24 @@ def write_hwpx(
         current_flow_column = 1
 
     # --- 머리말 ---
-    if template.key == "basic":
-        para(title, "title", center=True)
+    # simple 양식도 머리말 장식 없이 원본 파일명 제목 한 줄만 둔다.
+    # 2026-10-03: the exam title is prose; a file name such as "a_b_c" must not
+    # be assembled into an equation, so the title line never enables math.
+    if template.key in {"basic", "simple"}:
+        add_wrapped_line(title, "title", center=True, math_enabled=False)
         para("")
     else:
-        para(title or template.masthead_title, "title", center=True)
+        add_wrapped_line(title or template.masthead_title, "title", center=True, math_enabled=False)
         source_area = next(((problem.get("layout") or {}).get("source_masthead_area")
                             for problem in problems
                             if (problem.get("layout") or {}).get("source_masthead_area")), None)
         source_masthead = next(((problem.get("layout") or {}).get("source_masthead_typography")
                                for problem in problems
                                if (problem.get("layout") or {}).get("source_masthead_typography")), {})
+        # A PDF-derived document shows only the area printed in (or inferred
+        # from) the source; the template's area was wrong for 국어·영어 PDFs.
         meta = "   ".join(p for p in (
-            (source_area or template.area, source_masthead.get("period", ""))
+            (source_area or "", source_masthead.get("period", ""))
             if native_content_document else (template.area, template.period, template.variant)) if p)
         if meta:
             para(meta, "meta", center=True)
@@ -2248,6 +2304,14 @@ def write_hwpx(
             para(stem_lines[0] if stem_lines else str(label), "heading")
             for line in stem_lines[1:]:
                 para(line, "body")
+        elif template.source_number_line:
+            for text, style in numbered_stem_paragraphs(
+                stem_lines, label, numbered=bool(problem.get("number")),
+                prepared=bool(problem.get("_numbering_prepared")),
+            ):
+                para(text, style)
+            if meta:
+                para(f"[{meta}]", "small")
         elif template.merge_question_number:
             first_line = (
                 stem_lines[0] if problem.get("_numbering_prepared")
@@ -2376,6 +2440,24 @@ def write_hwpx(
                 for line in lines:
                     para(line, "body")
                 para("")
+    elif wants_answer_key(problems, template, include_answer_sheet, answer_key_appendix):
+        para(ANSWER_KEY_TITLE, "title", center=True, pageBreak="1")
+        para("")
+        key_rows = answer_key_rows(problems, template)
+        key_height = estimate_table_height(key_rows)
+        _add_table(
+            doc,
+            key_rows,
+            char_pr_id_ref=cp["body"],
+            math_char_pr_id_ref=math_cp["body"],
+            native_math=native_math,
+            equation_counter=equation_counter,
+            cell_para_pr_id_ref=pr_center,
+            min_line_height=style_line_heights["body"],
+            content_width=content_width,
+            height=key_height,
+            paragraph_attrs=reserve_object_height(key_height),
+        )
 
     _save_hwpx_with_hancom_compat(doc, Path(path), native_math=native_math,
                                 native_paragraphs=native_content_document,

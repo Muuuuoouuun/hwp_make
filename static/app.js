@@ -3,6 +3,9 @@ import { initSimpleHelp } from "./simple-help.js";
 import { createStudioViews } from "./studio-views.js?v=1";
 
 const DEFAULT_EXPORT_TITLE = "새 시험지";
+// 간단 변환이 인식 문항으로 HWPX를 만들 때 쓰는 서식(비 PDF 변환과 PDF 폴백이 함께 쓴다).
+// "simple": 원번호·원문자 선지 유지, 문항별 정답·해설 대신 끝 정답표(app/exam_templates.py).
+const SIMPLE_EXPORT_TEMPLATE = "simple";
 const WORKSPACE_LAYOUT_KEY = "hwp-make:workspace-layout-v2";
 const PREVIEW_ZOOM_MIN = 0.5;
 const PREVIEW_ZOOM_MAX = 2;
@@ -23,6 +26,7 @@ const state = {
   sessionBusy: false,
   sessionRequestId: 0,
   recognizedProblems: [],
+  recognizedNotices: [],
   recognizedFile: null,
   selectedFile: null,
   recognitionController: null,
@@ -80,6 +84,7 @@ const state = {
   simpleConversionBusy: false,
   simpleCancelRequested: false,
   simpleFailure: "",
+  simpleLayoutError: null,
   simpleNotices: [],
   simpleLastArtifact: null,
   numberingMode: "sequential",
@@ -329,12 +334,47 @@ function friendlyErrorMessage(error) {
   if (/failed to fetch|networkerror|load failed/i.test(raw)) {
     return "서버에 연결하지 못했습니다. 연결 상태를 확인한 뒤 다시 시도하세요.";
   }
+  let parsed;
   try {
-    const parsed = JSON.parse(raw);
-    const detail = parsed?.detail;
-    return String((typeof detail === "object" ? detail?.message : detail) || parsed?.message || raw);
+    parsed = JSON.parse(raw);
   } catch {
     return raw;
+  }
+  if (!parsed || typeof parsed !== "object") return raw;
+  const detail = parsed.detail;
+  // 서버 오류는 {code, message, hint}(detail 안 또는 최상위)가 우선이다. 안내(hint)는 다음 행동이라 함께 보인다.
+  const withHint = (body) => {
+    const message = String(body?.message || "").trim();
+    const hint = String(body?.hint || "").trim();
+    return message && hint && !message.includes(hint) ? `${message} ${hint}` : message;
+  };
+  if (detail && typeof detail === "object" && !Array.isArray(detail) && detail.message) return withHint(detail);
+  if (typeof detail === "string" && detail) return detail;
+  if (parsed.message) return withHint(parsed);
+  // 입력 검증(422) 목록 원문(영문 JSON)은 교사에게 보이지 않고 한국어 요약으로 바꾼다.
+  if (Array.isArray(detail)) return validationErrorSummary(detail);
+  return raw;
+
+  // pydantic 422 detail([{type, loc, msg}])을 '입력값이 올바르지 않습니다: …' 한 줄로 요약한다.
+  // 테스트 하네스가 함수 단위로 떼어 실행하므로 friendlyErrorMessage 안에 둔다.
+  function validationErrorSummary(errors) {
+    // [이름, 주격 표현]
+    const fields = {
+      data_base64: ["파일", "파일이"], filename: ["파일 이름", "파일 이름이"], kind: ["파일 형식", "파일 형식이"],
+      ids: ["문항 목록", "문항 목록이"], title: ["제목", "제목이"],
+    };
+    const labels = errors.map((error) => {
+      const type = String(error?.type || "");
+      const loc = Array.isArray(error?.loc) ? error.loc : [];
+      const [name, subject] = fields[loc[loc.length - 1]] || [];
+      if (!name) return "요청 형식 오류";
+      if (/too_short/.test(type)) return `${subject} 비어 있습니다`;
+      if (/too_long/.test(type)) return `${subject} 너무 깁니다`;
+      if (type === "missing") return `${subject} 빠졌습니다`;
+      if (/literal_error|enum/.test(type)) return `지원하지 않는 ${name}입니다`;
+      return "요청 형식 오류";
+    });
+    return `입력값이 올바르지 않습니다: ${[...new Set(labels)].join(", ") || "요청 형식 오류"}`;
   }
 }
 
@@ -2555,6 +2595,12 @@ function setImportButtonsDisabled(buttons, disabled) {
 }
 
 function validateUploadSizes(files) {
+  // 0바이트 파일은 서버로 보내지 않는다(보내면 422 입력 검증 오류만 돌아온다).
+  const empty = Array.from(files || []).find((file) => Number(file?.size) === 0);
+  if (empty) {
+    toast(`${empty.name}: 빈 파일(0바이트)이라 변환할 수 없습니다. 내용이 들어 있는 파일을 다시 선택해 주세요.`);
+    return false;
+  }
   const oversized = Array.from(files || []).find((file) => Number(file.size || 0) > MAX_CLIENT_UPLOAD_BYTES);
   if (!oversized) return true;
   const sizeMb = Math.ceil(oversized.size / (1024 * 1024));
@@ -2640,12 +2686,16 @@ async function importFiles({
       existingProblems: existing,
       exportSignal: controller.signal,
     });
+    // 새 문항도 기존 문항도 없으면 '0개 문항을 가져와…' 대신 서버 사유를 먼저 보인다.
+    const nothingImported = !created.length && !existing.length && notices.length;
     toast(
-      quick && completed
-        ? `${total}개 문항으로 시험지 파일을 만들었습니다.${notices.length ? ` ${notices[0]}` : ""}`
-        : quick
-          ? `${total}개 문항은 가져왔지만 파일 만들기는 완료되지 않았습니다.`
-          : `${total}개 문항을 가져와 시험지 구성에 담았습니다.${notices.length ? ` ${notices[0]}` : ""}`
+      nothingImported
+        ? `가져온 문항이 없습니다: ${notices[0]}`
+        : quick && completed
+          ? `${total}개 문항으로 시험지 파일을 만들었습니다.${notices.length ? ` ${notices[0]}` : ""}`
+          : quick
+            ? `${total}개 문항은 가져왔지만 파일 만들기는 완료되지 않았습니다.`
+            : `${total}개 문항을 가져와 시험지 구성에 담았습니다.${notices.length ? ` ${notices[0]}` : ""}`
     );
     els.fileInput.value = "";
     els.fileName.textContent = "HWP, HWPX, DOCX, PDF, 이미지, TXT";
@@ -2744,11 +2794,16 @@ async function exportPdfLayoutFiles({ layoutMode = "coordinate", mathAi = null, 
       }
     }
     await loadExportHistory();
-    toast(`${results.length}개 PDF를 편집형 HWPX로 만들었습니다.`);
+    const reviewNotes = results.map(conversionReview).filter(Boolean).map(reviewHeadline);
+    toast(`${results.length}개 PDF를 편집형 HWPX로 만들었습니다.${reviewNotes.length ? ` ${reviewNotes.join(" · ")}` : ""}`);
     return results.length === pdfFiles.length;
   } catch (error) {
     const message = friendlyErrorMessage(error);
-    if (state.simpleConversionBusy) state.simpleFailure = `${message}${results.length ? ` · ${results.length}개 파일은 이미 생성되었습니다.` : ""}`;
+    if (state.simpleConversionBusy) {
+      // 간단 모드는 서버 사유에 섞인 내부 영문 예외·경로를 빼고 보여 주고, 폴백 판단용으로 오류를 남긴다.
+      state.simpleFailure = `${layoutFailureReason(error)}${results.length ? ` · ${results.length}개 파일은 이미 생성되었습니다.` : ""}`;
+      if (!results.length) state.simpleLayoutError = error;
+    }
     if (!results.length && message === "작업이 취소되었습니다.") {
       try {
         await loadExportHistory();
@@ -2877,6 +2932,23 @@ async function deleteActive() {
   }
 }
 
+// Starlette 는 비ASCII 이름을 소문자 filename*=utf-8''… 로 보낸다. 대소문자를 가리지 않고 읽고,
+// 디코딩에 실패하면('%'가 든 제목 등) 예외 대신 대체 이름을 쓴다(예외가 나면 다운로드가 시작되지 않는다).
+function downloadFilename(disposition, fallback) {
+  const header = String(disposition || "");
+  const encoded = /filename\*\s*=\s*[\w-]*'[^']*'([^;]+)/i.exec(header)?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded.trim().replace(/^"|"$/g, ""));
+    } catch {
+      // 잘못된 퍼센트 인코딩이면 아래 일반 filename= 또는 대체 이름을 쓴다.
+    }
+  }
+  const plain = /(?:^|;)\s*filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(header);
+  const name = (plain?.[1] ?? plain?.[2] ?? "").trim();
+  return name || fallback;
+}
+
 async function exportSelected(idsOverride = null, overrides = null, { signal = null } = {}) {
   if (!idsOverride && basketHasUnavailableProblems()) {
     toast("확인하지 못한 문항이 있습니다. 시험지 목록에서 다시 확인해 주세요.");
@@ -2936,9 +3008,7 @@ async function exportSelected(idsOverride = null, overrides = null, { signal = n
     if (!response.ok) throw await responseError(response);
     const blob = await response.blob();
     const disposition = response.headers.get("content-disposition") || "";
-    const match = disposition.match(/filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/);
-    const fallback = `${exportTitle}.${exportFormat}`;
-    const filename = decodeURIComponent(match?.[1] || match?.[2] || fallback);
+    const filename = downloadFilename(disposition, `${exportTitle}.${exportFormat}`);
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -3514,6 +3584,7 @@ function setSimpleFile(file, { syncInput = false } = {}) {
   state.selectedFile = file;
   state.recognizedProblems = [];
   state.recognizedFile = null;
+  state.recognizedNotices = [];
   clearSimpleResult();
   if (syncInput) assignSingleFile(els.simpleFileInput, file);
   els.simpleSelectedFile?.classList.toggle("hidden", !file);
@@ -3525,14 +3596,33 @@ function setSimpleFile(file, { syncInput = false } = {}) {
     renderWorkspaceStage();
     return;
   }
-  const supported = Boolean(EXT_KINDS[simpleFileExtension(file)]);
-  const oversized = Number(file.size || 0) > MAX_CLIENT_UPLOAD_BYTES;
-  if (!supported || oversized) {
+  // 이름에 점이 없으면 확장자 판별(split)이 이름 전체를 돌려줘 'pdf'라는 이름도 PDF로 오인한다.
+  const hasExtension = /\.[^.]+$/.test(String(file.name || ""));
+  const problem = !hasExtension
+    ? "파일 이름에 확장자(.pdf, .hwp 등)가 없어 형식을 알 수 없습니다. 확장자가 붙은 원본 파일을 선택해 주세요."
+    : !EXT_KINDS[simpleFileExtension(file)]
+      ? "지원하지 않는 파일 형식입니다."
+      : Number(file.size || 0) > MAX_CLIENT_UPLOAD_BYTES
+        ? "64MB 이하 파일만 변환할 수 있습니다."
+        // 0바이트는 서버로 보내지 않는다(보내면 422 입력 검증 오류만 돌아온다).
+        : Number(file.size) === 0
+          ? "빈 파일(0바이트)이라 변환할 수 없습니다. 내용이 들어 있는 파일을 다시 선택해 주세요."
+          : "";
+  if (problem) {
     state.workspaceStage = "error";
-    setSimpleConversionStatus(oversized ? "64MB 이하 파일만 변환할 수 있습니다." : "지원하지 않는 파일 형식입니다.", "error");
+    setSimpleConversionStatus(problem, "error");
     renderWorkspaceStage();
     els.simpleRecognizeRetry.classList.add("hidden");
     return;
+  }
+  if (isPdfFile(file)) {
+    // 2026-10-03: PDF 원본 배치 변환(/api/pdf-layout-export)은 인식 결과를 쓰지 않으므로 선택 즉시 변환할 수 있다.
+    // 문항 인식(/api/import)은 원본 배치 복원이 거절돼 폴백할 때와 '문항 편집'을 누를 때만 한다.
+    state.workspaceStage = "ready";
+    setSimpleConversionStatus(`${file.name} · 바로 변환할 수 있습니다`, "ready");
+    renderWorkspaceStage();
+    loadAIStatus().catch(() => {});
+    return true;
   }
   return recognizeSimpleFile(file);
 }
@@ -3543,8 +3633,11 @@ function setSimpleQualityNote(message) {
 }
 
 function showSimpleQuality(results) {
-  const notes = [...state.simpleNotices];
-  for (const result of results || []) notes.push(...simpleQualityMessages(result));
+  // review(확인 필요 문항)가 있으면 결과 카드의 review 안내가 우선이라 같은 요약·점수를 위 줄에 되풀이하지 않는다.
+  // 서버 notices 는 결과 카드의 '안내·주의사항' 접기로 옮겼다(같은 문장이 두 번 보이지 않게).
+  const brief = (results || []).some((result) => conversionReview(result));
+  const notes = [];
+  for (const result of results || []) notes.push(...simpleQualityMessages(result, { brief }));
   setSimpleQualityNote([...new Set(notes)].join(" · "));
 }
 
@@ -3553,30 +3646,40 @@ function renderWorkspaceStage() {
   const stage = state.workspaceStage;
   const hasFile = Boolean(state.selectedFile);
   const recognized = Boolean(state.recognizedFile === state.selectedFile && state.recognizedProblems.length);
-  const basicPdfFallback = stage === "error" && isPdfFile(state.selectedFile) && state.selectedFile.size <= MAX_CLIENT_UPLOAD_BYTES;
+  // 2026-10-03: PDF 는 인식 없이 바로 변환한다. 빈 파일·64MB 초과는 서버로 보낼 수 없으므로 변환 버튼도 띄우지 않는다.
+  const pdfConvertible = hasFile && isPdfFile(state.selectedFile)
+    && Number(state.selectedFile.size) > 0 && state.selectedFile.size <= MAX_CLIENT_UPLOAD_BYTES;
+  const convertible = recognized || pdfConvertible;
   document.body.classList.toggle("simple-converter-mode", !editor);
   document.body.dataset.workspaceStage = stage;
   document.title = editor ? "프리미엄 시험지 스튜디오 · HWP Make" : "HWPX 변환 · HWP Make";
-  els.simpleRecognitionSummary?.classList.toggle("hidden", !recognized || editor);
+  els.simpleRecognitionSummary?.classList.toggle("hidden", !convertible || editor || stage === "recognizing");
   els.simpleActions?.classList.toggle("hidden", !hasFile || stage === "recognizing");
   els.simpleConversionStatus?.classList.toggle("hidden", !hasFile && stage !== "error");
-  els.simpleConvertButton?.classList.toggle("hidden", !recognized && !basicPdfFallback);
+  els.simpleConvertButton?.classList.toggle("hidden", !convertible);
   if (els.simpleConvertButton) {
-    els.simpleConvertButton.disabled = (!recognized && !basicPdfFallback) || state.simpleConversionBusy;
-    if (!state.simpleConversionBusy) els.simpleConvertButton.textContent = basicPdfFallback ? "기본 변환" : "HWPX로 변환";
+    els.simpleConvertButton.disabled = !convertible || state.simpleConversionBusy;
+    if (!state.simpleConversionBusy) els.simpleConvertButton.textContent = "HWPX로 변환";
   }
-  els.simpleRecognizeRetry?.classList.toggle("hidden", stage !== "error" || !hasFile);
+  // PDF 는 '다시 인식' 대신 변환 버튼과 '문항 편집'(그때 인식)으로 다시 시도한다.
+  els.simpleRecognizeRetry?.classList.toggle("hidden", stage !== "error" || !hasFile || pdfConvertible);
   els.simpleHistory?.classList.toggle("hidden", stage !== "results");
   els.simpleHelpButton?.classList.toggle("hidden", !hasFile);
   els.simpleFooter?.classList.toggle("hidden", stage !== "results");
-  els.simpleMathAiOption?.classList.toggle("hidden", !recognized || !isPdfFile(state.selectedFile));
+  els.simpleMathAiOption?.classList.toggle("hidden", !pdfConvertible);
   if (els.simpleStudioButton) {
-    els.simpleStudioButton.disabled = !recognized || state.simpleConversionBusy || state.editorOpening;
+    els.simpleStudioButton.disabled = !convertible || state.simpleConversionBusy || state.editorOpening || Boolean(state.recognitionController);
     els.simpleStudioButton.textContent = state.session.authenticated ? "문항 편집" : "로그인하고 문항 편집";
   }
   if (els.sessionButton) els.sessionButton.textContent = state.session.authenticated ? state.session.user?.name || "내 계정" : "로그인";
-  if (els.simpleRecognitionCount) els.simpleRecognitionCount.textContent = recognized ? `${state.recognizedProblems.length}개 문항을 인식했습니다` : "";
-  if (els.simpleRecognitionNote) els.simpleRecognitionNote.textContent = recognized ? "원래 순서와 번호로 변환하거나, 필요한 문항을 골라 편집하세요." : "";
+  if (els.simpleRecognitionCount) {
+    els.simpleRecognitionCount.textContent = recognized ? `${state.recognizedProblems.length}개 문항을 인식했습니다`
+      : pdfConvertible ? "원본 배치를 유지한 편집형 HWPX로 바로 변환합니다" : "";
+  }
+  if (els.simpleRecognitionNote) {
+    els.simpleRecognitionNote.textContent = recognized ? "원래 순서와 번호로 변환하거나, 필요한 문항을 골라 편집하세요."
+      : pdfConvertible ? "문항을 골라 편집하려면 '문항 편집'을 누르세요. 그때 문항을 먼저 인식합니다." : "";
+  }
 }
 
 async function refreshSession() {
@@ -3698,17 +3801,23 @@ async function logoutLocalSession() {
   }
 }
 
-async function recognizeSimpleFile(file = state.selectedFile) {
-  if (!file || state.simpleConversionBusy) return false;
+// inline: 변환 도중(PDF 3단계 폴백) 호출. 화면 단계·상태 문구는 호출자가 관리하고,
+// '변환 취소' 버튼이 이 인식 요청도 중단할 수 있게 importController 를 함께 쥔다.
+async function recognizeSimpleFile(file = state.selectedFile, { inline = false } = {}) {
+  if (!file || (state.simpleConversionBusy && !inline)) return false;
   state.recognitionController?.abort();
   const requestId = ++state.recognitionRequestId;
   const controller = new AbortController();
   state.recognitionController = controller;
+  if (inline) state.importController = controller;
   state.recognizedProblems = [];
   state.recognizedFile = null;
-  state.workspaceStage = "recognizing";
-  setSimpleConversionStatus("파일에서 문항을 인식하고 있습니다…", "working");
-  renderWorkspaceStage();
+  state.recognizedNotices = [];
+  if (!inline) {
+    state.workspaceStage = "recognizing";
+    setSimpleConversionStatus("파일에서 문항을 인식하고 있습니다…", "working");
+    renderWorkspaceStage();
+  }
   try {
     const data = await fileToBase64(file, { signal: controller.signal });
     if (requestId !== state.recognitionRequestId || file !== state.selectedFile) return false;
@@ -3720,10 +3829,15 @@ async function recognizeSimpleFile(file = state.selectedFile) {
     const ids = Array.isArray(result.ordered_ids) ? [...new Set(result.ordered_ids)] : [...byId.keys()];
     if (ids.length !== byId.size || ids.some((id) => !byId.has(id))) throw new Error("인식 결과의 문항 목록이 일치하지 않습니다. 다시 인식해 주세요.");
     const problems = ids.map((id) => byId.get(id));
-    if (!problems.length) throw new Error("편집 가능한 문항을 찾지 못했습니다. 파일 내용을 확인하고 다시 인식해 주세요.");
+    // 0문항이면 서버가 보낸 사유(notices[0], 예: '텍스트에서 문항을 찾지 못했습니다.')를 일반 문구 대신 보여 준다.
+    const reason = String(result.notices?.[0] || "").trim();
+    if (!problems.length) throw new Error(reason ? `${reason} 파일 내용을 확인하고 다시 인식해 주세요.` : "편집 가능한 문항을 찾지 못했습니다. 파일 내용을 확인하고 다시 인식해 주세요.");
     state.recognizedProblems = problems;
     state.recognizedFile = file;
     state.simpleNotices = result.notices || [];
+    // clearSimpleResult 가 simpleNotices 를 비우므로, 결과 카드의 안내 접기용으로 따로 보관한다.
+    state.recognizedNotices = [...state.simpleNotices];
+    if (inline) return true;
     state.workspaceStage = "ready";
     setSimpleConversionStatus(`${file.name} · 문항 인식 완료`, "ready");
     setSimpleQualityNote(state.simpleNotices.join(" · "));
@@ -3731,21 +3845,44 @@ async function recognizeSimpleFile(file = state.selectedFile) {
     return true;
   } catch (error) {
     if (requestId !== state.recognitionRequestId || file !== state.selectedFile) return false;
+    if (inline) {
+      if (error?.name !== "AbortError") state.simpleFailure = friendlyErrorMessage(error);
+      return false;
+    }
     state.workspaceStage = "error";
     setSimpleConversionStatus(friendlyErrorMessage(error), "error");
     return false;
   } finally {
     if (state.recognitionController === controller) state.recognitionController = null;
-    if (requestId === state.recognitionRequestId) renderWorkspaceStage();
+    if (inline && state.importController === controller) state.importController = null;
+    if (requestId === state.recognitionRequestId && !inline) renderWorkspaceStage();
   }
 }
 
-function simpleQualityMessages(result) {
+// PDF 변환은 문항 단위 결함이 있어도 파일을 제공하고 review 로 확인할 문항을 알린다.
+function conversionReview(result) {
+  const review = result?.review || result?.quality?.review;
+  return review && review.ok === false ? review : null;
+}
+
+function reviewHeadline(review) {
+  if (!review) return "";
+  if (review.headline) return String(review.headline);
+  const questions = Array.isArray(review.flagged_questions) ? review.flagged_questions : [];
+  if (!questions.length) return "문서 일부를 한글에서 원본과 비교해 확인해 주세요";
+  const labels = questions.slice(0, 8).map((question) => question.label || question.id).join(", ");
+  return `확인 필요 문항 ${questions.length}개: ${labels}${questions.length > 8 ? ` 외 ${questions.length - 8}개` : ""}`;
+}
+
+// brief: 결과 카드에 review 안내가 따로 있을 때 위 한 줄 요약용. review 요약·점수 문구는 빼고 '검수 내용' 접기에만 둔다.
+function simpleQualityMessages(result, { brief = false } = {}) {
   const quality = result?.quality || {};
   const messages = [];
+  const review = conversionReview(result);
+  if (review && !brief) messages.push(Number(review.flag_count) > 0 ? `확인 필요 문항 ${Number(review.flag_count)}개` : "문서 일부 확인 필요");
   const score = quality.objective_score;
   const target = quality.objective_score_target;
-  if (score != null && Number.isFinite(Number(score))) {
+  if (!brief && score != null && Number.isFinite(Number(score))) {
     messages.push(`자동 점검 ${Number(score).toFixed(1)}점${target != null ? ` / 목표 ${target}점` : ""}`);
     if (target != null && Number(score) < Number(target)) messages.push("목표 미달 · 결과 검수가 필요합니다");
   }
@@ -3758,11 +3895,55 @@ function simpleQualityMessages(result) {
   return messages;
 }
 
+// 서버 400 사유에는 내부 영문 예외나 파일 경로가 섞일 수 있어 교사가 읽을 한국어 부분만 남긴다.
+// 경로는 공백(한글 파일명·사용자 폴더)을 포함할 수 있고 사유 끝에 붙으므로 경로 시작부터 줄 끝(따옴표 전)까지 지운다.
+function layoutFailureReason(error) {
+  const message = friendlyErrorMessage(error).replace(/(?:\b[A-Za-z]:[\\/]|\\\\)[^\n'"]*/g, "").trim();
+  const cut = message.indexOf(":");
+  const head = (cut >= 0 ? message.slice(0, cut) : message).trim();
+  const tail = cut >= 0 ? message.slice(cut + 1).trim() : "";
+  if (!/[가-힣]/.test(head)) return "원본의 문항 배치를 분석하지 못했습니다.";
+  if (tail && !/[가-힣]/.test(tail)) return `${head} · 원본의 문항 배치를 분석하지 못했습니다.`;
+  return message;
+}
+
+// PDF 레이아웃 변환이 서버에서 4xx로 거절된 경우만 인식 문항 폴백 대상이다(취소·연결 실패 제외).
+function simpleLayoutFallbackEligible(error) {
+  if (!error || error.name === "AbortError" || state.simpleCancelRequested) return false;
+  const status = Number(error.status);
+  return status >= 400 && status < 500;
+}
+
+// 스캔 PDF처럼 인식 결과에 글자가 없고 이미지만 있으면 폴백 결과도 이미지뿐이다.
+function recognizedProblemsImageOnly(problems) {
+  const listOf = (value) => (Array.isArray(value) ? value : []);
+  const hasText = (problem) => [problem?.stem, problem?.explanation, ...listOf(problem?.choices)].some((value) => String(value ?? "").trim());
+  const hasImage = (problem) => listOf(problem?.image_paths).length > 0 || listOf(problem?.image_urls).length > 0;
+  return problems.length > 0 && !problems.some(hasText) && problems.some(hasImage);
+}
+
+function simpleFallbackNotice(fallback) {
+  const box = document.createElement("div");
+  box.className = "simple-review-alert simple-fallback-alert";
+  box.setAttribute("role", "status");
+  const headline = document.createElement("strong");
+  headline.textContent = "원본 배치 복원에 실패해 인식한 문항으로 재구성형 HWPX를 만들었습니다.";
+  const reason = document.createElement("p");
+  reason.textContent = `실패 사유: ${fallback.reason}`;
+  const scope = document.createElement("p");
+  scope.textContent = fallback.imageOnly
+    ? "원본 배치는 다릅니다. 인식한 내용이 페이지 이미지뿐이라 글자 편집은 할 수 없습니다(이미지로 들어갑니다)."
+    : "글자 편집은 가능하지만 원본 배치는 다릅니다.";
+  box.append(headline, reason, scope);
+  return box;
+}
+
 function clearSimpleResult() {
   if (state.simpleDownloadUrl) URL.revokeObjectURL(state.simpleDownloadUrl);
   state.simpleDownloadUrl = null;
   state.simpleLastArtifact = null;
   state.simpleFailure = "";
+  state.simpleLayoutError = null;
   state.simpleNotices = [];
   setSimpleQualityNote("");
   els.simpleResultActions?.replaceChildren();
@@ -3821,13 +4002,66 @@ function appendSimpleReview(container, metadata = {}) {
   container.append(details);
 }
 
-function showSimpleResult(results) {
+function simpleReviewNotice(review) {
+  const box = document.createElement("div");
+  box.className = "simple-review-alert";
+  box.setAttribute("role", "status");
+  const headline = document.createElement("strong");
+  headline.textContent = reviewHeadline(review);
+  box.append(headline);
+  if (review.message) {
+    const message = document.createElement("p");
+    message.textContent = review.message;
+    box.append(message);
+  }
+  const lines = [
+    ...(review.flagged_questions || []).map((question) => question.summary || question.label || question.id),
+    ...(review.document_issues || []).map((issue) => `문서 전체: ${issue.summary}`),
+  ].filter(Boolean);
+  if (lines.length) {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "문항별 확인 내용";
+    const list = document.createElement("ul");
+    for (const line of lines) {
+      const item = document.createElement("li");
+      item.textContent = line;
+      list.append(item);
+    }
+    details.append(summary, list);
+    box.append(details);
+  }
+  return box;
+}
+
+function showSimpleResult(results, fallback = null) {
   if (!els.simpleResultActions) return;
   els.simpleResultActions.replaceChildren();
   const result = results?.[results.length - 1];
   const artifact = result?.export || state.simpleLastArtifact;
   if (!artifact) return;
+  if (fallback) els.simpleResultActions.append(simpleFallbackNotice(fallback));
+  const review = conversionReview(result || artifact.conversion);
+  if (review) els.simpleResultActions.append(simpleReviewNotice(review));
   appendSimpleArtifactActions(els.simpleResultActions, artifact, result || artifact.conversion || {});
+  // 서버 notices(주의사항)를 접어서 보인다. PDF 원본 배치 결과는 그 응답의 notices(review 안내와 같은 문장은 제외),
+  // 인식 문항으로 만든 결과(비PDF·폴백)는 인식 단계 notices 를 쓴다.
+  const serverNotices = result && !fallback ? (result.notices || []).filter((text) => text !== review?.message) : (state.recognizedNotices || []);
+  const notices = [...new Set(serverNotices.map((text) => String(text || "").trim()).filter(Boolean))];
+  if (notices.length) {
+    const details = document.createElement("details");
+    details.className = "simple-review-details simple-notice-details";
+    const summary = document.createElement("summary");
+    summary.textContent = `안내·주의사항 ${notices.length}개`;
+    const list = document.createElement("ul");
+    for (const text of notices) {
+      const item = document.createElement("li");
+      item.textContent = text;
+      list.append(item);
+    }
+    details.append(summary, list);
+    els.simpleResultActions.append(details);
+  }
   const note = document.createElement("small");
   note.textContent = "내려받은 HWPX는 한글에서 열어 검수·편집할 수 있습니다.";
   els.simpleResultActions.append(note);
@@ -3932,7 +4166,15 @@ async function runSimpleConversion() {
   setSimpleConversionStatus(`${file.name} 업로드 중`, "working");
 
   let completed = false;
+  let fallback = null;
   const pdfResults = [];
+  const exportRecognized = (signal) => exportSelected(state.recognizedProblems.map((problem) => problem.id), {
+    title: file.name.replace(/\.[^.]+$/, "") || DEFAULT_EXPORT_TITLE,
+    format: "hwpx",
+    templateKey: SIMPLE_EXPORT_TEMPLATE,
+    includeAnswerSheet: false,
+    nativeMath: true,
+  }, { signal });
   try {
     completed = isPdfFile(file)
       ? await exportPdfLayoutFiles({
@@ -3940,19 +4182,38 @@ async function runSimpleConversion() {
           mathAi: Boolean(els.simpleMathAi?.checked && !els.simpleMathAi?.disabled),
           collect: pdfResults,
         })
-      : await exportSelected(state.recognizedProblems.map((problem) => problem.id), {
-            title: file.name.replace(/\.[^.]+$/, "") || DEFAULT_EXPORT_TITLE,
-            format: "hwpx",
-            templateKey: "basic",
-            includeAnswerSheet: false,
-            nativeMath: true,
-        }, { signal: (state.importController = new AbortController()).signal });
+      : await exportRecognized((state.importController = new AbortController()).signal);
+    // PDF 원본 배치 복원이 4xx로 거절되면 같은 파일의 문항을 인식해 재구성형 HWPX를 만든다.
+    if (isPdfFile(file) && !completed && simpleLayoutFallbackEligible(state.simpleLayoutError)) {
+      fallback = { reason: layoutFailureReason(state.simpleLayoutError), imageOnly: false };
+      state.simpleFailure = "";
+      // 2026-10-03: PDF 는 선택 시 인식하지 않으므로 폴백이 필요한 이 시점에 인식한다(이미 인식한 같은 파일이면 재사용).
+      let recognized = Boolean(state.recognizedFile === file && state.recognizedProblems.length);
+      if (!recognized) {
+        setSimpleConversionStatus("원본 배치 복원에 실패해 문항을 인식하고 있습니다…", "working");
+        recognized = await recognizeSimpleFile(file, { inline: true });
+      }
+      if (recognized && !state.simpleCancelRequested) {
+        fallback.imageOnly = recognizedProblemsImageOnly(state.recognizedProblems);
+        setSimpleConversionStatus("원본 배치 복원에 실패해 인식한 문항으로 다시 만들고 있습니다…", "working");
+        const controller = new AbortController();
+        state.importController = controller;
+        try {
+          completed = await exportRecognized(controller.signal);
+        } finally {
+          if (state.importController === controller) state.importController = null;
+        }
+      }
+      if (!completed) fallback.failure = state.simpleFailure || (recognized ? "인식한 문항으로 파일을 만들지 못했습니다." : "문항을 인식하지 못했습니다.");
+    }
     if (state.simpleCancelRequested && !completed) {
       setSimpleConversionStatus("대기를 중단했습니다. 서버에서 생성이 계속될 수 있으니 최근 변환을 다시 불러와 확인해 주세요.", "idle");
+    } else if (fallback && !completed) {
+      setSimpleConversionStatus(`원본 배치 복원 실패: ${fallback.reason} · 인식한 문항으로 다시 만들기도 실패: ${fallback.failure}`, "error");
     } else {
       setSimpleConversionStatus(
         completed
-          ? `${file.name} 생성 완료 · 다운로드를 시작했습니다.`
+          ? `${file.name} ${fallback ? "재구성형 HWPX " : ""}생성 완료 · 다운로드를 시작했습니다.`
           : state.simpleFailure || "문항을 인식하지 못했거나 파일 생성이 완료되지 않았습니다. 파일 내용을 확인한 뒤 다시 시도해 주세요.",
         completed ? "success" : "error",
       );
@@ -3960,7 +4221,7 @@ async function runSimpleConversion() {
     if (completed) {
       state.workspaceStage = "results";
       showSimpleQuality(pdfResults);
-      showSimpleResult(pdfResults);
+      showSimpleResult(pdfResults, fallback);
     }
   } catch (error) {
     setSimpleConversionStatus(`변환 실패 · ${friendlyErrorMessage(error)}`, "error");
@@ -4417,8 +4678,11 @@ async function enterPremiumEditor({ resume = false } = {}) {
     return false;
   }
   if (!resume && (!state.recognizedProblems.length || state.recognizedFile !== state.selectedFile)) {
-    setSimpleConversionStatus("파일에서 문항을 인식한 뒤 편집할 수 있습니다.", "error");
-    return false;
+    // 2026-10-03: PDF 는 선택 시 인식하지 않으므로 '문항 편집'을 누른 이 시점에 인식한다.
+    if (!(isPdfFile(state.selectedFile) && await recognizeSimpleFile(state.selectedFile))) {
+      if (!isPdfFile(state.selectedFile)) setSimpleConversionStatus("파일에서 문항을 인식한 뒤 편집할 수 있습니다.", "error");
+      return false;
+    }
   }
   state.editorOpening = true;
   const entryFile = state.recognizedFile;

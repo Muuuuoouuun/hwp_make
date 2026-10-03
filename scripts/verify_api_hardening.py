@@ -251,10 +251,58 @@ def failed_export_cleanup_check(client: TestClient) -> None:
     check(not any(storage.EXPORT_DIR.iterdir()), "failed PDF-layout export left a partial file in exports/")
 
 
+def host_origin_checks(client: TestClient) -> None:
+    """DNS 리바인딩(Host 미검증)·교차 출처 변경 요청 차단(2026-10-03 5a)."""
+    def get(host: str) -> int:
+        return client.get("/api/problems", headers={"Host": host}).status_code
+
+    for host in ("evil.example", "evil.example:8787", "127.0.0.1.evil.example", "192.168.0.10:8787"):
+        check(get(host) == 400, f"Host {host!r} was not rejected")
+    for host in ("127.0.0.1:8787", "localhost:8787", "LOCALHOST", "[::1]:8787", "127.0.0.1"):
+        check(get(host) == 200, f"loopback Host {host!r} returned {get(host)}")
+    rejected = client.get("/api/problems", headers={"Host": "evil.example"})
+    check(rejected.json().get("detail", {}).get("code") == "host_not_allowed", f"host rejection detail: {rejected.text[:160]}")
+
+    previous = os.environ.get("HWP_MAKE_ALLOWED_HOSTS")
+    try:
+        os.environ["HWP_MAKE_ALLOWED_HOSTS"] = "hwp.lan, 10.0.0.5"
+        check(get("hwp.lan:8787") == 200 and get("10.0.0.5") == 200, "HWP_MAKE_ALLOWED_HOSTS entries were not allowed")
+    finally:
+        if previous is None:
+            os.environ.pop("HWP_MAKE_ALLOWED_HOSTS", None)
+        else:
+            os.environ["HWP_MAKE_ALLOWED_HOSTS"] = previous
+    check(get("hwp.lan") == 400, "HWP_MAKE_ALLOWED_HOSTS stayed active after removal")
+
+    # The TestClient host name is accepted only from the in-process test transport.
+    with TestClient(main.app, client=("127.0.0.1", 50000)) as socket_like:
+        check(socket_like.get("/api/problems").status_code == 400, "Host 'testserver' accepted from a real peer address")
+    with TestClient(main.app, base_url="http://127.0.0.1:8787", client=("127.0.0.1", 50000)) as desktop_like:
+        check(desktop_like.get("/api/problems").status_code == 200, "loopback client was rejected")
+        same = desktop_like.post("/api/import-text", headers={"Origin": "http://127.0.0.1:8787"},
+                                 json={"title": "origin", "text": "1. 같은 출처 요청 확인"})
+        check(same.status_code == 200, f"same-origin POST returned {same.status_code}: {same.text[:160]}")
+
+    body = {"title": "origin", "text": "1. 출처 검사 문항"}
+    for origin in ("http://evil.example", "null", "http://127.0.0.1:9999"):
+        response = client.post("/api/import-text", headers={"Origin": origin}, json=body)
+        check(response.status_code == 403, f"cross-origin POST from {origin!r} returned {response.status_code}")
+    check(client.delete("/api/problems/1", headers={"Origin": "http://evil.example"}).status_code == 403,
+          "cross-origin DELETE was not rejected")
+    check(client.post("/api/import-text", headers={"Origin": "http://testserver", "Sec-Fetch-Site": "cross-site"},
+                      json=body).status_code == 403, "Sec-Fetch-Site cross-site POST was not rejected")
+    check(client.post("/api/import-text", json=body).status_code == 200, "POST without Origin (curl/desktop) was rejected")
+    check(client.post("/api/import-text", headers={"Origin": "http://testserver"}, json=body).status_code == 200,
+          "same-origin POST was rejected")
+    check(client.get("/api/problems", headers={"Origin": "http://evil.example"}).status_code == 200,
+          "GET with a foreign Origin must stay readable for the same Host")
+
+
 def main_check() -> int:
     storage.init_db()
     with TestClient(main.app) as client:
         api_validation_checks(client)
+        host_origin_checks(client)
         ssrf_checks()
         concurrent_dedup_check()
         failed_export_cleanup_check(client)
@@ -268,6 +316,7 @@ def main_check() -> int:
     print("  strict Base64/signatures/corrupt inputs: PASS")
     print("  upload size model/helper limits: PASS")
     print("  request/metadata size + conversion admission limits: PASS")
+    print("  Host allow-list + cross-origin state-changing requests: PASS")
     print("  SSRF private targets + request hook: PASS")
     print("  concurrent dedup single row: PASS")
     print("  failed export partial cleanup: PASS")

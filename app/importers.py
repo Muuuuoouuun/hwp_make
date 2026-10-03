@@ -219,14 +219,16 @@ def _looks_like_single_passage(text: str, paragraphs: list[str]) -> bool:
     return len(text) >= 600 and len(long_paragraphs) >= 2
 
 
-def _plain_text_chunks(text: str) -> list[dict[str, Any]]:
+def _plain_text_chunks(text: str, report: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """줄글/붙여넣기 텍스트를 문항 chunk로 바꾼다."""
     clean = _clean_text(text)
     if not clean:
         return []
     line_blocks = [(line, [], []) for line in clean.splitlines()]
-    chunks = _paragraphs_to_chunks(line_blocks)
-    if len(chunks) > 1 or any(chunk.get("number_hint") for chunk in chunks):
+    report = {} if report is None else report
+    chunks = _paragraphs_to_chunks(line_blocks, report)
+    # 정답표를 잘라 냈으면 빈 줄 기준 재분할로 정답표가 되살아나지 않게 그대로 쓴다.
+    if len(chunks) > 1 or any(chunk.get("number_hint") for chunk in chunks) or report.get("answer_key_found"):
         return chunks
 
     split = [{"text": chunk, "images": [], "tables": []} for chunk in _split_questions(clean)]
@@ -286,6 +288,18 @@ def _import_pdf_recognized(
     save_upload(filename, payload)  # 원본 PDF 보관
     stem_name = Path(filename).stem
     sink = _Sink()
+    # 문제 쪽 뒤에 붙은 정답·해설 쪽은 문항이 아니다. 그 쪽의 인식 결과는 건너뛰고 정답만 옮긴다.
+    answer_page, answer_key = _pdf_answer_key_pages(payload, result.problems)
+    # 정답 쪽 앞 문항의 마지막 번호. 정답 쪽 뒤에 그보다 큰 번호가 이어지면(단원별 정답) 진짜 문항이다.
+    last_before_answers = max((int(prob.number) for prob in result.problems
+                               if answer_page and str(prob.number or "").isdigit()
+                               and int(prob.page_number or 0) < answer_page), default=0)
+
+    def _after_answer_numbers(prob: Any) -> bool:
+        return str(prob.number or "").isdigit() and last_before_answers > 0 and int(prob.number) > last_before_answers
+    answer_key_skipped = 0
+    answer_key_mapped = 0
+    answer_key_numbers: set[str] = set()
     loose_seen: set[str] = set()
     loose_dedup_enabled = _looks_like_math_pdf(filename, getattr(result, "exam_title", ""))
 
@@ -325,6 +339,9 @@ def _import_pdf_recognized(
         return payload
 
     for prob in result.problems:
+        if answer_page and int(prob.page_number or 0) >= answer_page and not _after_answer_numbers(prob):
+            answer_key_skipped += 1
+            continue
         image_paths: list[str] = []
         math_geometry_repairs: dict[str, int] = {}
         image_only_fallback = bool(prob.problem_image_png) and (
@@ -430,6 +447,10 @@ def _import_pdf_recognized(
             loose_seen.add(loose_key)
 
         title = f"{stem_name} #{number}" if number else stem_name
+        key_answer = answer_key.get(str(int(number))) if number.isdigit() else None
+        if key_answer:
+            answer_key_numbers.add(str(int(number)))
+            answer_key_mapped += 1
         sink.add(
             {
                 **metadata,
@@ -440,6 +461,7 @@ def _import_pdf_recognized(
                 "title": title,
                 "stem": stem_text,
                 "choices": choices,
+                "answer": key_answer or "",
                 "image_paths": image_paths,
                 "tables": [],
                 "layout": {
@@ -453,8 +475,32 @@ def _import_pdf_recognized(
     if getattr(result, "exam_title", ""):
         notices.append(f"시험지 제목 감지: {result.exam_title}")
     notices.extend(result.notices)
+    if answer_page:
+        notices.extend(_answer_key_notices({
+            "answer_key_found": True, "answer_key_mapped": answer_key_mapped,
+            "answer_key_unmatched": len(set(answer_key) - answer_key_numbers),
+        }))
     notices.extend(_dedup_notices(sink))
     return {"created": sink.created, "existing": sink.existing, "ordered_ids": sink.ordered_ids, "notices": notices, "exam_title": getattr(result, "exam_title", "")}
+
+
+def _pdf_answer_key_pages(payload: bytes, problems: list[Any]) -> tuple[int | None, dict[str, str]]:
+    """문제 쪽 뒤에서 '정답 및 해설'·'빠른 정답'으로 시작하는 첫 쪽(1부터)과 그 뒤 쪽들의 정답."""
+    question_pages = [int(prob.page_number or 0) for prob in problems if prob.number]
+    if not question_pages:
+        return None, {}
+    try:
+        import fitz
+
+        with fitz.open(stream=payload, filetype="pdf") as document:
+            texts = [page.get_text("text") for page in document]
+    except Exception:
+        return None, {}
+    first_question_page = min(question_pages)
+    for page_number in range(first_question_page + 1, len(texts) + 1):
+        if _pdf_page_answer_key_start(texts[page_number - 1]):
+            return page_number, _parse_answer_key(texts[page_number - 1:])
+    return None, {}
 
 
 def _legacy_import_pdf(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -596,11 +642,12 @@ def import_text(
 ) -> dict[str, Any]:
     save_upload(filename, payload)
     text = _decode_text(payload)
-    chunks = _plain_text_chunks(text)
+    report: dict[str, Any] = {}
+    chunks = _plain_text_chunks(text, report)
     if not chunks:
         return {"created": [], "notices": ["텍스트에서 문항을 찾지 못했습니다."]}
     sink = _create_from_chunks(chunks, source_type, filename, metadata)
-    notices = [f"{len(sink.created)}개 문항을 텍스트에서 가져왔습니다."]
+    notices = [f"{len(sink.created)}개 문항을 텍스트에서 가져왔습니다.", *_answer_key_notices(report)]
     notices.extend(_dedup_notices(sink))
     return {"created": sink.created, "existing": sink.existing, "ordered_ids": sink.ordered_ids, "notices": notices}
 
@@ -1977,13 +2024,138 @@ def _docx_cell_text(cell: Any) -> str:
     return "\n".join(line for line in lines if line)
 
 
+ANSWER_KEY_PAIR_RE = re.compile(
+    rf"(?<![\d.])(\d{{1,3}})\s*(?:번\s*)?(?:[.):]\s*)?(?:정답\s*[:：]?\s*)?([{CIRCLED_CHOICE_MARKERS[:9]}])"
+)
+
+
+# '[정답표] 1. ③ …' 처럼 대괄호 정답표 머리로 시작하는 묶음.
+ANSWER_KEY_LEAD_RE = re.compile(r"^\s*\[\s*정답\s*표\s*\]")
+# '2025학년도 … 화학I 정답 및 해설' 처럼 앞에 시험 제목이 붙은 머리 줄의 끝부분.
+ANSWER_KEY_TITLE_RE = re.compile(r"(?:정답\s*(?:및|과)\s*해설|빠른\s*정답|정답\s*표)\s*$")
+
+
+def _answer_key_start(text: str, following: list[str] | tuple[str, ...] = ()) -> bool:
+    """문서 끝 정답표·해설 묶음의 시작인가. 문항마다 붙은 '[정답] ③' 줄은 제외한다.
+
+    following 은 이 문단 뒤의 문단들이다. 제목이 앞에 붙은 머리('… 정답 및 해설')는
+    오인을 막기 위해 문항 번호로 시작하지 않는 짧은 한 줄이고, 뒤따르는 내용에
+    '번호-원문자 정답' 짝이 2개 이상일 때만 인정한다.
+    """
+    t = (text or "").strip()
+    if t.startswith("[정답]") and t.count("[정답]") < 3:
+        return False
+    if _looks_like_answer_section(t) or ANSWER_KEY_LEAD_RE.match(t):
+        return True
+    first = t.splitlines()[0].strip() if t else ""
+    if (len(first) <= 60 and "?" not in first and not QUESTION_LINE_RE.match(first)
+            and ANSWER_KEY_TITLE_RE.search(first)):
+        return len(_parse_answer_key([t, *following])) >= 2
+    return False
+
+
+def _pdf_page_answer_key_start(page_text: str) -> bool:
+    """PDF 한 쪽이 정답·해설 쪽으로 시작하는가(머리글 줄을 고려해 앞 세 줄까지 본다)."""
+    lines = [line.strip() for line in (page_text or "").splitlines() if line.strip()]
+    return any(_answer_key_start(chr(10).join(lines[index:])) for index in range(min(3, len(lines))))
+
+
+def _parse_answer_key(texts: list[str], tables: list[list[list[str]]] = ()) -> dict[str, str]:
+    """'1. ③ 2. ⑤', '1번 정답 ②', 번호행/정답행 표에서 {번호: 원문자 정답}을 모은다."""
+    answers: dict[str, str] = {}
+    for table in tables:
+        for header, values in zip(table, table[1:]):
+            if header and all(str(cell).strip().isdigit() for cell in header):
+                for number, value in zip(header, values):
+                    value = str(value).strip()
+                    if len(value) == 1 and value in CIRCLED_CHOICE_MARKERS[:9]:
+                        answers.setdefault(str(int(str(number).strip())), value)
+        texts = [*texts, *(" ".join(str(cell) for cell in row) for row in table)]
+    for text in texts:
+        for number, value in ANSWER_KEY_PAIR_RE.findall(text or ""):
+            answers.setdefault(str(int(number)), value)
+    return answers
+
+
+def _chunk_number(chunk: dict[str, Any]) -> str:
+    hint = str(chunk.get("number_hint") or "")
+    if hint:
+        return hint
+    match = QUESTION_LINE_RE.match(str(chunk.get("text") or ""))
+    return str(int(match.group(1))) if match else ""
+
+
+def _apply_answer_key(chunks: list[dict[str, Any]], answers: dict[str, str]) -> tuple[int, int]:
+    """정답표 정답을 번호가 같은 문항의 answer 로 옮긴다. (넣은 수, 짝 없는 수)."""
+    mapped = 0
+    matched: set[str] = set()
+    for chunk in chunks:
+        number = _chunk_number(chunk)
+        if number not in answers:
+            continue
+        matched.add(number)
+        if chunk.get("answer") or _split_answer_explanation(str(chunk.get("text") or ""))[1]:
+            continue  # 문항에 이미 적힌 정답을 덮지 않는다.
+        chunk["answer"] = answers[number]
+        mapped += 1
+    return mapped, len(set(answers) - matched)
+
+
+def _resumes_questions(text: str, last_number: int) -> bool:
+    """정답 묶음 뒤 문단이 직전 문항의 다음 번호 문항으로 다시 시작하는가('11. ③' 같은 정답 짝은 제외)."""
+    match = QUESTION_LINE_RE.match(text or "")
+    return bool(match) and last_number > 0 and int(match.group(1)) == last_number + 1         and not ANSWER_KEY_PAIR_RE.match((text or "").strip())
+
+
+def _answer_key_notices(report: dict[str, Any]) -> list[str]:
+    if not report.get("answer_key_found"):
+        return []
+    message = "문서 끝의 정답·해설 부분은 문항으로 만들지 않았습니다."
+    if report.get("answer_key_mapped"):
+        message += f" 정답 {report['answer_key_mapped']}개는 번호가 같은 문항의 정답 칸에 넣었습니다."
+    if report.get("answer_key_unmatched"):
+        message += f" 번호가 맞는 문항이 없는 정답 {report['answer_key_unmatched']}개는 넣지 못했습니다."
+    if not report.get("answer_key_mapped"):
+        message += " 정답은 직접 확인해 넣어 주세요."
+    return [message]
+
+
 def _paragraphs_to_chunks(
     blocks: list[tuple[str, list[str], list[list[list[str]]]]],
+    report: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """(문단 텍스트, 이미지 경로들, 표들) 목록을 문항 번호 기준으로 묶는다."""
+    """(문단 텍스트, 이미지 경로들, 표들) 목록을 문항 번호 기준으로 묶는다.
+
+    문항 뒤에 오는 정답표·해설 묶음('빠른 정답 1. ① 2. ②')은 가짜 문항이 되지 않게
+    잘라 내고, 정답은 번호가 같은 문항의 answer 로 옮긴다(결과는 report 에 기록).
+    """
     chunks: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     pending_lead: dict[str, Any] | None = None
+    answer_blocks: list[tuple[str, list[str], list[list[list[str]]]]] = []
+    kept_blocks: list[tuple[str, list[str], list[list[list[str]]]]] = []
+    seen_question = False
+    last_number = 0
+    index = 0
+    while index < len(blocks):
+        text = blocks[index][0] or ""
+        # 문항이 하나라도 나온 뒤의 정답 섹션 머리만 인정한다(해설지 전체 문서는 그대로 둔다).
+        if seen_question and _answer_key_start(text, [block[0] for block in blocks[index + 1:index + 6]]):
+            end = index + 1
+            # 단원별 정답표처럼 정답 묶음 뒤에 다음 번호 문항이 이어지면 그 문항부터 다시 살린다.
+            while end < len(blocks) and not _resumes_questions(blocks[end][0], last_number):
+                end += 1
+            answer_blocks.extend(blocks[index:end])
+            index = end
+            continue
+        question = QUESTION_LINE_RE.match(text)
+        trailer = QUESTION_TRAILER_RE.match(text)
+        if question or trailer:
+            seen_question = True
+            last_number = max(last_number, int(question.group(1) if question else trailer.group("number")))
+        kept_blocks.append(blocks[index])
+        index += 1
+    blocks = kept_blocks
 
     def append_block(target: dict[str, Any], text: str, images: list[str], tables: list[list[list[str]]]) -> None:
         if text:
@@ -2041,6 +2213,14 @@ def _paragraphs_to_chunks(
                     "number_hint": chunk.get("number_hint", ""),
                 }
             )
+    if answer_blocks:
+        answers = _parse_answer_key(
+            [text for text, _, _ in answer_blocks],
+            [table for _, _, tables in answer_blocks for table in tables],
+        )
+        mapped, unmatched = _apply_answer_key(result, answers)
+        if report is not None:
+            report.update(answer_key_found=True, answer_key_mapped=mapped, answer_key_unmatched=unmatched)
     return result
 
 
@@ -2158,7 +2338,9 @@ def import_docx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
             if any(any(cell for cell in row) for row in rows):
                 blocks.append(("", [], [rows]))
 
-    chunks = _paragraphs_to_chunks(blocks)
+    report: dict[str, Any] = {}
+    chunks = _paragraphs_to_chunks(blocks, report)
+    notices.extend(_answer_key_notices(report))
     if not chunks:
         return {"created": [], "notices": ["DOCX에서 내용을 찾지 못했습니다."]}
     sink = _create_from_chunks(chunks, "docx", filename, metadata)
@@ -2309,6 +2491,39 @@ def _hwpx_answer_endnote_chunks(
     return chunks
 
 
+def _attach_endnotes_by_position(
+    chunks: list[dict[str, Any]],
+    paragraphs: list[tuple[str, list[str], list[list[list[str]]]]],
+    markers: list[tuple[int, str, str, str]],
+) -> list[str]:
+    """미주가 달린 문단 텍스트를 순서대로 찾아 그 문항의 answer/explanation 에 넣는다."""
+    cursor = 0
+    attached = 0
+    for position, _number, answer, explanation in markers:
+        if not answer and not explanation:
+            continue
+        anchor = paragraphs[position][0].strip() if position < len(paragraphs) else ""
+        if not anchor:
+            continue
+        index = next((i for i in range(cursor, len(chunks)) if anchor in str(chunks[i].get("text") or "")), None)
+        if index is None:
+            continue
+        cursor = index
+        chunk = chunks[index]
+        if answer and not chunk.get("answer"):
+            chunk["answer"] = answer
+        if explanation:
+            chunk["explanation"] = "\n".join(part for part in (chunk.get("explanation"), explanation) if part)
+        attached += 1
+    total = sum(bool(answer or explanation) for _, _, answer, explanation in markers)
+    if not total:
+        return []
+    message = f"미주에 있던 정답·해설 {total}개 중 {attached}개를 해당 문항의 정답·해설 칸에 넣었습니다."
+    if attached < total:
+        message += f" {total - attached}개는 연결할 문항을 찾지 못했으니 원본을 확인해 주세요."
+    return [message]
+
+
 def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
     save_upload(filename, payload)
     notices: list[str] = []
@@ -2376,7 +2591,13 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
                 paragraphs.append(("".join(texts).strip(), images, tables))
 
     answer_note_chunks = _hwpx_answer_endnote_chunks(paragraphs, answer_endnotes)
-    chunks = answer_note_chunks or _paragraphs_to_chunks(paragraphs)
+    report: dict[str, Any] = {}
+    chunks = answer_note_chunks or _paragraphs_to_chunks(paragraphs, report)
+    notices.extend(_answer_key_notices(report))
+    if answer_endnotes and not answer_note_chunks and chunks:
+        # 미주 경계 조건(1..N 연속·정답 80%)을 못 채워도 미주 정답·해설을 버리지 않고
+        # 미주가 달린 문단을 담은 문항에 옮긴다. 못 옮긴 수는 안내로 남긴다.
+        notices.extend(_attach_endnotes_by_position(chunks, paragraphs, answer_endnotes))
     if not chunks:
         return {"created": [], "notices": ["HWPX에서 내용을 찾지 못했습니다."]}
     sink = _create_from_chunks(chunks, "hwpx", filename, metadata)
@@ -2635,7 +2856,9 @@ def import_hwp(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[
             if rel_path:
                 images.append(rel_path)
 
-    chunks = _paragraphs_to_chunks(paragraphs)
+    report: dict[str, Any] = {}
+    chunks = _paragraphs_to_chunks(paragraphs, report)
+    notices.extend(_answer_key_notices(report))
     if not chunks:
         return {"created": [], "notices": ["HWP에서 텍스트를 추출하지 못했습니다.", *notices]}
     if images:

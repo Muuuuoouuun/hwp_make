@@ -187,12 +187,15 @@ def collect_url(url: str, metadata: dict[str, Any]) -> dict[str, Any]:
 
         image_urls = [img for _, images in paragraphs for img in images]
         saved = _download_images(client, image_urls, notices)
+        # _paragraphs_to_chunks 는 (텍스트, 이미지, 표) 3원소 블록을 받는다. 웹 문단엔 표가 없다.
         resolved = [
-            (text, [saved[img] for img in images if img in saved])
+            (text, [saved[img] for img in images if img in saved], [])
             for text, images in paragraphs
         ]
 
-    chunks = importers._paragraphs_to_chunks(resolved)
+    report: dict[str, Any] = {}
+    chunks = importers._paragraphs_to_chunks(resolved, report)
+    notices.extend(importers._answer_key_notices(report))
     if not chunks:
         return {"created": [], "notices": ["페이지에서 가져올 내용을 찾지 못했습니다.", *notices]}
 
@@ -209,6 +212,7 @@ def collect_url(url: str, metadata: dict[str, Any]) -> dict[str, Any]:
                 "number": number,
                 "title": f"{base_title} #{number}" if number else base_title,
                 "stem": chunk["text"],
+                "answer": chunk.get("answer", ""),
                 "image_paths": chunk["images"],
             }
         )

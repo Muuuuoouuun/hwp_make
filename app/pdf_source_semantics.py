@@ -275,17 +275,11 @@ def _source_fraction_lines(lines, *, source_page=None):
         # glyphs. A loose vertical band would invent a fraction out of an
         # overlined segment and text from the preceding physical line.
         for side in operands:
-            for glyph in glyphs:
-                if (
-                    glyph in side
-                    or glyph["key"] in consumed
-                    or not glyph["text"].strip()
-                ):
-                    continue
-                center = (glyph["box"].tl + glyph["box"].br) / 2
-                if not box.x0 - 0.6 <= center.x <= box.x1 + 0.6:
-                    continue
-                if not any(
+            # 지수 꼬리 글리프('n+1'의 '+1')는 기준 글리프에서 멀어 1차 조건을
+            # 못 넘기므로, 이미 붙은 같은 크기·같은 기준선의 첨자 글리프를 따라
+            # 이어 붙인다(고정점까지 반복). 2026-10-03 GAP2-01 오탐 수정.
+            def _extends_base(glyph, base, center):
+                return (
                     float(glyph["span"].get("size", 0))
                     <= float(base["span"].get("size", 0)) * 0.85
                     and glyph["origin"]
@@ -297,10 +291,46 @@ def _source_fraction_lines(lines, *, source_page=None):
                     <= float(base["span"].get("size", 0)) * 0.7
                     and (center.y > axis)
                     == ((base["box"].y0 + base["box"].y1) / 2 > axis)
-                    for base in list(side)
-                ):
-                    continue
-                side.append(glyph)
+                )
+
+            def _continues_script(glyph, tail, center):
+                size = float(tail["span"].get("size", 0))
+                return (
+                    tail["scripted"]
+                    and size > 0
+                    and abs(float(glyph["span"].get("size", 0)) - size) <= size * 0.1
+                    and glyph["origin"]
+                    and tail["origin"]
+                    and abs(glyph["origin"][1] - tail["origin"][1]) <= size * 0.25
+                    and -2 <= glyph["box"].x0 - tail["box"].x1 <= size * 0.7
+                    and (center.y > axis)
+                    == ((tail["box"].y0 + tail["box"].y1) / 2 > axis)
+                )
+
+            for base in side:
+                base["scripted"] = False
+            changed = True
+            while changed:
+                changed = False
+                for glyph in glyphs:
+                    if (
+                        glyph in side
+                        or glyph["key"] in consumed
+                        or not glyph["text"].strip()
+                    ):
+                        continue
+                    center = (glyph["box"].tl + glyph["box"].br) / 2
+                    if not box.x0 - 0.6 <= center.x <= box.x1 + 0.6:
+                        continue
+                    if not any(
+                        _extends_base(glyph, base, center)
+                        or _continues_script(glyph, base, center)
+                        for base in list(side)
+                    ):
+                        continue
+                    glyph["scripted"] = True
+                    side.append(glyph)
+                    changed = True
 
         def operand(side):
             if not side:

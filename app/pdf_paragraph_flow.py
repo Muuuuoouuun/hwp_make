@@ -14,11 +14,18 @@ import fitz
 from lxml import etree
 
 HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
-LABEL = re.compile(r"^(?:[①-⑳㉠-㉻↳↪→]|\d{1,2}[.)]|[ㄱ-ㅎ][.)]|\([가-힣A-Za-z0-9]\)|[\[［<〈※○●•]|[-–]\s)")
+# ⓐ~ⓩ(U+24D0~U+24E9)는 국어 어휘 예문 표지다. 2026-10-03 GAP2-02: 따로 선 예문 쌍이
+# 문단 분할로 잡히던 오탐을 막는다.
+LABEL = re.compile(r"^(?:[①-⑳㉠-㉻ⓐ-ⓩ↳↪→]|\d{1,2}[.)]|[ㄱ-ㅎ][.)]|\([가-힣A-Za-z0-9]\)|[\[［<〈※○●•]|[-–]\s)")
 
 
 def compact(text):
     return re.sub(r"[\s\u200b]+", "", text)
+
+
+def _strip_marginal_labels(text):
+    """Remove printed marginal [A]-style labels from source and native text alike."""
+    return re.sub(r"\[[A-Z]\]", "", text)
 
 
 def inspect_paragraph_flow(source: Path, output: Path, *, page_limit=None) -> dict:
@@ -106,7 +113,10 @@ def inspect_paragraph_flow(source: Path, output: Path, *, page_limit=None) -> di
                     else:
                         # Printed marginal [A] labels can sit between two
                         # source lines within the same valid native paragraph.
-                        compared = [(re.sub(r"\[[A-Z]\]", "", t), hard) for t, hard in paragraphs]
+                        # 2026-10-03 GAP2-02: 원본 줄에 남은 [B]도 같이 지워야
+                        # 출력에 있는 문장이 '누락'으로 잡히지 않는다(양쪽 대칭).
+                        first, second = _strip_marginal_labels(first), _strip_marginal_labels(second)
+                        compared = [(_strip_marginal_labels(t), hard) for t, hard in paragraphs]
                     checked += 1
                     record = {"page": page_index + 1, "bbox": list(a | b), "first": first, "second": second}
                     # This gate proves paragraph membership, not adjacency of

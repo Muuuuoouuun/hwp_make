@@ -65,6 +65,7 @@ Representative real PDFs currently visible under `data/uploads`:
 - `25수능 물리.pdf`
 - `25수능 화학.pdf`
 - `25수능 지구과학.pdf`
+- `국어.pdf` — 2026-10-02 감사 kor20 샘플(20쪽 국어 문제지)의 원본. `scripts/verify_pdf_semantics_false_positives.py`가 `26-6월 수학영역_문제지.pdf`와 함께 검증기 오탐 회귀(GAP2-01/02)에 사용
 
 `data/full_subject_qa/sources`에 로컬로 내려받은 2026년 6월 고1 문제 PDF:
 

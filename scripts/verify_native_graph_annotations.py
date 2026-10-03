@@ -222,7 +222,8 @@ def verify(folder,source=None,native=None,provenance=None,check_api=False):
                     return {**stats,'editable_text_coverage_ratio':1,'source_text_preservation_ratio':1}
                 with patch.object(main.pdf_layout_writer,'write_pdf_structured_hwpx',faulty_writer):
                     for mode in ('structured','coordinate'):
-                        response = client.post('/api/pdf-layout-export',json={**payload,'layout_mode':mode})
+                        # strict: this gate pins the validator's rejection, not the default review delivery.
+                        response = client.post('/api/pdf-layout-export',json={**payload,'layout_mode':mode,'strict':True})
                         result = response.json()
                         assert response.status_code == 422,result
                         assert 'graph_annotations' in result['detail']['editability']['question_units']

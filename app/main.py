@@ -14,9 +14,12 @@ from typing import Any, Literal
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from .host_guard import LocalHostGuardMiddleware
 from .request_limits import RequestBodyLimitMiddleware
 
 from . import (
@@ -32,6 +35,7 @@ from . import (
     pdf_layout_writer,
     preview,
     storage,
+    user_errors,
 )
 
 
@@ -68,6 +72,23 @@ app.include_router(_LOCAL_AUTH.router())
 
 
 app.add_middleware(RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
+# 마지막에 추가한 미들웨어가 가장 바깥에서 돈다: Host·출처 검사를 본문 읽기보다 먼저 한다.
+app.add_middleware(LocalHostGuardMiddleware)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(request: Request, exc: RequestValidationError):
+    # 기존 detail(검증 오류 목록)은 그대로 두고, 화면에 보일 한국어 code/message/hint 를 덧붙인다.
+    errors = exc.errors()
+    empty_upload = any(
+        error.get("loc", ())[-1:] == ("data_base64",) and error.get("type") == "string_too_short"
+        for error in errors
+    )
+    # 영문 msg 와 입력값 메아리(input, 최대 수십 MB)는 응답에서 뺀다. 위치·유형만 남긴다.
+    fields = [{"type": error.get("type"), "loc": list(error.get("loc", ()))} for error in errors]
+    body = {"detail": jsonable_encoder(fields), **user_errors.detail("empty" if empty_upload else "invalid_request")}
+    return JSONResponse(status_code=422, content=body)
+
 
 app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 # 데이터 루트(DATA_DIR) 전체를 마운트하면 problems.sqlite3·user_settings.json까지 HTTP로
@@ -113,6 +134,9 @@ class PdfLayoutExportPayload(BaseModel):
     math_ai_recognition: bool | None = None
     math_ai_model: str | None = None
     variant_policy: Literal["all", "first"] = "all"
+    # strict=True keeps the legacy whole-document 422 for any editability or
+    # rendering defect (quality gates); default delivers the file with review.
+    strict: bool = False
 
 
 class TextInputPayload(BaseModel):
@@ -138,6 +162,8 @@ class ExportPayload(BaseModel):
     format: Literal["hwpx", "docx"] = "hwpx"
     template_key: str = "basic"
     include_answer_sheet: bool = False
+    # None이면 양식 기본값(simple 양식은 정답이 있으면 끝에 정답표를 붙인다).
+    answer_key_appendix: bool | None = None
     native_math: bool | None = None
     # Local premium workspace preview. This is a document policy boundary,
     # not a paid entitlement; web account/billing integration is a later stage.
@@ -150,10 +176,8 @@ class ExportPayload(BaseModel):
 def _decode_upload(data_base64: str) -> bytes:
     data = importers.decode_base64(data_base64)
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"파일은 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB 이하만 처리할 수 있습니다.",
-        )
+        raise HTTPException(status_code=413, detail=user_errors.detail(
+            "too_large", f"파일은 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB 이하만 처리할 수 있습니다."))
     return data
 
 
@@ -162,16 +186,18 @@ def _validated_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     try:
         encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="metadata는 JSON 객체여야 합니다.") from exc
+        raise HTTPException(status_code=400, detail=user_errors.detail(
+            "invalid_request", "metadata는 JSON 객체여야 합니다.")) from exc
     if len(encoded) > MAX_METADATA_BYTES:
-        raise HTTPException(status_code=413, detail="metadata가 허용 크기를 초과합니다.")
+        raise HTTPException(status_code=413, detail=user_errors.detail("too_large", "metadata가 허용 크기를 초과합니다."))
     return value
 
 
 @contextmanager
 def _conversion_slot():
     if not _CONVERSION_SLOTS.acquire(blocking=False):
-        raise HTTPException(status_code=429, detail="변환 작업이 많습니다. 잠시 후 다시 시도하세요.", headers={"Retry-After": "2"})
+        raise HTTPException(status_code=429, detail=user_errors.detail(
+            "busy", "변환 작업이 많습니다. 잠시 후 다시 시도하세요."), headers={"Retry-After": "2"})
     try:
         yield
     finally:
@@ -188,21 +214,27 @@ def _validate_import_signature(kind: str, data: bytes) -> None:
     }
     allowed = signatures.get(kind)
     if allowed and not any(data.startswith(signature) for signature in allowed):
-        raise HTTPException(status_code=400, detail=f"선택한 형식({kind})과 파일 내용이 일치하지 않습니다.")
+        # 변환 경로의 실패 응답은 모두 {code, message, hint}다(메시지 문구는 예전 그대로).
+        raise HTTPException(status_code=400, detail=user_errors.detail(
+            "format_mismatch", f"선택한 형식({kind})과 파일 내용이 일치하지 않습니다."))
     if kind in {"hwpx", "docx"}:
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
                 entries = archive.infolist()
                 expanded = sum(max(0, item.file_size) for item in entries)
         except (zipfile.BadZipFile, OSError) as exc:
-            raise HTTPException(status_code=400, detail=f"손상된 {kind.upper()} 패키지입니다.") from exc
+            raise HTTPException(status_code=400, detail=user_errors.detail(
+                "damaged", f"손상된 {kind.upper()} 패키지입니다.")) from exc
         if len(entries) > MAX_ARCHIVE_ENTRIES or expanded > MAX_ARCHIVE_EXPANDED_BYTES:
-            raise HTTPException(status_code=413, detail=f"{kind.upper()} 압축 해제 크기가 허용 범위를 초과합니다.")
+            raise HTTPException(status_code=413, detail=user_errors.detail(
+                "too_large", f"{kind.upper()} 압축 해제 크기가 허용 범위를 초과합니다."))
 
 
 def _get_template_or_400(template_key: str) -> exam_templates.ExamTemplate:
     if template_key not in exam_templates.TEMPLATE_MAP:
-        raise HTTPException(status_code=400, detail="Unknown export template")
+        # 영문 내부 문구 대신 교사용 안내(code/message/hint)로 돌려준다.
+        raise HTTPException(status_code=400, detail=user_errors.detail(
+            "invalid_request", "선택한 시험지 양식을 찾지 못했습니다."))
     return exam_templates.get_template(template_key)
 
 
@@ -217,7 +249,8 @@ def _selected_problems_or_409(ids: list[int]) -> list[dict[str, Any]]:
             "missing_ids": missing,
         })
     if len(set(ids)) != len(ids):
-        raise HTTPException(status_code=400, detail="같은 문항을 중복으로 선택할 수 없습니다.")
+        raise HTTPException(status_code=400, detail=user_errors.detail(
+            "invalid_request", "같은 문항을 중복으로 선택할 수 없습니다."))
     return problems
 
 
@@ -361,6 +394,24 @@ def _inspect_hwpx_open_safety(path: Path) -> dict[str, Any]:
         return validate_editor_open_safety(path).to_dict()
     except Exception as exc:  # noqa: BLE001 - recorded as quality evidence.
         return {"ok": False, "summary": f"editor-open safety validation failed: {exc}", "error": str(exc)}
+
+
+def _hwpx_package_problem(path: Path | None) -> str:
+    """Return a reason when the produced HWPX cannot be opened at all, else ''."""
+    if path is None or not path.is_file() or not path.stat().st_size:
+        return "missing_output"
+    try:
+        with zipfile.ZipFile(path) as package:
+            names = set(package.namelist())
+            if package.testzip() is not None:
+                return "corrupt_zip_member"
+    except (OSError, zipfile.BadZipFile):
+        return "bad_zip"
+    if "Contents/content.hpf" not in names or "Contents/header.xml" not in names:
+        return "missing_package_part"
+    if not any(re.fullmatch(r"Contents/section\d+\.xml", name) for name in names):
+        return "missing_section"
+    return ""
 
 
 def _pdf_layout_objective_score(
@@ -783,7 +834,7 @@ def list_exports() -> dict[str, Any]:
 @app.delete("/api/exports/{name:path}")
 def delete_export(name: str) -> dict[str, Any]:
     if not storage.delete_export(name):
-        raise HTTPException(status_code=404, detail="Export not found")
+        raise HTTPException(status_code=404, detail=user_errors.detail("not_found", "내보낸 파일을 찾지 못했습니다."))
     return {"ok": True}
 
 
@@ -818,7 +869,7 @@ def get_problem(problem_id: int) -> dict[str, Any]:
     try:
         return {"item": storage.get_problem(problem_id)}
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Problem not found") from exc
+        raise HTTPException(status_code=404, detail=user_errors.detail("not_found")) from exc
 
 
 @app.post("/api/problems")
@@ -831,7 +882,7 @@ def update_problem(problem_id: int, payload: ProblemPayload) -> dict[str, Any]:
     try:
         return {"item": storage.update_problem(problem_id, payload.model_dump(exclude_unset=True))}
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Problem not found") from exc
+        raise HTTPException(status_code=404, detail=user_errors.detail("not_found")) from exc
 
 
 @app.delete("/api/problems/{problem_id}")
@@ -839,7 +890,7 @@ def delete_problem(problem_id: int) -> dict[str, Any]:
     try:
         storage.get_problem(problem_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Problem not found") from exc
+        raise HTTPException(status_code=404, detail=user_errors.detail("not_found")) from exc
     storage.delete_problem(problem_id)
     return {"ok": True}
 
@@ -849,15 +900,17 @@ def attach_image(problem_id: int, payload: AttachImagePayload) -> dict[str, Any]
     try:
         problem = storage.get_problem(problem_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Problem not found") from exc
+        raise HTTPException(status_code=404, detail=user_errors.detail("not_found")) from exc
     try:
         data = _decode_upload(payload.data_base64)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        user_errors.log_failure("attach-image", exc)
+        raise HTTPException(status_code=400, detail=user_errors.detail(
+            "invalid_request", user_errors.teacher_head(exc))) from exc
 
     rel_path = importers._save_image_bytes(payload.filename, data)
     if rel_path is None:
-        raise HTTPException(status_code=400, detail="이미지 파일이 아닙니다.")
+        raise HTTPException(status_code=400, detail=user_errors.detail("invalid_request", "이미지 파일이 아닙니다."))
     image_paths = [*problem["image_paths"], rel_path]
     return {"item": storage.update_problem(problem_id, {"image_paths": image_paths})}
 
@@ -876,6 +929,7 @@ IMPORTERS = {
 
 @app.post("/api/import")
 def import_file(payload: ImportPayload) -> dict[str, Any]:
+    data: bytes | None = None
     try:
         data = _decode_upload(payload.data_base64)
         _validate_import_signature(payload.kind, data)
@@ -884,9 +938,14 @@ def import_file(payload: ImportPayload) -> dict[str, Any]:
     except HTTPException:
         raise
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"가져오기 실패: {exc}") from exc
+        # 원문 예외(영문 진단·경로)는 로그에만 두고, 응답은 {code, message, hint}로 준다.
+        user_errors.log_failure("import", exc)
+        code = user_errors.classify_import_failure(exc, payload.kind, data)
+        message = None if code != "import_failed" else user_errors.teacher_head(exc)
+        raise HTTPException(status_code=400, detail=user_errors.detail(code, message)) from exc
     except Exception as exc:  # noqa: BLE001 - 임포터 라이브러리별 오류를 500으로 감싼다
-        raise HTTPException(status_code=500, detail=f"가져오기 중 오류가 발생했습니다: {exc}") from exc
+        user_errors.log_failure("import", exc)
+        raise HTTPException(status_code=500, detail=user_errors.detail("conversion_failed")) from exc
     return {"ok": True, **result}
 
 
@@ -947,11 +1006,12 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"PDF 데이터 디코딩 실패: {exc}") from exc
+        raise HTTPException(status_code=400, detail=user_errors.detail("invalid_request")) from exc
     if not data.startswith(b"%PDF"):
-        raise HTTPException(status_code=400, detail="PDF 파일만 원본 레이아웃 HWPX로 만들 수 있습니다.")
+        raise HTTPException(status_code=400, detail=user_errors.detail("not_pdf"))
     if payload.variant_policy == "first" and payload.layout_mode != "structured":
-        raise HTTPException(status_code=400, detail="첫 유형 선택은 문항 구조 변환에서만 사용할 수 있습니다.")
+        raise HTTPException(status_code=400, detail=user_errors.detail(
+            "invalid_request", "첫 유형 선택은 문항 구조 변환에서만 사용할 수 있습니다."))
 
     storage.ensure_dirs()
     rel_path = importers.save_upload(payload.filename, data)
@@ -959,7 +1019,16 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
     output_path: Path | None = None
     run_dir: Path | None = None
 
+    def _release_page_memo() -> None:
+        # 2026-10-03 speed: this conversion's memoized page text layers are
+        # released as soon as it ends (success or failure) so memory returns
+        # to the baseline between conversions.
+        from .pdf_source_page_memo import forget_file
+
+        forget_file(source_path)
+
     def _cleanup_failed_run() -> None:
+        _release_page_memo()
         # 실패한 변환의 부분 산출물(run_dir 전체)을 exports/에 남기지 않는다.
         if output_path is not None:
             output_path.unlink(missing_ok=True)
@@ -975,6 +1044,12 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
                 pass
 
     try:
+        # 2026-10-03 speed: the lock only guards the time-stamped run directory
+        # and file names, which must be chosen one at a time.  The writer runs
+        # outside it: its per-run state is the run_dir plus a ContextVar-scoped
+        # asset directory, so a second conversion no longer waits for a whole
+        # writer pass.  The 2-slot _CONVERSION_SLOTS semaphore still bounds
+        # concurrency (and therefore peak memory) to two conversions.
         with _EXPORT_LOCK:
             source_stem = _safe_path_name(Path(payload.filename).stem or "PDF", "pdf")
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -984,25 +1059,30 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
             source_copy.write_bytes(data)
             output_suffix = "structured_native"
             output_path = _unique_path_in_dir(run_dir, f"{source_stem}_{output_suffix}.hwpx")
-            with storage.scoped_upload_directory(run_dir / "assets"):
-                # Both public UI modes must satisfy the native editing contract.
-                # Keep the old coordinate request value as an API alias only.
-                stats = pdf_layout_writer.write_pdf_structured_hwpx(
-                    source_path, output_path, max_pages=payload.max_pages,
-                    native_math=payload.native_math,
-                    math_ai_recognition=payload.math_ai_recognition,
-                    math_ai_model=payload.math_ai_model,
-                    variant_policy=payload.variant_policy,
-                )
+        with storage.scoped_upload_directory(run_dir / "assets"):
+            # Both public UI modes must satisfy the native editing contract.
+            # Keep the old coordinate request value as an API alias only.
+            stats = pdf_layout_writer.write_pdf_structured_hwpx(
+                source_path, output_path, max_pages=payload.max_pages,
+                native_math=payload.native_math,
+                math_ai_recognition=payload.math_ai_recognition,
+                math_ai_model=payload.math_ai_model,
+                variant_policy=payload.variant_policy,
+                source_name=payload.filename,
+            )
     except HTTPException:
         _cleanup_failed_run()
         raise
     except ValueError as exc:
         _cleanup_failed_run()
-        raise HTTPException(status_code=400, detail=f"PDF 레이아웃 변환 실패: {exc}") from exc
+        # 엔진의 영문 진단과 서버 절대경로는 로그에만 남기고 교사용 안내로 바꾼다.
+        user_errors.log_failure("pdf-layout-export", exc)
+        raise HTTPException(status_code=400, detail=user_errors.detail(
+            user_errors.classify_pdf_failure(exc, data))) from exc
     except Exception as exc:  # noqa: BLE001 - PDF/HWPX 변환 오류를 API 오류로 감싼다.
         _cleanup_failed_run()
-        raise HTTPException(status_code=500, detail=f"PDF 레이아웃 HWPX 생성 중 오류가 발생했습니다: {exc}") from exc
+        user_errors.log_failure("pdf-layout-export", exc)
+        raise HTTPException(status_code=500, detail=user_errors.detail("conversion_failed")) from exc
 
     try:
         assert output_path is not None
@@ -1010,27 +1090,49 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
         render_dir = run_dir / "fidelity_renders"
         scope = _pdf_export_scope(source_copy, stats, payload)
         from .pdf_editability import inspect_pdf_editability
+        from .pdf_export_review import build_export_review
 
+        package_problem = _hwpx_package_problem(output_path)
+        if package_problem:
+            # Fatal: there is no openable file to hand to the teacher.
+            raise HTTPException(status_code=422, detail=user_errors.detail(
+                "output_damaged", "생성한 HWPX 파일이 손상되어 제공할 수 없습니다. 다시 변환해 주세요.",
+                fatal="package_integrity", package_problem=package_problem,
+            ))
         editability = inspect_pdf_editability(source_copy, output_path, stats.get("image_provenance") or [],
                                              page_limit=int(scope["selected_page_count"]),
                                              require_question_boxes=bool(stats.get("question_grouping", {}).get("question_count")))
         stats["verified_question_units"] = editability["question_units"]
-        if not editability["ok"]:
-            raise HTTPException(status_code=422, detail={
-                "message": "본문 이미지·문항 분리 오류 또는 원문 누락이 발견되어 편집형 문서를 제공할 수 없습니다.",
-                "editability": editability,
-            })
+        if not editability["question_units"].get("question_count") and not editability.get("body_paragraphs"):
+            # Fatal: nothing in the output is editable, so the file has no use.
+            raise HTTPException(status_code=422, detail=user_errors.detail(
+                "no_editable_content",
+                "편집할 수 있는 문항이나 문장을 찾지 못해 편집형 문서를 제공할 수 없습니다. 글자를 선택할 수 있는 PDF인지 확인해 주세요.",
+                fatal="no_editable_content", editability=editability,
+            ))
+        # Local (per-question) defects used to reject the whole document with 422.
+        # They now ship with a per-question review unless strict was requested.
+        if payload.strict and not editability["ok"]:
+            raise HTTPException(status_code=422, detail=user_errors.detail(
+                "strict_check_failed",
+                "본문 이미지·문항 분리 오류 또는 원문 누락이 발견되어 편집형 문서를 제공할 수 없습니다.",
+                editability=editability,
+            ))
         fidelity = _pdf_export_fidelity(source_copy, output_path, render_dir, stats, payload, scope)
+        rendering = None
         if editability["question_units"].get("question_count"):
             from .pdf_question_rendering import inspect_question_rendering
 
             rendering = inspect_question_rendering(output_path, pdf_layout_fidelity.rhwp)
             editability["rendering"] = rendering
-            if rendering.get("ok") is False:
-                raise HTTPException(status_code=422, detail={
-                    "message": "문항 글상자 내부의 일부 내용이 실제 렌더에 나타나지 않아 결과물을 제공할 수 없습니다.",
-                    "rendering": rendering,
-                })
+            if payload.strict and rendering.get("ok") is False:
+                raise HTTPException(status_code=422, detail=user_errors.detail(
+                    "strict_check_failed",
+                    "문항 글상자 내부의 일부 내용이 실제 렌더에 나타나지 않아 결과물을 제공할 수 없습니다.",
+                    rendering=rendering,
+                ))
+        review = build_export_review(editability, rendering, strict=payload.strict)
+        stats["review"] = review
         _attach_fidelity_artifact_refs(fidelity, render_dir)
         style_profile = pdf_layout_writer.inspect_layout_template_profile(output_path)
         open_safety = _inspect_hwpx_open_safety(output_path)
@@ -1057,7 +1159,13 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
             "meets_visual_sync_target": meets_visual_target,
             "meets_whole_page_sync_target": meets_whole_page_visual_target,
             "meets_layout_view_sync_target": meets_layout_view_target,
-            "visual_review_flags": fidelity.get("review_flags") or [],
+            # 2026-10-03: a formula whose braces could not be balanced is kept as
+            # text; the teacher should look at that spot.
+            "visual_review_flags": [
+                *(fidelity.get("review_flags") or []),
+                *(["math_brace_demoted_to_text"] if int(stats.get("math_brace_demotions") or 0) else []),
+            ],
+            "math_brace_demotions": int(stats.get("math_brace_demotions") or 0),
             "limited_by_max_pages": bool(fidelity.get("limited_by_max_pages")),
             "full_page_raster_fallback": full_page_raster_fallback,
             "full_page_images": int(stats.get("full_page_images") or 0),
@@ -1075,9 +1183,11 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
         )
         quality["editability"] = editability
         quality["native_text_coverage_scope"] = "source_pdf_text_layer_excluding_bitmap_lettering"
-        quality["meets_native_editability_target"] = editability["ok"]
+        quality["review"] = review
+        quality["flags"] = [] if review["ok"] else ["editability_review_required"]
+        quality["meets_native_editability_target"] = review["ok"]
         quality["meets_objective_score_target"] = bool(
-            quality.get("meets_objective_score_target") and editability["ok"]
+            quality.get("meets_objective_score_target") and review["ok"]
             and open_safety.get("ok") and fidelity.get("available")
             and not fidelity.get("skipped") and not fidelity.get("page_count_mismatch")
             and fidelity.get("meets_layout_view_sync_target")
@@ -1095,6 +1205,7 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
             "export": _export_file_item(output_path),
             "stats": stats,
             "quality": quality,
+            "review": review,
             "fidelity": fidelity,
             "style_profile": style_profile,
             "open_safety": open_safety,
@@ -1111,6 +1222,7 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
             ],
         }
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        _release_page_memo()
 
         return {
             "ok": True,
@@ -1125,10 +1237,11 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
             },
             "stats": stats,
             "quality": quality,
+            "review": review,
             "fidelity": fidelity,
             "style_profile": style_profile,
             "open_safety": open_safety,
-            "notices": ([
+            "notices": ([review["message"]] if review["message"] else []) + ([
                 f"원본 {scope['original_page_count']}쪽 중 1–{scope['selected_page_count']}쪽을 선택해 변환했습니다. 제외된 {scope['excluded_page_count']}쪽은 원본 PDF에 보존됩니다."
             ] if not scope["includes_entire_source"] else []) + ([
                 "첫 유형을 확정할 수 없어 전체 선택 범위를 보존했습니다."
@@ -1150,7 +1263,9 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
         raise
     except Exception as exc:
         _cleanup_failed_run()
-        raise HTTPException(status_code=500, detail="PDF 결과 검증 중 오류가 발생했습니다. 다시 시도해 주세요.") from exc
+        user_errors.log_failure("pdf-layout-export verify", exc)
+        raise HTTPException(status_code=500, detail=user_errors.detail(
+            "conversion_failed", "PDF 결과 검증 중 오류가 발생했습니다. 다시 시도해 주세요.")) from exc
 
 
 @app.post("/api/import-text")
@@ -1171,9 +1286,13 @@ def collect(payload: CollectPayload) -> dict[str, Any]:
     try:
         result = collector.collect_url(payload.url, _validated_metadata(payload.metadata))
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # 주소 검사 안내(한국어)는 그대로, 내부 영문 예외·경로는 로그에만 남긴다.
+        user_errors.log_failure("collect", exc)
+        raise HTTPException(status_code=400, detail=user_errors.detail(
+            "collect_failed", user_errors.teacher_head(exc))) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"수집 실패: {exc}") from exc
+        user_errors.log_failure("collect", exc)
+        raise HTTPException(status_code=502, detail=user_errors.detail("collect_failed")) from exc
     return {"ok": True, **result}
 
 
@@ -1182,7 +1301,8 @@ def preview_export(payload: ExportPayload, request: Request = None) -> dict[str,
     template = _get_template_or_400(payload.template_key)
     problems = _export_problems(payload, request)
     if not preview.available():
-        raise HTTPException(status_code=501, detail="미리보기 엔진(rhwp-python)이 설치되어 있지 않습니다.")
+        raise HTTPException(status_code=501, detail=user_errors.detail(
+            "preview_failed", "미리보기 엔진이 설치되어 있지 않아 미리보기를 만들 수 없습니다."))
     title = exam_templates.resolve_export_title(payload.title, template)
     native_math = _effective_native_math(payload, template)
     try:
@@ -1193,11 +1313,13 @@ def preview_export(payload: ExportPayload, request: Request = None) -> dict[str,
                 template.key,
                 include_answer_sheet=payload.include_answer_sheet,
                 native_math=native_math,
+                answer_key_appendix=payload.answer_key_appendix,
             )
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"미리보기 실패: {exc}") from exc
+        user_errors.log_failure("preview", exc)
+        raise HTTPException(status_code=500, detail=user_errors.detail("preview_failed")) from exc
     if template.columns > 1:
         result.setdefault("note", "미리보기 엔진이 다단 배치를 아직 1단으로 보여줍니다. 실제 한글에서는 설정된 단 수로 표시됩니다.")
     return result
@@ -1220,7 +1342,8 @@ def export(payload: ExportPayload, request: Request = None) -> FileResponse:
             filename = path.name
             if payload.format == "docx":
                 docx_writer.write_docx(
-                    path, title, problems, template.key, include_answer_sheet=payload.include_answer_sheet
+                    path, title, problems, template.key, include_answer_sheet=payload.include_answer_sheet,
+                    answer_key_appendix=payload.answer_key_appendix,
                 )
                 media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             else:
@@ -1233,6 +1356,7 @@ def export(payload: ExportPayload, request: Request = None) -> FileResponse:
                     template.key,
                     include_answer_sheet=payload.include_answer_sheet,
                     native_math=native_math,
+                    answer_key_appendix=payload.answer_key_appendix,
                 )
                 media_type = "application/hwp+zip"
     except HTTPException:
@@ -1242,5 +1366,6 @@ def export(payload: ExportPayload, request: Request = None) -> FileResponse:
     except Exception as exc:  # noqa: BLE001 - 작성기 오류를 500으로 감싼다
         if path is not None:
             path.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"내보내기에 실패했습니다: {exc}") from exc
+        user_errors.log_failure("export", exc)
+        raise HTTPException(status_code=500, detail=user_errors.detail("export_failed")) from exc
     return FileResponse(path, media_type=media_type, filename=filename)

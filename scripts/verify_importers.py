@@ -237,9 +237,10 @@ template_options = {template.key: template.export_option() for template in exam_
 native_math_default_templates = sorted(
     key for key, option in template_options.items() if option.get("native_math_default") is True
 )
-if native_math_default_templates != ["kice_math"]:
+# simple(간단 변환 전용, 2026-10-03 4단계)도 한글 수식 편집을 위해 기본 on 이다.
+if native_math_default_templates != ["kice_math", "simple"]:
     failures.append(
-        f"Export templates: native math should default on only for kice_math, got {native_math_default_templates}"
+        f"Export templates: native math should default on only for kice_math and simple, got {native_math_default_templates}"
     )
 if template_options.get("basic", {}).get("native_math_default") is not False:
     failures.append("Export templates: basic should keep native math off by default")

@@ -31,7 +31,8 @@ assert(css.includes("body.simple-converter-mode > .app-shell"), "legacy workspac
 assert(js.includes('els.simpleDropzone?.addEventListener("drop"'), "simple converter drag-and-drop wiring missing");
 assert(js.includes("async function runSimpleConversion()"), "simple conversion action missing");
 assert(js.includes("await exportPdfLayoutFiles({"), "PDF layout conversion is not wired to the simple screen");
-assert(js.includes("await exportSelected(state.recognizedProblems.map"), "recognized source documents are not wired to basic conversion");
+// 2026-10-03: 비 PDF 변환과 PDF 폴백이 공용 exportRecognized 로 같은 호출을 쓴다(앞의 await 는 호출부로 이동).
+assert(js.includes("exportSelected(state.recognizedProblems.map"), "recognized source documents are not wired to basic conversion");
 
 // 빠른 건너뛰기와 모달 기본 계약.
 assert(/class="skip-link"\s+href="#workspace"/.test(html), "skip link missing");

@@ -10,18 +10,22 @@ from typing import Any
 from PIL import Image
 
 from .exam_templates import (
+    ANSWER_KEY_TITLE,
     ANSWER_SHEET_TITLE,
     ExamTemplate,
     answer_blank_text,
+    answer_key_rows,
     explanation_entries,
     format_answer,
     get_template,
     needs_answer_blank,
+    numbered_stem_paragraphs,
     quick_answer_lines,
     resolve_export_title,
+    wants_answer_key,
 )
 from . import storage
-from .math_text import normalize_math_token, split_math_text, strip_math_delimiters
+from .math_text import normalize_math_token, split_math_text, strip_math_delimiters, unmatched_brace_positions
 
 
 SECTION_NS = "http://www.hancom.co.kr/hwpml/2011/section"
@@ -800,7 +804,7 @@ def _is_hancom_eqn_script(expr: str) -> bool:
     return any(marker in value for marker in markers)
 
 
-def _hancom_eqn_script(source: str) -> str | None:
+def _hancom_eqn_script_body(source: str) -> str | None:
     expr = normalize_math_token(strip_math_delimiters(source)).strip()
     if not expr:
         return None
@@ -850,7 +854,7 @@ def _hancom_eqn_script(source: str) -> str | None:
                 modulus = _read_latex_arg(expr, next_cursor)
                 if modulus is None:
                     return None
-                body = _hancom_eqn_script(modulus[0]) or modulus[0].strip()
+                body = _hancom_eqn_script_body(modulus[0]) or modulus[0].strip()
                 output.append(f" mod {body}")
                 cursor = modulus[1]
                 continue
@@ -873,7 +877,7 @@ def _hancom_eqn_script(source: str) -> str | None:
                 if wrapped is None:
                     return None
                 begin_token, body, end_token, cursor = wrapped
-                body_script = _hancom_eqn_script(body)
+                body_script = _hancom_eqn_script_body(body)
                 if body_script is None:
                     return None
                 output.append(f"{_display_delimiter(begin_token)}{body_script}{_display_delimiter(end_token)}")
@@ -885,8 +889,8 @@ def _hancom_eqn_script(source: str) -> str | None:
                 denominator = _read_latex_arg(expr, numerator[1])
                 if denominator is None:
                     return None
-                num = _hancom_eqn_script(numerator[0])
-                den = _hancom_eqn_script(denominator[0])
+                num = _hancom_eqn_script_body(numerator[0])
+                den = _hancom_eqn_script_body(denominator[0])
                 if num is None or den is None:
                     return None
                 output.append(f"{{{num}}} over {{{den}}}")
@@ -898,8 +902,8 @@ def _hancom_eqn_script(source: str) -> str | None:
                     base = _read_braced(expr, bracketed[1])
                     if base is None:
                         return None
-                    degree = _hancom_eqn_script(bracketed[0]) or bracketed[0].strip()
-                    body = _hancom_eqn_script(base[0])
+                    degree = _hancom_eqn_script_body(bracketed[0]) or bracketed[0].strip()
+                    body = _hancom_eqn_script_body(base[0])
                     if body is None:
                         return None
                     output.append(f"^{degree}sqrt {{{body}}}")
@@ -908,7 +912,7 @@ def _hancom_eqn_script(source: str) -> str | None:
                 base = _read_braced(expr, next_cursor) or _read_radical_arg(expr, next_cursor)
                 if base is None:
                     return None
-                body = _hancom_eqn_script(base[0])
+                body = _hancom_eqn_script_body(base[0])
                 if body is None:
                     return None
                 output.append(f"sqrt {{{body}}}")
@@ -921,8 +925,8 @@ def _hancom_eqn_script(source: str) -> str | None:
                 bottom = _read_latex_arg(expr, top[1])
                 if bottom is None:
                     return None
-                upper = _hancom_eqn_script(top[0]) or top[0].strip()
-                lower = _hancom_eqn_script(bottom[0]) or bottom[0].strip()
+                upper = _hancom_eqn_script_body(top[0]) or top[0].strip()
+                lower = _hancom_eqn_script_body(bottom[0]) or bottom[0].strip()
                 output.append(f"{{{upper}}} choose {{{lower}}}")
                 cursor = bottom[1]
                 continue
@@ -930,7 +934,7 @@ def _hancom_eqn_script(source: str) -> str | None:
                 base = _read_braced(expr, next_cursor)
                 if base is None:
                     return None
-                body = _hancom_eqn_script(base[0])
+                body = _hancom_eqn_script_body(base[0])
                 output.append(f"BOX {{{body}}}" if body is not None else f"BOX {{{base[0].strip()}}}")
                 cursor = base[1]
                 continue
@@ -938,7 +942,7 @@ def _hancom_eqn_script(source: str) -> str | None:
                 base = _read_braced(expr, next_cursor)
                 if base is None:
                     return None
-                body = _hancom_eqn_script(base[0])
+                body = _hancom_eqn_script_body(base[0])
                 command_name = "OVERBRACE" if name == "overbrace" else "UNDERBRACE"
                 output.append(
                     f"{command_name} {{{body}}}" if body is not None else f"{command_name} {{{base[0].strip()}}}"
@@ -949,7 +953,7 @@ def _hancom_eqn_script(source: str) -> str | None:
                 base = _read_braced(expr, next_cursor)
                 if base is None:
                     return None
-                body = _hancom_eqn_script(base[0])
+                body = _hancom_eqn_script_body(base[0])
                 command_name = _ACCENT_EQN[name]
                 output.append(f"{command_name} {{{body}}}" if body is not None else f"{command_name} {{{base[0]}}}")
                 cursor = base[1]
@@ -958,7 +962,7 @@ def _hancom_eqn_script(source: str) -> str | None:
                 base = _read_braced(expr, next_cursor)
                 if base is None:
                     return None
-                body = _hancom_eqn_script(base[0])
+                body = _hancom_eqn_script_body(base[0])
                 output.append(body if body is not None else base[0].strip())
                 cursor = base[1]
                 continue
@@ -986,13 +990,13 @@ def _hancom_eqn_script(source: str) -> str | None:
                 if not braced[0].strip():
                     output.append("{}")
                 else:
-                    body = _hancom_eqn_script(braced[0])
+                    body = _hancom_eqn_script_body(braced[0])
                     output.append(body if body is not None else braced[0].strip())
                 cursor = braced[1]
                 continue
         if char in "^_":
             value, cursor = _read_script_arg(expr, cursor + 1)
-            body = _hancom_eqn_script(value) or value
+            body = _hancom_eqn_script_body(value) or value
             output.append(("^" if char == "^" else "_") + "{" + body + "}")
             continue
         if char == "√":
@@ -1001,7 +1005,7 @@ def _hancom_eqn_script(source: str) -> str | None:
                 output.append("sqrt {□}")
                 cursor = _skip_radical_fillers(expr, cursor + 1)
                 continue
-            body = _hancom_eqn_script(base[0]) or base[0]
+            body = _hancom_eqn_script_body(base[0]) or base[0]
             output.append(f"sqrt {{{body}}}")
             cursor = base[1]
             continue
@@ -1045,6 +1049,66 @@ def _hancom_eqn_script(source: str) -> str | None:
             output.append(mapped if mapped is not None else char)
         cursor += 1
     return _normalize_hancom_eqn_script("".join(output).strip())
+
+
+def hancom_eqn_script_parts(source: str) -> tuple[str, str, str] | None:
+    """Convert ``source`` and balance its braces before it reaches the editor.
+
+    Returns ``(leading_text, script, trailing_text)``.  Unmatched ``{`` at the
+    start and unmatched ``}`` at the end are set-notation braces that the
+    token scanner swallowed ("{a_n}", "(x+1){x²+…}"); they are handed back as
+    prose so the visible text is kept.  A script that is still unbalanced in
+    the middle cannot be repaired and is demoted to text (``None``).
+    """
+    script = _hancom_eqn_script_body(source)
+    if script is None:
+        return None
+    # 2026-10-03: "$" is a delimiter in our sources, never a Hancom token. A
+    # function-call token such as "lim($\sqrt{..}$-a_n)" used to leak it.
+    script = script.replace("$", "").strip()
+    if not script:
+        return None
+    unmatched = unmatched_brace_positions(script)
+    if not unmatched:
+        return "", script, ""
+    leading = 0
+    while leading < len(unmatched) and script[unmatched[leading]] == "{" and not script[: unmatched[leading]].strip():
+        leading += 1
+    trailing = 0
+    while (trailing < len(unmatched) - leading and script[unmatched[-1 - trailing]] == "}"
+           and not script[unmatched[-1 - trailing] + 1:].strip()):
+        trailing += 1
+    if leading + trailing != len(unmatched):
+        return None
+    head = script[: unmatched[leading - 1] + 1] if leading else ""
+    tail = script[unmatched[-trailing]:] if trailing else ""
+    body = script[len(head): len(script) - len(tail)].strip()
+    if not body:
+        return None
+    return head.strip(), body, tail.strip()
+
+
+def _hancom_eqn_script(source: str) -> str | None:
+    parts = hancom_eqn_script_parts(source)
+    return parts[1] if parts else None
+
+
+def is_brace_demoted_math(source: str) -> bool:
+    """True when a convertible token was demoted to text only for brace balance."""
+    return hancom_eqn_script_parts(source) is None and hancom_eqn_script_lenient(source) is not None
+
+
+def hancom_eqn_script_lenient(source: str) -> str | None:
+    """Conversion without the balance gate, for whole-line source comparison.
+
+    ``source_line_values`` converts a complete run of equation-font glyphs at
+    once, so a set brace in the middle of the run is expected there; the
+    writer emits the same characters as a balanced equation plus brace text.
+    """
+    script = _hancom_eqn_script_body(source)
+    if script is None:
+        return None
+    return script.replace("$", "").strip() or None
 
 
 _EQN_WORD_OPERATORS = {
@@ -1221,9 +1285,11 @@ COLUMN_GAP = 1200
 PX_TO_HWPUNIT = 75  # 96dpi 기준: px / 96 * 7200
 CIRCLED_NUMBERS = ("①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨")
 QUESTION_PREFIX_RE = re.compile(r"^\s*(?:문제\s*)?(\d{1,3})\s*[\.\)]\s*")
+# 선지 번호 접두만 떼어 낸다: ①~⑨, 1)~9), (1)~(9), 1.~9.(뒤에 숫자가 오지 않을 때).
+# 예전 규칙(\d+[.)] 또는 '숫자+공백')은 '0.5'→'5', '2 cm'→'cm', '12.5%'→'5%'처럼 값 자체를 훼손했다.
 CHOICE_PREFIX_RE = re.compile(
     r"^\s*(?:[①②③④⑤⑥⑦⑧⑨❶❷❸❹❺❻❼❽❾➀➁➂➃➄➅➆➇➈]|"
-    r"\d+\s*[\.\)]|[1-9](?=\s))\s*"
+    r"\(\s*[1-9]\s*\)|[1-9]\s*\)|[1-9]\s*\.(?!\d))\s*"
 )
 SOURCE_MARKER_RE = re.compile(r"^\s*\[\d{1,2}\s*점\]\s*\[[^\]]+\]\s*$")
 
@@ -1378,7 +1444,8 @@ def _format_choice(index: int, choice: str, template: ExamTemplate) -> str:
 
 
 def _add_masthead(add_text, title: str, template: ExamTemplate) -> None:
-    if template.key == "basic":
+    # simple 양식도 v2 와 같이 머리말 장식 없이 제목 한 줄만 둔다(coverage_hwpx_v2 패리티).
+    if template.key in {"basic", "simple"}:
         add_text(title, 1, 1)
         add_text("")
         return
@@ -1407,6 +1474,7 @@ def _build_body(
     include_answer_sheet: bool = False,
     content_width: int = MAX_IMAGE_WIDTH,
     native_math: bool = False,
+    answer_key_appendix: bool | None = None,
 ) -> str:
     paragraphs: list[str] = []
     pid = 0
@@ -1468,7 +1536,15 @@ def _build_body(
         meta = " / ".join(part for part in [subject, meta_unit] if part)
 
         stem_lines = (problem.get("stem") or "").splitlines()
-        if template.merge_question_number:
+        if template.source_number_line:
+            for text, style in numbered_stem_paragraphs(
+                stem_lines, label, numbered=bool(problem.get("number")),
+                prepared=bool(problem.get("_numbering_prepared")),
+            ):
+                add_text(text, 2 if style == "heading" else 0, 0)
+            if meta:
+                add_text(f"[{meta}]", 4, 0)
+        elif template.merge_question_number:
             first_line = _strip_question_prefix(stem_lines[0], label) if stem_lines else ""
             heading = f"{label}. {first_line or problem.get('title') or '문제'}"
             add_text(heading, 2, 3 if template.compact else 0)
@@ -1526,6 +1602,10 @@ def _build_body(
                 for line in lines:
                     add_text(line, 0, 3 if template.compact else 0)
                 add_text("")
+    elif wants_answer_key(problems, template, include_answer_sheet, answer_key_appendix):
+        add_text(ANSWER_KEY_TITLE, 1, 1, page_break=True)
+        add_text("")
+        add_table(answer_key_rows(problems, template))
     return "\n".join(paragraphs)
 
 
@@ -1664,6 +1744,7 @@ def _section_xml(
     template: ExamTemplate,
     include_answer_sheet: bool = False,
     native_math: bool = False,
+    answer_key_appendix: bool | None = None,
 ) -> str:
     columns = max(1, min(template.columns, 2))
     content_width = (
@@ -1689,6 +1770,7 @@ def _section_xml(
         include_answer_sheet=include_answer_sheet,
         content_width=content_width,
         native_math=native_math,
+        answer_key_appendix=answer_key_appendix,
     )
     return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <hs:sec xmlns:hs="{SECTION_NS}" xmlns:hp="{PARA_NS}" xmlns:hc="{CORE_NS}" xmlns:hh="{HEAD_NS}">
@@ -1798,6 +1880,7 @@ def write_hwpx(
     template_key: str = "basic",
     include_answer_sheet: bool = False,
     native_math: bool = False,
+    answer_key_appendix: bool | None = None,
 ) -> None:
     template = get_template(template_key)
     title = resolve_export_title(title, template)
@@ -1818,6 +1901,7 @@ def write_hwpx(
                 template,
                 include_answer_sheet=include_answer_sheet,
                 native_math=native_math,
+                answer_key_appendix=answer_key_appendix,
             ),
         )
         archive.writestr("Preview/PrvText.txt", _preview_text(title, problems))

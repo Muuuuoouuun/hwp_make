@@ -206,6 +206,8 @@ def _run_one(
             "max_pages": max_pages,
             "layout_mode": "structured",
             "native_math": True,
+            # Quality gate: any editability/rendering defect must still fail here.
+            "strict": True,
         },
     )
     elapsed = round(time.perf_counter() - started, 3)

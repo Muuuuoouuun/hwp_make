@@ -497,7 +497,8 @@ def main_test():
     ):
         for mode in ("structured", "coordinate"):
             response = client.post(
-                "/api/pdf-layout-export", json={**body, "layout_mode": mode}
+                # strict: this gate pins the validator's rejection, not the default review delivery.
+                "/api/pdf-layout-export", json={**body, "layout_mode": mode, "strict": True}
             )
             check(
                 response.status_code == 422,

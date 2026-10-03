@@ -21,6 +21,7 @@ import numpy as np
 from PIL import Image
 
 from .pdf_question_markers import QUESTION_START, shared_question_range, document_note_heading
+from .pdf_source_page_memo import source_text_dict
 
 
 def _figure_inside_table(figure: fitz.Rect, table: fitz.Rect) -> bool:
@@ -587,7 +588,7 @@ def _native_images_and_frames(page, lines, cell_regions=(), backgrounds=None):
 
     groups = []
     source_images = []
-    for block in page.get_text("dict").get("blocks", []):
+    for block in source_text_dict(page).get("blocks", []):
         if block.get("type") != 1 or not block.get("image"):
             continue
         rect = fitz.Rect(block["bbox"])
@@ -946,7 +947,11 @@ def recover_stacked_fractions(
             if retained:
                 copy = deepcopy(span)
                 copy["chars"] = retained
-                copy["text"] = "".join(c["c"] for c in retained)
+                # 2026-10-03: a recovered radical stores "\\sqrt{..}" as its
+                # glyph but "$\\sqrt{..}$" as text; rebuilding an untouched
+                # span from glyphs dropped the delimiters and leaked "$".
+                if len(retained) != len(span.get("chars", [])):
+                    copy["text"] = "".join(c["c"] for c in retained)
                 if retained[0].get("origin"):
                     copy["origin"] = retained[0]["origin"]
                 copy["bbox"] = tuple(
@@ -968,6 +973,25 @@ def recover_stacked_fractions(
     return result, equations
 
 
+def _span_anchor_origin(span: dict) -> tuple | None:
+    """Baseline of the glyph a script attaches to: the span's last character.
+
+    A span such as " >f" reports the origin of its first glyph, which PDF
+    producers may place on the subscript baseline; the attachment test must
+    compare against the base letter itself.
+    """
+    chars = [c for c in span.get("chars", []) if str(c.get("c", "")).strip()]
+    if chars and chars[-1].get("origin"):
+        return tuple(chars[-1]["origin"])
+    return span.get("origin")
+
+
+def _is_set_brace_span(span: dict) -> bool:
+    from . import pdf_layout_writer as w
+
+    return w._pdf_output_text(span.get("text", "")).strip() in {"{", "}"}
+
+
 def recover_native_scripts(lines: list[dict]) -> list[dict]:
     """Attach small mathematical script spans using their actual PDF baselines.
 
@@ -982,6 +1006,8 @@ def recover_native_scripts(lines: list[dict]) -> list[dict]:
         (li, span) for li, line in enumerate(result) for span in line.get("spans", [])
     ]
     consumed = set()
+    # id(consumed script span) -> (base span that owns it, its attachment text)
+    nested: dict[int, tuple[dict, str]] = {}
     for _, script in spans:
         value = w._pdf_output_text(script.get("text", "")).strip()
         if not re.fullmatch(r"[+−-]|[+−-]?[A-Za-z0-9]{1,4}(?:[+−-][A-Za-z0-9]{1,4})?[+−-]?", value):
@@ -995,14 +1021,17 @@ def recover_native_scripts(lines: list[dict]) -> list[dict]:
         script_box = fitz.Rect(script["bbox"])
         options = []
         for base_line, base in spans:
-            if base is script or id(base) in consumed:
+            if base is script:
+                continue
+            nested_host = nested.get(id(base))
+            if id(base) in consumed and nested_host is None:
                 continue
             base_size = float(base.get("size") or 0)
             if not base_size or size > base_size * 0.82:
                 continue
             if not w.is_hancom_eq_font(str(base.get("font", ""))):
                 continue
-            base_origin = base.get("origin")
+            base_origin = _span_anchor_origin(base)
             text = w._pdf_output_text(base.get("text", "")).strip().strip("$")
             anchor_text = re.sub(r"[_^]\{[^{}]*\}", "", text).replace("{}", "")
             if (
@@ -1020,7 +1049,7 @@ def recover_native_scripts(lines: list[dict]) -> list[dict]:
             if -base_size * 0.45 <= dx <= base_size * 0.55:
                 options.append((abs(dx), abs(dy), base_line, base, text, "right"))
             left_gap = bbox.x0 - script_box.x1
-            if (re.fullmatch(r"[A-Z][a-z]?", anchor_text)
+            if (nested_host is None and re.fullmatch(r"[A-Z][a-z]?", anchor_text)
                     and -base_size * 0.1 <= left_gap <= base_size * 0.55):
                 options.append((abs(left_gap), abs(dy), base_line, base, text, "left"))
         if not options:
@@ -1029,8 +1058,25 @@ def recover_native_scripts(lines: list[dict]) -> list[dict]:
         # preceding base when that attachment is geometrically valid. A
         # prescript is considered only when no preceding base can own it.
         _, _, _, base, text, side = min(options, key=lambda entry: (entry[5] == "left", *entry[:2]))
-        sign = "^" if float(base["origin"][1]) > float(origin[1]) else "_"
+        sign = "^" if float(_span_anchor_origin(base)[1]) > float(origin[1]) else "_"
         attachment = sign + "{" + value.replace("−", "-") + "}"
+        if id(base) in nested:
+            # 2026-10-03: a second-level script (e^{1-x²}: the "2" above "1-x")
+            # is folded into the attachment of the script it sits on; the
+            # outer base keeps a single balanced exponent.
+            host, outer_attachment = nested[id(base)]
+            host_text = w._pdf_output_text(host.get("text", "")).strip().strip("$")
+            inner_attachment = outer_attachment[:-1] + attachment + "}"
+            if outer_attachment not in host_text:
+                continue
+            host["text"] = "$" + host_text.replace(outer_attachment, inner_attachment, 1) + "$"
+            host.setdefault("source_script_spans", []).append(deepcopy(script))
+            host_bounds = fitz.Rect(host["bbox"])
+            host_bounds.x1 = max(host_bounds.x1, script_box.x1)
+            host["bbox"] = tuple(host_bounds)
+            nested[id(base)] = (host, inner_attachment)
+            consumed.add(id(script))
+            continue
         if side == "left":
             text = "{}" + attachment + (text[2:] if text.startswith("{}") else text)
         else:
@@ -1038,6 +1084,7 @@ def recover_native_scripts(lines: list[dict]) -> list[dict]:
         base["text"] = "$" + text + "$"
         base.setdefault("source_script_base_bbox", tuple(base["bbox"]))
         base.setdefault("source_script_spans", []).append(deepcopy(script))
+        nested[id(script)] = (base, attachment)
         # Use the baseline band's y range for line grouping, with the actual
         # combined horizontal extent. Source glyph coordinates stay untouched.
         bounds = fitz.Rect(base["bbox"])
@@ -1061,6 +1108,10 @@ def recover_native_scripts(lines: list[dict]) -> list[dict]:
                 and w.is_hancom_eq_font(str(span.get("font", "")))
                 and not prior.get("source_fraction_bbox")
                 and not span.get("source_fraction_bbox")
+                # 2026-10-03: "{a_n}" set braces are separate glyphs; merging
+                # one side only produced the unbalanced script "a_{n}}".
+                and not _is_set_brace_span(prior)
+                and not _is_set_brace_span(span)
                 and not any(
                     re.search(r"[Α-Ωα-ω]", w._pdf_output_text(piece.get("text", "")))
                     and not piece.get("source_script_spans")
@@ -1435,7 +1486,7 @@ def extract_native_content(
                            >= min(region.get_area(), background["region"].get_area()) * .95]
                 if not matches:
                     return None
-                blocks = [b for b in page.get_text("dict").get("blocks", []) if b.get("type") == 1]
+                blocks = [b for b in source_text_dict(page).get("blocks", []) if b.get("type") == 1]
                 numbers = sorted({number for bg in matches for number in bg["numbers"]
                                   if any(b["number"] == number and (fitz.Rect(b["bbox"]) & region).get_area() > 0 for b in blocks)})
                 data = compose_source_background(page, region, numbers)
@@ -1665,12 +1716,17 @@ def write_native_content(
     variant_policy: str,
     variant_page_limit: int | None,
     variant_overlap_ratio: float,
+    subject_area: str = "",
 ) -> dict:
-    from . import hwpx_writer_v2, math_text, pdf_layout_writer as w
+    from . import hwpx_writer, hwpx_writer_v2, math_text, pdf_layout_writer as w
 
     items, provenance = extract_native_content(pdf_path, max_pages=page_limit)
     if not items:
         raise ValueError("no native PDF body content")
+    if subject_area and not any((item.get("layout") or {}).get("source_masthead_area") for item in items):
+        # 2026-10-03: the masthead shows the area read from page 1 (text line or
+        # 교시) instead of the template's default "수학 영역".
+        items[0].setdefault("layout", {})["source_masthead_area"] = subject_area
     problems = [p for p in recognized.problems if 0 < p.page_number <= page_limit]
     grouping = annotate_question_groups(items, problems)
     if not grouping["inventory_matches"]:
@@ -1708,6 +1764,11 @@ def write_native_content(
     segments = sum(
         is_math for value in values for _, is_math in math_text.split_math_text(value)
     )
+    # 2026-10-03: tokens the brace gate demoted to text; main raises a review flag.
+    brace_demotions = sum(
+        hwpx_writer.is_brace_demoted_math(segment)
+        for value in values for segment, is_math in math_text.split_math_text(value) if is_math
+    ) if native_math else 0
     unresolved = sum(
         value.count(marker) for value in values for marker in ("□", "▢", "�")
     )
@@ -1739,12 +1800,15 @@ def write_native_content(
         "expected_page_breaks": page_limit - 1,
         "expected_column_breaks": page_limit,
         "template_key": template,
+        "subject_area": next((str((item.get("layout") or {}).get("source_masthead_area") or "")
+                              for item in items if (item.get("layout") or {}).get("source_masthead_area")), ""),
         "native_math_enabled": native_math,
         "source_math_segments": segments,
         "native_math_coverage_ratio": min(1.0, structure["native_equations"] / segments)
         if segments
         else 1.0,
         "unresolved_math_placeholders": unresolved,
+        "math_brace_demotions": brace_demotions,
         "images": len(provenance),
         "image_provenance": provenance,
         "full_page_images": 0,

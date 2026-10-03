@@ -10,6 +10,7 @@ import io
 import fitz
 from lxml import etree
 from PIL import Image
+from .pdf_source_page_memo import source_text_dict
 
 HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
@@ -24,7 +25,7 @@ def compose_source_background(page, region, numbers):
         "white",
     )
     seen = set()
-    for block in page.get_text("dict").get("blocks", []):
+    for block in source_text_dict(page).get("blocks", []):
         if block.get("type") != 1 or block.get("number") not in numbers:
             continue
         transform = fitz.Matrix(block["transform"])

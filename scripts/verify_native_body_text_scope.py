@@ -157,7 +157,8 @@ def verify(folder, *, check_api=False):
 
                 with patch.object(writer, 'write_pdf_structured_hwpx', forged_writer):
                     for mode in ('structured', 'coordinate'):
-                        response = client.post('/api/pdf-layout-export', json={**body, 'layout_mode': mode})
+                        # strict: this gate pins the validator's rejection, not the default review delivery.
+                        response = client.post('/api/pdf-layout-export', json={**body, 'layout_mode': mode, 'strict': True})
                         result = response.json()
                         assert response.status_code == 422, result
                         assert 'native_source_text_missing' in result['detail']['editability']['issues'], result

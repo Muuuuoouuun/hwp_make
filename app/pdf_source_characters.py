@@ -12,6 +12,7 @@ import io
 
 import fitz
 from PIL import Image
+from .pdf_source_page_memo import source_text_dict
 
 # A manually transcribed single-character source glyph, not a page/image OCR
 # heuristic. The exact grayscale pixels and dimensions must match. Its source
@@ -65,7 +66,7 @@ def normalize_source_span(span):
 
 def restore_bitmap_characters(page, lines):
     """Insert exactly recognized tiny original glyphs into their source lines."""
-    for image in page.get_text("dict").get("blocks", []):
+    for image in source_text_dict(page).get("blocks", []):
         if image.get("type") != 1 or not image.get("image"):
             continue
         bounds = fitz.Rect(image["bbox"])

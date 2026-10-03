@@ -668,6 +668,134 @@ def check_placeholder_classification_uses_own_geometry() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# 2026-10-03 writer math-structure pins (brace balance, radical operand, "$"
+# leaks, nested scripts, subscript baseline, set braces).  Synthetic geometry
+# recreates the KICE shapes; no real exam text is embedded.
+# ---------------------------------------------------------------------------
+
+
+def _eq_span(text: str, size: float, x0: float, baseline: float, *, width: float | None = None,
+             char_origins: list[tuple[str, float]] | None = None) -> dict[str, Any]:
+    width = width if width is not None else size * 0.55 * max(1, len(text))
+    chars = []
+    if char_origins:
+        cx = x0
+        for char, cy in char_origins:
+            chars.append({"c": char, "origin": (cx, cy), "bbox": (cx, cy - size * 0.8, cx + size * 0.55, cy + size * 0.2)})
+            cx += size * 0.55
+    else:
+        cx = x0
+        for char in text:
+            chars.append({"c": char, "origin": (cx, baseline), "bbox": (cx, baseline - size * 0.8, cx + size * 0.55, baseline + size * 0.2)})
+            cx += size * 0.55
+    return {"text": text, "size": size, "font": "HyhwpEQ", "flags": 0, "origin": (x0, baseline),
+            "bbox": (x0, baseline - size * 0.8, x0 + width, baseline + size * 0.2), "chars": chars}
+
+
+def _script_texts(lines: list[dict[str, Any]]) -> list[str]:
+    from app.pdf_native_content import recover_native_scripts
+
+    return [str(span.get("text", "")) for line in recover_native_scripts(lines) for span in line["spans"]]
+
+
+def check_token_scanner_keeps_radicand_and_splits_set_braces() -> None:
+    from app.math_text import split_math_text
+    from app.hwpx_writer import _hancom_eqn_script
+
+    parts = split_math_text("다음 식 2/3 + √4 의 값을 구하시오. (단, x = √2 이고 y = 1/3 이다.)")
+    math = [seg for seg, is_math in parts if is_math]
+    _check("유니코드 √ 뒤 피연산자는 같은 토큰", math[:2] == ["2/3 + √4", "x = √2"], repr(math))
+    _check("√4 는 sqrt {4} (자리표시자 아님)", _hancom_eqn_script("2/3 + √4") == "2/3 + sqrt {4}", repr(_hancom_eqn_script("2/3 + √4")))
+
+    parts = split_math_text("연립부등식 (mx-3)(x+m)≥0 {(x-n)(x-3)<0 을 만족시키는")
+    _check(
+        "짝 없는 '{' 에서 토큰을 자르고 중괄호는 본문으로 남긴다",
+        [(seg.strip(), m) for seg, m in parts if seg.strip()]
+        == [("연립부등식 (mx-3)", False), ("(x+m)≥0", True), ("{", False), ("(x-n)(x-3)<0", True), ("을 만족시키는", False)],
+        repr(parts),
+    )
+    parts = split_math_text("ITEM_01 과 \frac{a}{b} 와 (x+1){x^2+1}")
+    _check("균형 잡힌 중괄호는 자르지 않는다", all(seg.count("{") == seg.count("}") for seg, m in parts if m), repr(parts))
+
+
+def check_eqn_gate_balances_braces_and_strips_dollars() -> None:
+    from app.hwpx_writer import _hancom_eqn_script, hancom_eqn_script_lenient, hancom_eqn_script_parts
+
+    _check("뒤쪽 짝 없는 '}' 는 본문으로 돌려준다", hancom_eqn_script_parts("$a_{n}}$") == ("", "a_{n}", "}"), repr(hancom_eqn_script_parts("$a_{n}}$")))
+    _check("앞쪽 짝 없는 '{' 는 본문으로 돌려준다", hancom_eqn_script_parts("{{a}") == ("{", "a", ""), repr(hancom_eqn_script_parts("{{a}")))
+    _check("가운데 불균형은 수식으로 내보내지 않는다(텍스트 강등)", hancom_eqn_script_parts("a}+{b") is None)
+    _check("강등 토큰도 관대한 변환은 가능(원문 줄 대조용)", hancom_eqn_script_lenient("P(x)=(x+a)(x-a){x^{2}-(") == "P(x)=(x+a)(x-a){x^{2}-(", repr(hancom_eqn_script_lenient("P(x)=(x+a)(x-a){x^{2}-(")))
+    script = _hancom_eqn_script("lim($\\sqrt{a_{n}^{2}+n}$$-a_{n}$)")
+    _check("함수 호출 토큰 안의 '$' 는 스크립트에 남지 않는다", script == "lim(sqrt {a_{n}^{2}+n}-a_{n})", repr(script))
+    _check("'$ $' 는 수식이 아니다", _hancom_eqn_script("$ $") is None)
+    # HWP 원본의 한컴 수식이 줄 단위로 나뉘면 left{ … right} 의 한쪽만 들어온다. 구분자 중괄호는 균형 검사 대상이 아니다.
+    half = "U= left{ x  `|`-5  leq x  leq 5,`` x"
+    _check("한컴 left{ 구분자만 있는 조각은 그대로 수식", hancom_eqn_script_parts("$" + half + "$") == ("", half, ""), repr(hancom_eqn_script_parts("$" + half + "$")))
+    _check("한컴 right} 구분자만 있는 조각은 그대로 수식", hancom_eqn_script_parts("$it right}$") == ("", "it right}", ""), repr(hancom_eqn_script_parts("$it right}$")))
+
+
+def check_subscript_uses_base_glyph_baseline() -> None:
+    # " >f" reports the origin of its leading space on the subscript baseline;
+    # the final glyph "f" sits on the body baseline and must own the "c".
+    line = {"spans": [
+        _eq_span("f", 11.0, 474.9, 792.3),
+        _eq_span("b", 7.5, 480.9, 794.8),
+        _eq_span(" >f", 11.0, 484.9, 794.8, width=20.3,
+                 char_origins=[(" ", 794.8), (">", 791.8), ("f", 792.3)]),
+        _eq_span("c", 7.5, 505.3, 794.8),
+    ]}
+    texts = _script_texts([line])
+    _check("f_b > f_c 의 둘째 아래첨자가 평문으로 남지 않는다", any(t.endswith("f_{c}$") for t in texts), repr(texts))
+
+
+def check_nested_superscript_is_folded() -> None:
+    # Real KICE glyph extents: the exponent abuts its base, the "2" abuts "1-x".
+    line = {"spans": [
+        _eq_span("=-x+e", 11.0, 504.7, 223.3, width=46.0),
+        _eq_span("1-x", 7.5, 551.3, 218.3, width=16.5),
+        _eq_span("2", 5.1, 568.3, 214.8, width=3.0),
+    ]}
+    texts = _script_texts([line])
+    _check("e^{1-x²} 의 둘째 단계 지수가 유지된다", "$=-x+e^{1-x^{2}}$" in texts, repr(texts))
+
+
+def check_set_braces_stay_outside_formula() -> None:
+    line = {"spans": [
+        _eq_span("{", 12.2, 663.7, 241.9),
+        _eq_span("a", 11.0, 669.0, 240.4),
+        _eq_span("n", 7.5, 675.2, 243.5),
+        _eq_span("}", 12.2, 679.7, 241.9),
+    ]}
+    texts = _script_texts([line])
+    _check("{a_n} 의 중괄호는 수식 밖 본문 글리프", texts == ["{", "$a_{n}$", "}"], repr(texts))
+
+
+def check_writer_output_has_balanced_scripts_and_no_dollar() -> None:
+    import re
+    import tempfile
+    import zipfile
+    from app import hwpx_writer_v2
+
+    problems = [{
+        "number": "1",
+        "stem": "수열 {$a_{n}}$에 대하여 n→∞lim($\\sqrt{a_{n}^{2}+n}$$-a_{n}$)$의 값은? (x+1){$x^{2}+(a+1)x+b}$로 인수분해",
+        "choices": ["① 1", "② 2"],
+    }]
+    with tempfile.TemporaryDirectory() as raw:
+        out = Path(raw) / "pin.hwpx"
+        hwpx_writer_v2.write_hwpx(out, "핀", problems, "basic", native_math=True)
+        with zipfile.ZipFile(out) as archive:
+            xml = archive.read("Contents/section0.xml").decode("utf-8", "replace")
+    scripts = re.findall(r"<hp:script>(.*?)</hp:script>", xml, re.S)
+    texts = re.findall(r"<hp:t(?:\s[^>]*)?>([^<]*)</hp:t>", xml)
+    _check("출력 수식의 중괄호가 모두 균형", scripts and all(s.count("{") == s.count("}") for s in scripts), repr(scripts))
+    _check("출력 본문·수식에 '$' 유출 없음", not any("$" in t for t in texts) and not any("$" in s for s in scripts), repr([t for t in texts if "$" in t]))
+    _check("수열 {a_n} 의 '}' 가 본문에 남는다", any(t.startswith("}") for t in texts), repr(texts[:8]))
+    _check("a_{n} 수식이 있다", "a_{n}" in scripts, repr(scripts[:4]))
+
+
+
 def main() -> int:
     print("PDF 수식 구조 복원 회귀 핀")
     check_fraction_bar_evidence_rule()
@@ -683,6 +811,12 @@ def main() -> int:
     check_nested_bar_without_radical_evidence_is_preserved()
     check_fallback_never_drops_restored_structure()
     check_placeholder_classification_uses_own_geometry()
+    check_token_scanner_keeps_radicand_and_splits_set_braces()
+    check_eqn_gate_balances_braces_and_strips_dollars()
+    check_subscript_uses_base_glyph_baseline()
+    check_nested_superscript_is_folded()
+    check_set_braces_stay_outside_formula()
+    check_writer_output_has_balanced_scripts_and_no_dollar()
     if FAILURES:
         print(f"\nMATH_STRUCTURE_REPAIRS_FAIL — {len(FAILURES)}건")
         for failure in FAILURES:

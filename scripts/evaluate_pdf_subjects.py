@@ -66,7 +66,8 @@ def main():
         try:
             result = api.export_pdf_layout(api.PdfLayoutExportPayload(
                 filename=source.name, data_base64=base64.b64encode(data).decode(),
-                layout_mode='structured', math_ai_recognition=False, variant_policy='all'))
+                # strict keeps this evaluation's rejection-based ok/issues columns.
+                layout_mode='structured', math_ai_recognition=False, variant_policy='all', strict=True))
             row['engine_seconds'] = time.perf_counter() - start
             dump(current / 'result.json', result)
             release = out / 'release'

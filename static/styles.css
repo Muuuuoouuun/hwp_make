@@ -956,6 +956,13 @@ body[data-workspace-stage="input"] .simple-converter-card { border: 0; box-shado
 .simple-history-quality[data-tone="warning"] { color: #885b13; }
 .simple-history-list .retry-inline { justify-self: start; min-height: 36px; margin-top: 8px; padding: 6px 12px; color: #315acb; border-color: #d5dbe8; background: #fff; font-size: 12px; }
 .simple-conversion-status { overflow-wrap: anywhere; }
+.simple-review-alert { flex-basis: 100%; width: 100%; padding: 12px 14px; color: #6f4a0f; text-align: left; font-size: 13px; line-height: 1.6; border: 1px solid #f0d49a; border-radius: 8px; background: #fff8e8; }
+.simple-review-alert strong { display: block; font-size: 14px; }
+.simple-review-alert p { margin: 4px 0 0; }
+.simple-review-alert details { margin-top: 6px; }
+.simple-review-alert summary { cursor: pointer; color: #885b13; font-weight: 650; }
+.simple-review-alert summary:focus-visible { outline: 2px solid #885b13; outline-offset: 2px; border-radius: 4px; }
+.simple-review-alert ul { margin: 6px 0 0; padding-left: 18px; }
 .simple-review-details { flex-basis: 100%; width: 100%; color: #4d5a71; text-align: left; font-size: 12px; }
 .simple-review-details summary { padding: 8px 2px; cursor: pointer; color: #315acb; font-weight: 650; }
 .simple-review-details summary:focus-visible { outline: 2px solid #315acb; outline-offset: 2px; border-radius: 4px; }

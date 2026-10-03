@@ -11,7 +11,9 @@ HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 def source_line_values(records, *, mixed=False):
     """Canonical complete source lines, retaining mathematical grouping."""
     from .pdf_layout_writer import _pdf_output_text, is_hancom_eq_font
-    from .hwpx_writer import _hancom_eqn_script
+    # 2026-10-03: the balance gate in _hancom_eqn_script demotes a run with a
+    # mid-run set brace; the canonical line must still reproduce it.
+    from .hwpx_writer import hancom_eqn_script_lenient as _hancom_eqn_script
 
     if not mixed:
         return [re.sub(r"\s+", "", _pdf_output_text(r.get("text", ""))) for r in records]

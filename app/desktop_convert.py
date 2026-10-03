@@ -66,6 +66,9 @@ def convert(source: Path, destination: Path, job: Path) -> dict:
                 raise ValueError("생성 문서의 구조 검사를 통과하지 못했습니다.")
             count = result["stats"].get("output_problem_count")
             pages = result["scope"]["selected_page_count"]
+            # Per-question review replaces the old whole-document rejection;
+            # notices[0] carries its teacher message, shown in the first lines.
+            review = result.get("review") or {}
             warnings.extend(result.get("notices", []))
         else:
             imported = main.import_file(main.ImportPayload(
@@ -75,11 +78,13 @@ def convert(source: Path, destination: Path, job: Path) -> dict:
             ids = list(dict.fromkeys(p["id"] for p in problems))
             if not ids:
                 raise ValueError("변환할 내용을 찾지 못했습니다. 텍스트가 포함된 파일을 확인해 주세요.")
+            # 기본 변환 전용 양식: 원번호·원문자 선지 유지, 정답은 끝 정답표로만.
             response = main.export(main.ExportPayload(
-                ids=ids, title=source.stem, format=fmt, native_math=True,
+                ids=ids, title=source.stem, format=fmt, template_key="simple", native_math=True,
                 workspace="basic", numbering_mode="preserve"))
             output = Path(response.path)
             count, pages = len(ids), None
+            review = None
             warnings.extend(imported.get("notices", []))
             warnings.append("문항 내용과 원번호를 기준으로 다시 구성한 문서입니다. 원본 페이지 배치와 다를 수 있습니다.")
         with zipfile.ZipFile(output) as package:
@@ -94,6 +99,9 @@ def convert(source: Path, destination: Path, job: Path) -> dict:
         os.replace(temporary_output, destination)
         return {"ok": True, "output": str(destination), "source": str(source),
                 "pages": pages, "problems": count,
+                "review": ({"ok": bool(review.get("ok", True)), "flag_count": int(review.get("flag_count") or 0),
+                            "questions": [q.get("label") for q in review.get("flagged_questions") or []]}
+                           if review is not None else None),
                 "warnings": list(dict.fromkeys(str(x) for x in warnings))}
     finally:
         if temporary_output:
@@ -111,7 +119,15 @@ def worker(spec_path: Path) -> int:
         detail = getattr(exc, "detail", None)
         if isinstance(detail, dict):
             detail = detail.get("message")
-        result = {"ok": False, "error": str(detail or exc or "변환하지 못했습니다.")}
+        if not detail:
+            # 엔진·파일 시스템 원문 예외(영문·절대경로)는 로그로만 보내고 교사에겐 한국어 안내만 보인다.
+            from . import user_errors
+
+            user_errors.log_failure("desktop-convert", exc)
+            code = "save_failed" if isinstance(exc, PermissionError) else "conversion_failed"
+            detail = user_errors.teacher_message(exc) if isinstance(exc, ValueError) else None
+            detail = detail or user_errors.detail(code)["message"]
+        result = {"ok": False, "error": str(detail)}
     result_path = spec_path.parent / "result.json"
     result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return 0 if result["ok"] else 1

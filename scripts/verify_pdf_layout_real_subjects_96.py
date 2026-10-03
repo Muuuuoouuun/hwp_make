@@ -100,6 +100,8 @@ def _run_one(
             "data_base64": base64.b64encode(path.read_bytes()).decode("ascii"),
             "layout_mode": "structured",
             "native_math": True,
+            # Quality gate: any editability/rendering defect must still fail here.
+            "strict": True,
         },
     )
     elapsed = round(time.perf_counter() - started, 3)

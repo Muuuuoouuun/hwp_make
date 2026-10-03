@@ -42,9 +42,22 @@ assert(/exportPdfLayoutFiles\(\{\s*layoutMode = "coordinate"/.test(js), "studio 
 assert(js.includes('layout_mode: layoutMode'), "layout_mode is not parameterized in the export payload");
 
 // ③ 스튜디오 상태 보호: basket 비파괴 + 폼 상태 오버라이드 + 파일 선택 복원 + UI 부수효과 차단.
-assert(js.includes("await exportSelected(state.recognizedProblems.map"), "basic conversion must reuse recognized source IDs without importing or changing basket");
-assert(js.includes('templateKey: "basic"'), "simple conversion must pass basic options rather than read studio form state");
+// 2026-10-03: 비 PDF 변환과 PDF 폴백이 같은 exportRecognized 를 쓰고 서식은 상수 하나로 바꾼다.
+assert(js.includes("exportSelected(state.recognizedProblems.map"), "basic conversion must reuse recognized source IDs without importing or changing basket");
+assert(/^const SIMPLE_EXPORT_TEMPLATE = "[a-z_]+";$/m.test(js), "simple export template constant missing");
+assert(js.includes("templateKey: SIMPLE_EXPORT_TEMPLATE"), "simple conversion must pass basic options rather than read studio form state");
+// PDF 원본 배치 복원이 4xx면 인식 문항으로 재구성형 HWPX를 만든다(취소 제외, 같은 파일만).
+assert(js.includes("simpleLayoutFallbackEligible(state.simpleLayoutError)"), "simple PDF fallback to recognized problems missing");
+assert(js.includes("state.recognizedFile === file && state.recognizedProblems.length"), "PDF fallback must use the same file's recognized problems");
 assert(js.includes("kind: EXT_KINDS[simpleFileExtension(file)]"), "recognition must classify the selected file independently of studio controls");
+// 2026-10-03 S단계(02 채택안 #9): PDF 는 선택 시 /api/import 를 돌리지 않고 바로 /api/pdf-layout-export 로 변환한다.
+// 인식은 (a) 4xx 뒤 폴백 때 inline 으로, (b) '문항 편집' 진입 때만 실행한다. 비PDF 는 선택 시 인식 그대로.
+assert(/if \(isPdfFile\(file\)\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*state\.workspaceStage = "ready";/.test(js), "PDF selection must become ready without recognition");
+assert(js.includes("recognizeSimpleFile(file, { inline: true })"), "PDF fallback must recognize on demand after the 4xx");
+assert(js.includes("isPdfFile(state.selectedFile) && await recognizeSimpleFile(state.selectedFile)"), "editor entry must recognize a PDF on demand");
+assert(js.includes("if (inline) state.importController = controller;"), "inline recognition must be cancellable by the conversion cancel button");
+assert(!js.includes('"기본 변환"'), "the dead-end basic-conversion label is gone; PDF converts directly");
+assert(js.includes("const convertible = recognized || pdfConvertible;"), "convert button must enable for a valid PDF before recognition");
 assert(/if \(quick && preserveBasket\)/.test(js), "preserveBasket fast path missing in handleImportedProblems");
 assert(/if \(!preserveBasket\) \{\s*\n\s*addManyToBasket/.test(js), "partial-failure path may still clobber the basket");
 assert(!/els\.exportTemplate\.value\s*=\s*"basic"/.test(js), "simple conversion still mutates the studio template select");

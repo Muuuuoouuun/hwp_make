@@ -7,6 +7,7 @@ from typing import Any
 
 DEFAULT_EXPORT_TITLE = "문항 모음"
 ANSWER_SHEET_TITLE = "정답 및 해설"
+ANSWER_KEY_TITLE = "정답"
 CIRCLED_NUMBERS = ("①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨")
 
 
@@ -33,6 +34,10 @@ class ExamTemplate:
     compact: bool = False
     columns: int = 1
     native_math_default: bool = False
+    # 정답이 있는 입력이면 문서 끝 새 쪽에 정답표만 붙인다(해설·문항별 정답 줄 없이).
+    answer_key_appendix: bool = False
+    # 원번호를 문항 첫 줄(또는 발문 줄)에 한 번만 붙이고 'N. 파일명 #N' 제목 줄을 쓰지 않는다.
+    source_number_line: bool = False
 
     def export_option(self) -> dict[str, str | bool | int]:
         data = asdict(self)
@@ -45,6 +50,19 @@ TEMPLATES: tuple[ExamTemplate, ...] = (
         key="basic",
         label="기본 문항 모음",
         description="정답과 해설을 함께 담는 기본 내보내기 양식",
+    ),
+    # 간단 변환·Windows 앱·웹 체험판의 기본 변환 양식. 목록에서 basic 뒤에 두어
+    # 스튜디오 양식 선택의 첫 항목(기본값)은 그대로 basic 이 되게 한다.
+    ExamTemplate(
+        key="simple",
+        label="기본 변환",
+        description="원본 번호와 원문자 선지를 그대로 두고, 정답은 문서 끝 정답표로만 모으는 양식",
+        include_answers=False,
+        include_explanations=False,
+        circled_choices=True,
+        native_math_default=True,
+        answer_key_appendix=True,
+        source_number_line=True,
     ),
     ExamTemplate(
         key="school_exam",
@@ -258,6 +276,94 @@ def quick_answer_lines(
         label = problem.get("number") or str(index)
         entries.append(f"{label}. {format_answer(problem, template) or '－'}")
     return ["    ".join(entries[i : i + per_line]) for i in range(0, len(entries), per_line)]
+
+
+_PASSAGE_NUMBER_RE = re.compile(r"^\s*\[\s*\d{1,3}\s*[~∼～\-–]\s*\d{1,3}\s*\]")
+_PASSAGE_LABEL_ONLY_RE = re.compile(r"^\s*\[\s*\d{1,3}\s*[~∼～\-–]\s*\d{1,3}\s*\]\s*$")
+# '3.5는' 같은 소수는 번호로 보지 않는다.
+_STEM_NUMBER_RE = re.compile(r"^\s*(?:문제\s*)?(\d{1,3})\s*[\.\)](?!\d)\s*")
+_QUESTION_PROMPT_RE = re.compile(r"[?？]\s*(?:\[\s*\d+(?:\.\d+)?\s*점\s*\])?\s*$")
+_NUMBER_SEARCH_LINES = 3
+
+
+def numbered_stem_paragraphs(
+    stem_lines: list[str],
+    label: str,
+    *,
+    numbered: bool = True,
+    prepared: bool = False,
+) -> list[tuple[str, str]]:
+    """원번호를 한 번만 붙인 (문단, 'heading'|'body') 목록. source_number_line 양식 전용.
+
+    - 앞 몇 줄 안에 같은 번호로 시작하는 줄이 있으면 그 줄을 번호 줄로 쓴다
+      (앞에 붙은 문서 제목 등은 본문으로 먼저 둔다).
+    - 번호가 없는 문항이 'N.' 으로 시작하면 그 원번호를 그대로 쓴다.
+    - '[1~3] 다음 글을…' 처럼 묶음 안내로 시작하면 지문 뒤 발문 줄에 번호를 붙인다.
+    - 지문 묶음 항목 자체(번호가 '[1~3]')는 번호를 붙이지 않고 첫 줄을 제목으로 둔다.
+    """
+    lines = list(stem_lines)
+    label = str(label)
+    if _PASSAGE_LABEL_ONLY_RE.match(label):
+        # 지문 묶음 항목('[1~3]')은 안내 줄이 이미 범위를 담으므로 번호를 붙이지 않는다
+        # (v2 writer 의 지문 블록 처리와 같게, DOCX 의 '[1~3]. [1~3] …' 중복 방지).
+        if not lines:
+            return [(label, "heading")]
+        return [(lines[0], "heading")] + [(text, "body") for text in lines[1:]]
+    if not lines:
+        return [(f"{label}.", "heading")]
+    if not prepared:
+        for position, line in enumerate(lines[:_NUMBER_SEARCH_LINES]):
+            match = _STEM_NUMBER_RE.match(line)
+            if match and (match.group(1) == label or (not numbered and position == 0)):
+                rest = line[match.end():].strip()
+                return (
+                    [(text, "body") for text in lines[:position]]
+                    + [(f"{match.group(1)}. {rest}".rstrip(), "heading")]
+                    + [(text, "body") for text in lines[position + 1:]]
+                )
+    if _PASSAGE_NUMBER_RE.match(lines[0]):
+        for position in range(1, len(lines)):
+            if _QUESTION_PROMPT_RE.search(lines[position]):
+                return (
+                    [(text, "body") for text in lines[:position]]
+                    + [(f"{label}. {lines[position].strip()}", "heading")]
+                    + [(text, "body") for text in lines[position + 1:]]
+                )
+    return [(f"{label}. {lines[0].strip()}".rstrip(), "heading")] + [(text, "body") for text in lines[1:]]
+
+
+def wants_answer_key(
+    problems: list[dict[str, Any]],
+    template: ExamTemplate,
+    include_answer_sheet: bool,
+    override: bool | None = None,
+) -> bool:
+    """끝 정답표를 붙일지. 정답·해설 전체 정답지를 이미 붙이면 중복하지 않는다."""
+    enabled = template.answer_key_appendix if override is None else bool(override)
+    if not enabled or include_answer_sheet:
+        return False
+    return any(str(problem.get("answer") or "").strip() for problem in problems)
+
+
+def answer_key_rows(
+    problems: list[dict[str, Any]],
+    template: ExamTemplate,
+    per_row: int = 10,
+) -> list[list[str]]:
+    """정답표 행: ['번호', 1, 2, …], ['정답', ③, ⑤, …] 를 per_row 문항씩 반복한다."""
+    entries = []
+    for index, problem in enumerate(problems, start=1):
+        label = str(problem.get("number") or index)
+        if _PASSAGE_NUMBER_RE.match(label):
+            continue  # 지문 묶음 항목은 정답이 없다.
+        entries.append((label, format_answer(problem, template) or "－"))
+    rows: list[list[str]] = []
+    for start in range(0, len(entries), per_row):
+        chunk = entries[start:start + per_row]
+        padding = [""] * (per_row - len(chunk)) if start else []
+        rows.append(["번호", *[label for label, _ in chunk], *padding])
+        rows.append(["정답", *[answer for _, answer in chunk], *padding])
+    return rows
 
 
 def explanation_entries(

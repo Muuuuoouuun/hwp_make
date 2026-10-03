@@ -35,6 +35,7 @@ def render_preview(
     max_pages: int = MAX_PREVIEW_PAGES,
     include_answer_sheet: bool = False,
     native_math: bool = False,
+    answer_key_appendix: bool | None = None,
 ) -> dict[str, Any]:
     if rhwp is None:
         raise RuntimeError("미리보기 엔진(rhwp-python)이 설치되어 있지 않습니다.")
@@ -48,6 +49,7 @@ def render_preview(
             template_key=template_key,
             include_answer_sheet=include_answer_sheet,
             native_math=native_math,
+            answer_key_appendix=answer_key_appendix,
         )
         # Read the generated file: source layout metadata can override the
         # template's column count, so the template alone is not authoritative.
