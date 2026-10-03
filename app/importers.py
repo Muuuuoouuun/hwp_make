@@ -499,6 +499,13 @@ def _pdf_answer_key_pages(payload: bytes, problems: list[Any]) -> tuple[int | No
     first_question_page = min(question_pages)
     for page_number in range(first_question_page + 1, len(texts) + 1):
         if _pdf_page_answer_key_start(texts[page_number - 1]):
+            # 앞 쪽들의 어떤 번호보다 큰 새 문항이 인식된 쪽은 정답 쪽이 아니라 문항 쪽이다.
+            earlier = [int(prob.number) for prob in problems if str(prob.number or "").isdigit()
+                       and int(prob.page_number or 0) < page_number]
+            here = [int(prob.number) for prob in problems if str(prob.number or "").isdigit()
+                    and int(prob.page_number or 0) == page_number]
+            if earlier and here and min(here) > max(earlier):
+                continue
             return page_number, _parse_answer_key(texts[page_number - 1:])
     return None, {}
 
@@ -2027,6 +2034,28 @@ def _docx_cell_text(cell: Any) -> str:
 ANSWER_KEY_PAIR_RE = re.compile(
     rf"(?<![\d.])(\d{{1,3}})\s*(?:번\s*)?(?:[.):]\s*)?(?:정답\s*[:：]?\s*)?([{CIRCLED_CHOICE_MARKERS[:9]}])"
 )
+# 숫자 선지 목록('① 1 ② 2 …'): 원문자로 시작하는 '원문자-숫자' 묶음. 앞에 번호가 없으면 정답 짝이 아니다
+# ('1 ③ 2 ① 3 ④' 빠른 정답은 '③ 2 ① 3' 앞에 번호 '1' 이 있어 그대로 읽는다).
+_NUMERIC_CHOICE_RUN_RE = re.compile(
+    rf"[{CIRCLED_CHOICE_MARKERS}]\s*\d{{1,3}}(?:\s+[{CIRCLED_CHOICE_MARKERS}]\s*\d{{1,3}})+"
+)
+
+
+def _answer_key_pairs(text: str) -> list[tuple[str, str]]:
+    """ANSWER_KEY_PAIR_RE 짝 중 숫자 선지 목록 안에서 시작하는 짝을 뺀다."""
+    text = text or ""
+    blocked: list[tuple[int, int]] = []
+    for run in _NUMERIC_CHOICE_RUN_RE.finditer(text):
+        index = run.start() - 1
+        while index >= 0 and text[index].isspace():
+            index -= 1
+        if index < 0 or not text[index].isdigit():
+            blocked.append(run.span())
+    return [
+        (match.group(1), match.group(2))
+        for match in ANSWER_KEY_PAIR_RE.finditer(text)
+        if not any(start <= match.start() < end for start, end in blocked)
+    ]
 
 
 # '[정답표] 1. ③ …' 처럼 대괄호 정답표 머리로 시작하는 묶음.
@@ -2038,26 +2067,43 @@ ANSWER_KEY_TITLE_RE = re.compile(r"(?:정답\s*(?:및|과)\s*해설|빠른\s*정
 def _answer_key_start(text: str, following: list[str] | tuple[str, ...] = ()) -> bool:
     """문서 끝 정답표·해설 묶음의 시작인가. 문항마다 붙은 '[정답] ③' 줄은 제외한다.
 
+    머리글('빠른 정답', '정답 및 해설', '정답표', '[정답표]')로 시작할 때만 인정한다.
+    문항마다 '[정답] ③' 이 붙은 묶음은 '[정답]' 개수와 상관없이 문항이다.
     following 은 이 문단 뒤의 문단들이다. 제목이 앞에 붙은 머리('… 정답 및 해설')는
-    오인을 막기 위해 문항 번호로 시작하지 않는 짧은 한 줄이고, 뒤따르는 내용에
-    '번호-원문자 정답' 짝이 2개 이상일 때만 인정한다.
+    오인을 막기 위해 문항 번호로 시작하지 않는 짧은 한 줄이고, 바로 뒤가 선지 줄이 아니며,
+    뒤따르는 내용에 '번호-원문자 정답' 짝이 2개 이상일 때만 인정한다.
     """
     t = (text or "").strip()
-    if t.startswith("[정답]") and t.count("[정답]") < 3:
+    if not t:
         return False
-    if _looks_like_answer_section(t) or ANSWER_KEY_LEAD_RE.match(t):
+    lines = [line.strip() for line in t.splitlines() if line.strip()]
+    first = lines[0]
+    # 문항 번호로 시작하는 묶음은 인라인 '[정답]' 이 여러 개여도 정답 섹션이 아니다(개수 규칙 제거).
+    if QUESTION_LINE_RE.match(first) or QUESTION_TRAILER_RE.match(first):
+        return False
+    if _ANSWER_SECTION_HEADER_RE.match(first) or ANSWER_KEY_LEAD_RE.match(first):
         return True
-    first = t.splitlines()[0].strip() if t else ""
-    if (len(first) <= 60 and "?" not in first and not QUESTION_LINE_RE.match(first)
-            and ANSWER_KEY_TITLE_RE.search(first)):
-        return len(_parse_answer_key([t, *following])) >= 2
+    if (len(first) <= 60 and "?" not in first and ANSWER_KEY_TITLE_RE.search(first)):
+        rest = [*lines[1:], *(str(block or "").strip() for block in following)]
+        rest = [line for line in rest if line]
+        if rest and _CHOICE_LINE_START_RE.match(rest[0]):
+            return False  # '철수가 만든 정답표' 다음 선지 줄: 발문의 일부다.
+        # 평가원 정답표처럼 번호와 원문자가 다른 줄에 있어도 짝을 읽도록 줄을 이어 넘긴다.
+        return len(_parse_answer_key([chr(10).join(rest)])) >= 2
     return False
 
 
 def _pdf_page_answer_key_start(page_text: str) -> bool:
-    """PDF 한 쪽이 정답·해설 쪽으로 시작하는가(머리글 줄을 고려해 앞 세 줄까지 본다)."""
+    """PDF 한 쪽이 정답·해설 쪽으로 시작하는가(머리글 줄을 고려해 앞 세 줄 각각을 머리 후보로 본다)."""
     lines = [line.strip() for line in (page_text or "").splitlines() if line.strip()]
-    return any(_answer_key_start(chr(10).join(lines[index:])) for index in range(min(3, len(lines))))
+    for index in range(min(3, len(lines))):
+        line = lines[index]
+        if QUESTION_LINE_RE.match(line) or QUESTION_TRAILER_RE.match(line):
+            return False  # 문항이 먼저 나오는 쪽은 문항 쪽이다.
+        # 쪽 전체가 아니라 그 줄과 뒤 내용으로 판단한다('[정답] ③' 개수 규칙은 쓰지 않는다).
+        if _answer_key_start(line, lines[index + 1:]):
+            return True
+    return False
 
 
 def _parse_answer_key(texts: list[str], tables: list[list[list[str]]] = ()) -> dict[str, str]:
@@ -2072,7 +2118,7 @@ def _parse_answer_key(texts: list[str], tables: list[list[list[str]]] = ()) -> d
                         answers.setdefault(str(int(str(number).strip())), value)
         texts = [*texts, *(" ".join(str(cell) for cell in row) for row in table)]
     for text in texts:
-        for number, value in ANSWER_KEY_PAIR_RE.findall(text or ""):
+        for number, value in _answer_key_pairs(text):
             answers.setdefault(str(int(number)), value)
     return answers
 
@@ -2662,6 +2708,9 @@ def _hwp_iter_records(stream: bytes):
 
 
 _ANSWER_SECTION_RE = re.compile(r"^\s*(?:\[정답\]|빠른\s*정답|정답\s*(?:및|과)\s*해설|정답\s*표)")
+# 정답 섹션 '시작' 판단용 머리글('[정답]' 인라인 줄은 문항에 붙은 것이므로 뺀다).
+_ANSWER_SECTION_HEADER_RE = re.compile(r"^\s*(?:빠른\s*정답|정답\s*(?:및|과)\s*해설|정답\s*표)")
+_CHOICE_LINE_START_RE = re.compile(rf"^\s*[{CIRCLED_CHOICE_MARKERS}]")
 
 
 def _looks_like_answer_section(text: str) -> bool:

@@ -30,7 +30,7 @@ from PIL import Image, ImageFilter, ImageFont
 
 from . import math_text, pdf_math_ai
 from .hancom_pua_map import is_hancom_eq_font
-from .hwpx_writer import _equation_reserved_width, _equation_size, _hancom_eqn_script
+from .hwpx_writer import _equation_reserved_width, _equation_size, _hancom_eqn_script, hancom_eqn_script_parts
 
 _VENDOR = Path(__file__).resolve().parent / "_vendor"
 if str(_VENDOR) not in sys.path:
@@ -1332,13 +1332,19 @@ def _append_pdf_runs(
             if is_math:
                 stats["source_math_segments"] += 1
             if is_math and native_math and equation_counter is not None:
-                script = _hancom_eqn_script(segment)
-                if script:
+                parts = hancom_eqn_script_parts(segment)
+                if parts:
+                    # 수식 밖으로 돌려준 짝 없는 '{'·'}' 는 본문 런으로 남긴다(조용히 사라지지 않게).
+                    leading, script, trailing = parts
+                    if leading:
+                        _append_pdf_text_run(paragraph, _pdf_output_text(leading), char_pr_id_ref)
                     equation_counter[0] += 1
                     stats["native_equations"] += 1
                     run = _append_xml_child(paragraph, _q("run"))
                     run.set("charPrIDRef", str(char_pr_id_ref))
                     _append_pdf_equation(run, script, equation_counter[0])
+                    if trailing:
+                        _append_pdf_text_run(paragraph, _pdf_output_text(trailing), char_pr_id_ref)
                     continue
             output_segment = _pdf_output_text(segment)
             if output_segment == "":
@@ -6697,8 +6703,60 @@ def _merge_same_row_flow_lines(page: fitz.Page, items: list[dict[str, Any]]) -> 
             spans.extend(line.get("spans", []))
             rects.append(_item_bbox(line))
         spans.sort(key=lambda span: (fitz.Rect(span["bbox"]).x0, fitz.Rect(span["bbox"]).y0))
-        merged.append({"type": "line", "bbox": _union_rect(rects), "spans": spans})
+        merged.append({"type": "line", "bbox": _union_rect(rects), "spans": _join_adjacent_recovered_math_spans(spans)})
     return merged + others
+
+
+def _join_adjacent_recovered_math_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Join touching '$…$' spans of a formula that the radical split into two source lines.
+
+    2026-10-03 R1: "√(n⁴+4n)-√(n⁴+n)" arrived as two same-row lines and became two
+    equations; adjacent recovered (radical/script) equation spans are one formula.
+    """
+    def explicit(span: dict[str, Any]) -> bool:
+        text = str(span.get("text") or "").strip()
+        return len(text) > 2 and text.startswith("$") and text.endswith("$") and is_hancom_eq_font(str(span.get("font", "")))
+
+    def operator(span: dict[str, Any]) -> str:
+        text = _pdf_output_text(str(span.get("text") or "")).strip()
+        return text if text in {"+", "-", "−"} and is_hancom_eq_font(str(span.get("font", ""))) else ""
+
+    def touching(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        size = max(float(left.get("size") or 0), float(right.get("size") or 0))
+        gap = fitz.Rect(right["bbox"]).x0 - fitz.Rect(left["bbox"]).x1
+        return bool(size and left.get("origin") and right.get("origin") and -1 <= gap <= size * 1.2
+                    and abs(left["origin"][1] - right["origin"][1]) <= size * 0.15)
+
+    def join(pieces: list[dict[str, Any]], middle: str = "") -> dict[str, Any]:
+        first, last = pieces[0], pieces[-1]
+        joined = deepcopy(first)
+        joined["text"] = "$" + str(first["text"]).strip().strip("$") + middle + str(last["text"]).strip().strip("$") + "$"
+        joined["bbox"] = tuple(_union_rect([fitz.Rect(piece["bbox"]) for piece in pieces]))
+        joined["chars"] = [char for piece in pieces for char in piece.get("chars", [])]
+        for key in ("source_radical_chars", "source_script_spans", "source_sum_parts"):
+            if any(piece.get(key) for piece in pieces):
+                joined[key] = [item for piece in pieces for item in piece.get(key, [])]
+        return joined
+
+    def recovered(span: dict[str, Any]) -> bool:
+        return bool(span.get("source_radical_chars") or span.get("source_script_spans"))
+
+    result: list[dict[str, Any]] = []
+    for span in spans:
+        prior = result[-1] if result else None
+        if (prior is not None and explicit(prior) and explicit(span)
+                and (recovered(prior) or recovered(span)) and touching(prior, span)):
+            result[-1] = join([prior, span])
+            continue
+        # 근호 두 개 사이의 '+'·'−' 연산자 한 글자도 같은 수식이다(√a−√b).
+        if (len(result) >= 2 and explicit(span) and explicit(result[-2]) and operator(result[-1])
+                and (result[-2].get("source_radical_chars") or span.get("source_radical_chars"))
+                and touching(result[-2], result[-1]) and touching(result[-1], span)):
+            middle = "-" if operator(result[-1]) in {"-", "−"} else "+"
+            result[-2:] = [join([result[-2], result[-1], span], middle)]
+            continue
+        result.append(span)
+    return result
 
 
 def _flow_gap_height_pt(raw_gap_pt: float, *, preserve: bool = False) -> float:

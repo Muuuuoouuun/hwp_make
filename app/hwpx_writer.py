@@ -1236,10 +1236,16 @@ def _text_runs(
     runs: list[str] = []
     for segment, is_math in split_math_text(text):
         if native_math and is_math and equation_counter is not None:
-            script = _hancom_eqn_script(segment)
-            if script:
+            parts = hancom_eqn_script_parts(segment)
+            if parts:
+                # 수식 밖으로 돌려준 짝 없는 '{'·'}' 는 본문으로 남긴다(v2 와 같게, 조용히 사라지지 않게).
+                leading, script, trailing = parts
+                if leading:
+                    runs.append(f'<hp:run charPrIDRef="{char_pr}"><hp:t xml:space="preserve">{_esc(leading)}</hp:t></hp:run>')
                 equation_counter[0] += 1
                 runs.append(f'<hp:run charPrIDRef="{char_pr}">{_equation_xml(script, equation_counter[0])}</hp:run>')
+                if trailing:
+                    runs.append(f'<hp:run charPrIDRef="{char_pr}"><hp:t xml:space="preserve">{_esc(trailing)}</hp:t></hp:run>')
                 continue
         run_char_pr = MATH_CHAR_PR if is_math and char_pr in {0, 3, 4} else char_pr
         runs.append(

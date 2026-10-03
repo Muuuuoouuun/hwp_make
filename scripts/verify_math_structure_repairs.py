@@ -715,8 +715,10 @@ def check_token_scanner_keeps_radicand_and_splits_set_braces() -> None:
         == [("연립부등식 (mx-3)", False), ("(x+m)≥0", True), ("{", False), ("(x-n)(x-3)<0", True), ("을 만족시키는", False)],
         repr(parts),
     )
-    parts = split_math_text("ITEM_01 과 \frac{a}{b} 와 (x+1){x^2+1}")
+    # raw 문자열: 예전엔 "\f" 가 폼피드로 바뀌어 \frac 그룹 검사가 공허했다.
+    parts = split_math_text(r"ITEM_01 과 \frac{a}{b} 와 (x+1){x^2+1}")
     _check("균형 잡힌 중괄호는 자르지 않는다", all(seg.count("{") == seg.count("}") for seg, m in parts if m), repr(parts))
+    _check("\\frac{a}{b} 는 한 수식 토큰으로 유지", any(m and "\\frac{a}{b}" in seg for seg, m in parts), repr(parts))
 
 
 def check_eqn_gate_balances_braces_and_strips_dollars() -> None:
@@ -729,6 +731,20 @@ def check_eqn_gate_balances_braces_and_strips_dollars() -> None:
     script = _hancom_eqn_script("lim($\\sqrt{a_{n}^{2}+n}$$-a_{n}$)")
     _check("함수 호출 토큰 안의 '$' 는 스크립트에 남지 않는다", script == "lim(sqrt {a_{n}^{2}+n}-a_{n})", repr(script))
     _check("'$ $' 는 수식이 아니다", _hancom_eqn_script("$ $") is None)
+    # v1 writer·PDF 흐름 writer 도 v2 처럼 수식 밖으로 돌려준 짝 없는 중괄호를 본문으로 남긴다(예전엔 조용히 사라짐).
+    import re
+    from lxml import etree as _etree
+    from app import pdf_layout_writer as _plw
+    from app.hwpx_writer import _text_runs as _v1_text_runs
+    for source, kept in (("수열 $a_{n}}$ 의 값", "}"), ("집합 ${{a}$ 이다", "{")):
+        v1_xml = "".join(_v1_text_runs(source, native_math=True, equation_counter=[0]))
+        v1_texts = re.findall(r"<hp:t[^>]*>([^<]*)</hp:t>", v1_xml)
+        _check(f"v1 _text_runs 가 {source!r} 의 '{kept}' 를 본문으로 유지", kept in v1_texts and "<hp:script>" in v1_xml, repr(v1_texts))
+        para = _etree.Element("{http://www.hancom.co.kr/hwpml/2011/paragraph}p")
+        _plw._append_pdf_runs(para, [(source, "0")], equation_counter=[0], native_math=True)
+        texts = ["".join(node.itertext()) for node in para.iter("{http://www.hancom.co.kr/hwpml/2011/paragraph}t")]
+        scripts = [node.text for node in para.iter("{http://www.hancom.co.kr/hwpml/2011/paragraph}script")]
+        _check(f"PDF 흐름 writer 가 {source!r} 의 '{kept}' 를 본문으로 유지", kept in texts and len(scripts) == 1, repr((texts, scripts)))
     # HWP 원본의 한컴 수식이 줄 단위로 나뉘면 left{ … right} 의 한쪽만 들어온다. 구분자 중괄호는 균형 검사 대상이 아니다.
     half = "U= left{ x  `|`-5  leq x  leq 5,`` x"
     _check("한컴 left{ 구분자만 있는 조각은 그대로 수식", hancom_eqn_script_parts("$" + half + "$") == ("", half, ""), repr(hancom_eqn_script_parts("$" + half + "$")))

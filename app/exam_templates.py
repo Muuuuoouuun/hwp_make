@@ -314,6 +314,9 @@ def numbered_stem_paragraphs(
     if not prepared:
         for position, line in enumerate(lines[:_NUMBER_SEARCH_LINES]):
             match = _STEM_NUMBER_RE.match(line)
+            # 둘째 줄부터는 '.' 구분자만 번호 줄로 본다('1) f(0)=1' 같은 조건 줄은 본문 그대로).
+            if match and position > 0 and line[:match.end()].rstrip().endswith(")"):
+                continue
             if match and (match.group(1) == label or (not numbered and position == 0)):
                 rest = line[match.end():].strip()
                 return (
