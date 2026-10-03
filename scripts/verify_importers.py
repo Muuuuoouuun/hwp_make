@@ -1191,7 +1191,7 @@ for script in (
     "bar {x}",
     "vec {v}",
     "matrix{a & b # c & d}",
-    "(x+1)",
+    "LEFT ( x+1 RIGHT )",
     "^3sqrt {x^{2}+1}",
     "{n} choose {r}",
     "x∈ℝ",

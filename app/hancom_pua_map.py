@@ -43,6 +43,18 @@ _GREEK: dict[int, str] = {
     0xE0A4: "θ", 0xE0A7: "λ", 0xE0AC: "π", 0xE0AD: "ρ", 0xE0AE: "σ",
 }
 
+# 그리스 전체는 알파벳 순 연속 배치다. 육안 확정 9자(대문자 Δ·Φ, 소문자 α β θ λ π ρ σ)가
+# 모두 대문자 Α=U+E085…Ω=U+E09C, 소문자 α=U+E09D…ω=U+E0B4 (ο 포함 24자) 규칙과 일치하고,
+# kordoc(src/pdf/equation-runs.ts)이 별도 수능 모의고사 PDF로 θ=E0A4·π=E0AC·σ=E0AE를
+# 같은 순서로 확인했다. 대문자 Ω(E09C) 바로 다음이 α(E09D)라 두 구간이 빈틈없이 이어진다.
+# 미관측 글자는 이 규칙으로 채우되, 육안 확정 값이 있으면 그 값을 우선한다.
+_GREEK_UPPER = "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ"
+_GREEK_LOWER = "αβγδεζηθικλμνξοπρστυφχψω"
+_GREEK_SEQUENCE: dict[int, str] = {
+    **{0xE085 + i: ch for i, ch in enumerate(_GREEK_UPPER)},
+    **{0xE09D + i: ch for i, ch in enumerate(_GREEK_LOWER)},
+}
+
 
 def _build_map() -> dict[str, str]:
     table: dict[str, str] = {}
@@ -56,7 +68,7 @@ def _build_map() -> dict[str, str]:
     for d in range(1, 10):
         table[chr(0xE033 + d)] = str(d)
     table[chr(0xE03D)] = "0"
-    for code, sym in {**_OPERATORS, **_GREEK}.items():
+    for code, sym in {**_GREEK_SEQUENCE, **_OPERATORS, **_GREEK}.items():
         table[chr(code)] = sym
     return table
 
