@@ -65,6 +65,16 @@ const els = {
   appShell: document.querySelector(".app-shell"),
   saveStatus: document.querySelector("#saveStatus"),
   shortcutHelpButton: document.querySelector("#shortcutHelpButton"),
+  updateButton: document.querySelector("#updateButton"),
+  updateBadge: document.querySelector("#updateBadge"),
+  updateModal: document.querySelector("#updateModal"),
+  updateClose: document.querySelector("#updateClose"),
+  updateCurrent: document.querySelector("#updateCurrent"),
+  updateMessage: document.querySelector("#updateMessage"),
+  updateCommits: document.querySelector("#updateCommits"),
+  updateHint: document.querySelector("#updateHint"),
+  updateCheckButton: document.querySelector("#updateCheckButton"),
+  updateApplyButton: document.querySelector("#updateApplyButton"),
   viewPresetButtons: document.querySelectorAll("[data-view-preset]"),
   workflowSteps: document.querySelectorAll("[data-workflow-step]"),
   flowProblemCount: document.querySelector("#flowProblemCount"),
@@ -865,6 +875,159 @@ function openShortcutHelp() {
 
 function closeShortcutHelp() {
   closeModal(els.shortcutHelpModal);
+}
+
+const updateState = { status: null, busy: false, mode: "update" };
+
+function setUpdateMessage(message, tone = "") {
+  els.updateMessage.textContent = message;
+  if (tone) els.updateMessage.dataset.tone = tone;
+  else delete els.updateMessage.dataset.tone;
+}
+
+function renderUpdateStatus(status) {
+  updateState.status = status;
+  const hasUpdate = Boolean(status?.can_update);
+  els.updateButton?.classList.toggle("has-update", hasUpdate);
+  els.updateBadge?.classList.toggle("hidden", !hasUpdate);
+  if (els.updateButton) els.updateButton.title = hasUpdate ? `새 업데이트 ${status.behind}건` : "앱 업데이트 확인";
+  if (!els.updateModal) return;
+  const current = status?.current;
+  els.updateCurrent.textContent = current
+    ? `현재 ${current.sha} · ${status.branch}${status.upstream ? ` ← ${status.upstream}` : ""}`
+    : "버전 정보를 확인할 수 없습니다.";
+  let tone = "";
+  if (!status?.available || status?.fetch_error) tone = "error";
+  else if (!status.behind) tone = "success";
+  setUpdateMessage(status?.reason || "업데이트 상태를 확인하지 못했습니다.", tone);
+  els.updateCommits.replaceChildren(
+    ...(status?.incoming || []).map((commit) => {
+      const item = document.createElement("li");
+      const sha = document.createElement("code");
+      sha.textContent = commit.sha;
+      const subject = document.createElement("span");
+      subject.textContent = commit.subject;
+      item.append(sha, subject);
+      return item;
+    }),
+  );
+  els.updateCommits.classList.toggle("hidden", !status?.incoming?.length);
+  const dirty = status?.dirty_files || [];
+  els.updateHint.textContent = dirty.length ? `수정된 파일: ${dirty.slice(0, 3).join(", ")}${dirty.length > 3 ? ` 외 ${dirty.length - 3}개` : ""}` : "";
+  updateState.mode = "update";
+  els.updateApplyButton.textContent = "업데이트";
+  els.updateApplyButton.disabled = !hasUpdate;
+}
+
+async function checkForUpdates({ quiet = false } = {}) {
+  if (updateState.busy) return;
+  updateState.busy = true;
+  if (!quiet) {
+    setUpdateMessage("원격 저장소에서 새 버전을 확인하는 중입니다.");
+    els.updateApplyButton.disabled = true;
+    setButtonBusy(els.updateCheckButton, true, "확인 중...");
+  }
+  try {
+    renderUpdateStatus(await api("/api/update/status"));
+  } catch (error) {
+    if (!quiet) setUpdateMessage(`업데이트 확인 실패: ${friendlyErrorMessage(error)}`, "error");
+  } finally {
+    updateState.busy = false;
+    if (!quiet) setButtonBusy(els.updateCheckButton, false);
+  }
+}
+
+function openUpdateDialog() {
+  openModal(els.updateModal, document.activeElement, els.updateClose);
+  if (updateState.status) renderUpdateStatus(updateState.status);
+  checkForUpdates();
+}
+
+async function waitForServerAndReload() {
+  const deadline = Date.now() + 120000;
+  await new Promise((resolve) => window.setTimeout(resolve, 1500));
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch("/api/health", { cache: "no-store" });
+      if (response.ok) {
+        window.location.reload();
+        return;
+      }
+    } catch {
+      // 서버가 다시 뜨는 중이면 연결이 거부된다. 잠시 후 다시 시도한다.
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+  }
+  setUpdateMessage("서버가 다시 시작되지 않았습니다. run_local.ps1을 다시 실행하세요.", "error");
+}
+
+async function restartAfterUpdate() {
+  updateState.busy = true;
+  setButtonBusy(els.updateApplyButton, true, "재시작 중...");
+  els.updateCheckButton.disabled = true;
+  try {
+    await api("/api/update/restart", { method: "POST" });
+    setUpdateMessage("서버를 다시 시작하는 중입니다. 잠시 후 화면이 새로고침됩니다.");
+    await waitForServerAndReload();
+  } catch (error) {
+    setUpdateMessage(`재시작 실패: ${friendlyErrorMessage(error)}`, "error");
+  } finally {
+    updateState.busy = false;
+    setButtonBusy(els.updateApplyButton, false);
+    els.updateCheckButton.disabled = false;
+  }
+}
+
+async function applyUpdate() {
+  if (updateState.busy) return;
+  if (updateState.mode === "restart") {
+    await restartAfterUpdate();
+    return;
+  }
+  if (updateState.mode === "reload") {
+    window.location.reload();
+    return;
+  }
+  if (state.conversionBusy || !els.importProgress?.classList.contains("hidden")) {
+    toast("가져오기·변환 작업이 끝난 뒤 업데이트하세요.");
+    return;
+  }
+  updateState.busy = true;
+  setButtonBusy(els.updateApplyButton, true, "업데이트 중...");
+  els.updateCheckButton.disabled = true;
+  try {
+    if (activeProblem()) await flushActiveDraft({ quiet: true });
+    const result = await api("/api/update/apply", { method: "POST" });
+    els.updateCommits.classList.add("hidden");
+    els.updateCurrent.textContent = `현재 ${result.current.sha} · ${result.current.subject}`;
+    els.updateButton?.classList.remove("has-update");
+    els.updateBadge?.classList.add("hidden");
+    updateState.status = null;
+    if (result.restart_required && result.restart_supported) {
+      updateState.mode = "restart";
+      setUpdateMessage(`${result.from} → ${result.to} 업데이트 완료. 서버를 재시작하면 적용됩니다.`, "success");
+    } else if (result.restart_required) {
+      updateState.mode = "done";
+      setUpdateMessage(`${result.from} → ${result.to} 업데이트 완료. 실행 중인 서버를 종료하고 run_local.ps1을 다시 실행하세요.`, "success");
+    } else {
+      updateState.mode = "reload";
+      setUpdateMessage(`${result.from} → ${result.to} 업데이트 완료. 새로고침하면 적용됩니다.`, "success");
+    }
+    if (result.requirements_changed) els.updateHint.textContent = "의존성이 바뀌었습니다. 재시작 시 다시 설치합니다.";
+  } catch (error) {
+    setUpdateMessage(`업데이트 실패: ${friendlyErrorMessage(error)}`, "error");
+  } finally {
+    updateState.busy = false;
+    setButtonBusy(els.updateApplyButton, false);
+    els.updateCheckButton.disabled = false;
+    const labels = { restart: "서버 재시작", reload: "새로고침" };
+    if (labels[updateState.mode]) {
+      els.updateApplyButton.textContent = labels[updateState.mode];
+      els.updateApplyButton.disabled = false;
+    } else if (updateState.mode === "done") {
+      els.updateApplyButton.disabled = true;
+    }
+  }
 }
 
 function editableTarget(target) {
@@ -3386,6 +3549,13 @@ els.aiMathButton?.addEventListener("click", analyzeActiveMath);
 els.aiOcrButton?.addEventListener("click", ocrActiveImage);
 els.aiReconstructButton?.addEventListener("click", reconstructActiveImage);
 els.aiResultClose?.addEventListener("click", clearAIResult);
+els.updateButton?.addEventListener("click", openUpdateDialog);
+els.updateClose?.addEventListener("click", () => closeModal(els.updateModal));
+els.updateModal?.addEventListener("click", (event) => {
+  if (event.target === els.updateModal) closeModal(els.updateModal);
+});
+els.updateCheckButton?.addEventListener("click", () => checkForUpdates());
+els.updateApplyButton?.addEventListener("click", applyUpdate);
 els.shortcutHelpButton?.addEventListener("click", openShortcutHelp);
 els.shortcutHelpClose?.addEventListener("click", closeShortcutHelp);
 els.shortcutHelpModal?.addEventListener("click", (event) => {
@@ -3528,6 +3698,7 @@ els.basketList.addEventListener("drop", async (event) => {
     ensurePaperBaseWidth();
     updatePaperCanvasSize();
   });
+  checkForUpdates({ quiet: true });
 })().catch((error) => {
   els.statusText.textContent = "서버 연결 실패";
   toast(error.message);

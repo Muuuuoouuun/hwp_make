@@ -148,6 +148,10 @@ select { cursor: pointer; }
 .view-preset .preset-emphasis { fill: currentColor; fill-opacity: .14; }
 .utility-button { min-height: 28px; border-color: var(--line); background: #fff; color: var(--muted); font-size: 10px; }
 .utility-button kbd { display: inline-grid; place-items: center; min-width: 19px; height: 19px; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 4px; background: var(--surface); color: var(--ink-soft); font: 800 10px/1 inherit; }
+.update-button { position: relative; gap: 4px; }
+.update-button svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.update-button.has-update { border-color: #bdc9e8; color: var(--accent); }
+.update-badge { position: absolute; top: -3px; right: -3px; width: 8px; height: 8px; border: 2px solid #fff; border-radius: 50%; background: var(--danger); }
 .save-status { color: var(--muted); font-size: 11px; }
 .save-status.saving { color: var(--accent); }
 .save-status.saved { color: var(--success); }
@@ -446,10 +450,18 @@ select { cursor: pointer; }
 .preview-note { color: var(--muted); font-size: 9px; }
 
 .modal { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 24px; background: rgba(20, 29, 48, .55); backdrop-filter: blur(3px); }
-.preview-dialog, .settings-dialog, .shortcut-dialog, .order-dialog, .recognition-dialog { display: flex; flex-direction: column; max-height: calc(100vh - 48px); overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius-lg); background: #fff; box-shadow: 0 28px 70px rgba(20, 29, 48, .28); }
+.preview-dialog, .settings-dialog, .shortcut-dialog, .update-dialog, .order-dialog, .recognition-dialog { display: flex; flex-direction: column; max-height: calc(100vh - 48px); overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius-lg); background: #fff; box-shadow: 0 28px 70px rgba(20, 29, 48, .28); }
 .preview-dialog { width: min(1120px, 96vw); height: min(820px, calc(100vh - 48px)); }
 .settings-dialog { width: min(520px, 94vw); }
 .shortcut-dialog { width: min(520px, 94vw); }
+.update-dialog { width: min(520px, 94vw); }
+.update-body { display: grid; gap: 10px; padding: 14px 16px; overflow: auto; }
+.update-message { margin: 0; color: var(--ink-soft); font-size: 12px; line-height: 1.5; }
+.update-message[data-tone="success"] { color: var(--success); }
+.update-message[data-tone="error"] { color: var(--danger); }
+.update-commits { display: grid; gap: 4px; max-height: 240px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.update-commits li { display: flex; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); font-size: 11px; }
+.update-commits code { flex: 0 0 auto; color: var(--muted); font-size: 10px; }
 .order-dialog { width: min(720px, 94vw); }
 .recognition-dialog { width: min(940px, 96vw); height: min(760px, calc(100vh - 48px)); }
 .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; border-bottom: 1px solid var(--line); }

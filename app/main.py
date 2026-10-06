@@ -28,6 +28,7 @@ from . import (
     pdf_layout_writer,
     preview,
     storage,
+    updater,
 )
 
 
@@ -59,6 +60,7 @@ app = FastAPI(title="HWP Make", version="0.1.0")
 storage.init_db()
 ai_api.initialize_ai_runtime()
 app.include_router(ai_api.router)
+app.include_router(updater.router)
 
 
 @app.middleware("http")

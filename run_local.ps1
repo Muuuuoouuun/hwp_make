@@ -59,4 +59,22 @@ if (-not $Python) {
 Write-Host "[run_local] Python: $Python" -ForegroundColor Green
 if ($CheckOnly) { exit 0 }
 
-& $Python -m uvicorn app.main:app --host 127.0.0.1 --port 8787
+# 앱의 "업데이트" 버튼은 git pull 후 종료 코드 3으로 서버를 끝낸다.
+# 그 경우 requirements.txt가 바뀌었으면 의존성을 다시 설치하고 서버를 재시작한다.
+$RestartExitCode = 3
+$env:HWP_MAKE_SUPERVISED = "1"
+$Requirements = Join-Path $ProjectRoot "requirements.txt"
+$RequirementsHash = (Get-FileHash $Requirements).Hash
+
+while ($true) {
+  & $Python -m uvicorn app.main:app --host 127.0.0.1 --port 8787
+  if ($LASTEXITCODE -ne $RestartExitCode) { break }
+
+  $NewHash = (Get-FileHash $Requirements).Hash
+  if ($NewHash -ne $RequirementsHash) {
+    Write-Host "[run_local] requirements.txt 변경 감지 - 의존성 설치 중..." -ForegroundColor Cyan
+    & $Python -m pip install -r $Requirements
+    $RequirementsHash = $NewHash
+  }
+  Write-Host "[run_local] 업데이트 적용 - 서버를 다시 시작합니다." -ForegroundColor Green
+}
