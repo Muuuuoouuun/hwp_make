@@ -1,4 +1,4 @@
-"""HWP Make Basic: native Windows launcher, also the frozen worker entry point."""
+"""HWP Make Basic: native desktop launcher (Windows/macOS), also the frozen worker entry point."""
 from __future__ import annotations
 
 import json
@@ -14,12 +14,27 @@ import uuid
 from app.desktop_convert import SUPPORTED, validate_source, worker
 
 VERSION = "1.0.0"
+UI_FONT = "Apple SD Gothic Neo" if sys.platform == "darwin" else "맑은 고딕"
+
+
+def default_data_dir() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "HWP Make Basic"
+    return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "HWP Make Basic"
+
+
+def open_path(path: Path) -> None:
+    """Open a file or folder with the OS default app; raise OSError on failure."""
+    if sys.platform == "win32":
+        os.startfile(path)
+    elif subprocess.call(["open" if sys.platform == "darwin" else "xdg-open", str(path)]) != 0:
+        raise OSError(f"열 수 없습니다: {path}")
 
 
 class BasicApp:
     def __init__(self, root: tk.Tk, data_dir: Path | None = None):
         self.root = root
-        self.data = data_dir or Path(os.environ.get("LOCALAPPDATA", Path.home())) / "HWP Make Basic"
+        self.data = data_dir or default_data_dir()
         self.data.mkdir(parents=True, exist_ok=True)
         self.process = None
         self.log = None
@@ -34,14 +49,14 @@ class BasicApp:
         root.configure(bg="#f4f5fa")
         root.protocol("WM_DELETE_WINDOW", self.close)
         icon = Path(getattr(sys, "_MEIPASS", Path(__file__).parent / "packaging")) / "app.ico"
-        if icon.is_file():
+        if sys.platform == "win32" and icon.is_file():  # Tk on macOS rejects .ico
             root.iconbitmap(str(icon))
-        root.option_add("*Font", ("맑은 고딕", 10))
+        root.option_add("*Font", (UI_FONT, 10))
         style = ttk.Style(root)
         style.theme_use("clam")
         style.configure("TFrame", background="#f4f5fa")
         style.configure("TLabel", background="#f4f5fa", foreground="#202539")
-        style.configure("Title.TLabel", font=("맑은 고딕", 23, "bold"))
+        style.configure("Title.TLabel", font=(UI_FONT, 23, "bold"))
         style.configure("Muted.TLabel", foreground="#626b80")
         style.configure("TButton", padding=(15, 9))
         style.configure("Primary.TButton", background="#505ac9", foreground="white", padding=(18, 12))
@@ -82,7 +97,7 @@ class BasicApp:
         self.folder_button = ttk.Button(actions, text="저장 폴더", command=self.open_folder, state="disabled")
         self.folder_button.pack(side="left", padx=8)
         ttk.Button(actions, text="도움말", command=self.help).pack(side="right")
-        ttk.Label(body, text="최근 변환", font=("맑은 고딕", 10, "bold")).pack(anchor="w", pady=(18, 7))
+        ttk.Label(body, text="최근 변환", font=(UI_FONT, 10, "bold")).pack(anchor="w", pady=(18, 7))
         self.recent = tk.Listbox(body, height=3, bd=0, highlightthickness=1, highlightbackground="#dce0eb",
                                  activestyle="none", selectbackground="#e4e7fb", selectforeground="#202539")
         self.recent.pack(fill="both", expand=True)
@@ -224,14 +239,14 @@ class BasicApp:
     def open_output(self):
         if self.output:
             try:
-                os.startfile(self.output)
+                open_path(self.output)
             except OSError:
                 messagebox.showinfo("결과 열기", "파일이 없거나 연결된 프로그램이 없습니다. 저장 폴더에서 확인해 주세요.", parent=self.root)
 
     def open_folder(self):
         if self.output:
             try:
-                os.startfile(self.output.parent)
+                open_path(self.output.parent)
             except OSError as exc:
                 messagebox.showerror("저장 폴더", str(exc), parent=self.root)
 
