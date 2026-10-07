@@ -1772,6 +1772,8 @@ def write_native_content(
     unresolved = sum(
         value.count(marker) for value in values for marker in ("□", "▢", "�")
     )
+    # 2026-10-03 R2: '□' glyphs present in the source text layer are kept as text, so they are not unresolved placeholders.
+    unresolved = max(0, unresolved - w._source_box_glyph_count(pdf_path, page_limit))
     return {
         **structure,
         "layout_mode": "structured",

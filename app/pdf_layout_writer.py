@@ -131,14 +131,36 @@ def _pdf_output_text(text: str) -> str:
     return _pdf_output_text_cached(str(text or ""))
 
 
+_SOURCE_BOX_CHAR = "□"
+# Unicode noncharacter: lives only inside ``_pdf_output_text_cached`` and is never written out.
+_SOURCE_BOX_SENTINEL = "﷐"
+
+
 @functools.lru_cache(maxsize=65536)
 def _pdf_output_text_cached(text: str) -> str:
-    normalized = math_text.normalize_recognized_math_layout_text(text)
-    return "".join(
+    # 2026-10-03 R2: a literal U+25A1 in the PDF text layer is a real blank-box glyph
+    # (빈칸 기호: 국어·정치와 법·제2외국어 발문/선지), not a writer placeholder. Placeholders
+    # ('□' for the Hancom fraction-rule PUA E06D or unknown PUA) are only created by the
+    # normalization below, so source boxes are protected before it and restored after
+    # the placeholder strip. Writer-made '□' are still removed.
+    protected = text.replace(_SOURCE_BOX_CHAR, _SOURCE_BOX_SENTINEL)
+    normalized = math_text.normalize_recognized_math_layout_text(protected)
+    cleaned = "".join(
         char
         for char in normalized
         if char not in _MATH_VISUAL_PLACEHOLDER_CHARS and not (0xE000 <= ord(char) <= 0xF8FF)
     )
+    return cleaned.replace(_SOURCE_BOX_SENTINEL, _SOURCE_BOX_CHAR)
+
+
+def _source_box_glyph_count(pdf_path: str | Path, page_limit: int | None = None) -> int:
+    """Count literal '□' glyphs in the source text layer (kept as text, so never placeholders)."""
+    try:
+        with fitz.open(str(pdf_path)) as source_pdf:
+            count = len(source_pdf) if not page_limit else min(len(source_pdf), int(page_limit))
+            return sum(source_pdf[index].get_text().count(_SOURCE_BOX_CHAR) for index in range(count))
+    except Exception:  # noqa: BLE001 - statistics only; never block the export
+        return 0
 
 
 _MATH_FONT_HINTS = (
@@ -10695,6 +10717,8 @@ def write_pdf_structured_hwpx(
         effective_page_limit = min(effective_page_limit or variant_page_limit, variant_page_limit)
     if effective_page_limit is not None:
         source_pages = min(source_pages, effective_page_limit)
+    # 2026-10-03 R2: '□' glyphs present in the source text layer are kept as text, so they are not unresolved placeholders.
+    unresolved_placeholders = max(0, unresolved_placeholders - _source_box_glyph_count(pdf_path, effective_page_limit))
     return {
         "layout_mode": "structured",
         "image_provenance": image_provenance,

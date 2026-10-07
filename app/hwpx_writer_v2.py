@@ -1693,39 +1693,91 @@ def write_hwpx(
                 )
         return total
 
-    def estimate_table_height(rows: list[list[str]]) -> int:
+    def table_cell_line_limit(col_count: int) -> int:
+        """셀 폭에 맞춘 줄 단위 수(한글 1자=2단위). 기존 상수 46은 2단 폭 기준이라 1단 양식
+        (basic/simple)에서는 23자마다 줄을 끊어 셀 높이가 두 배로 부풀고 쪽이 늘었다.
+        2단 폭에서는 기존 값을 그대로 쓴다(폭 기준 값이 더 작으면 기존 값 유지)."""
+        legacy = max(16, 46 // max(1, col_count))
+        cell_width = content_width // max(1, col_count) - 1200
+        by_width = int(cell_width / (float(style_specs["body"]["size"]) * 100) * 1.8)
+        return max(legacy, min(by_width, 160))
+
+    def estimate_table_row_height(
+        row: list[str], col_count: int, *, box: bool = False, line_limit: int | None = None,
+        col_spans: dict[int, int] | None = None,
+    ) -> int:
+        # 지문 상자(box) 행은 문단 하나라 자료 표의 최소 높이·여백(1300/700)을 쓰지 않는다.
+        cell_line_limit = line_limit or max(16, 46 // col_count)
+        row_height = 0 if box else 1300
+        for col_index, cell in enumerate(row):
+            cell_text = str(cell or "")
+            cell_height = 0
+            # 병합 셀은 덮는 열 수만큼 넓으므로 줄 단위도 그만큼 늘려 추정한다.
+            span_limit = cell_line_limit * max(1, (col_spans or {}).get(col_index, 1))
+            for part in _table_cell_render_lines(cell_text, span_limit):
+                cell_height += estimate_para_height(
+                    part,
+                    "body",
+                    math_blocks=native_math and template.key == "kice_math",
+                )
+            row_height = max(row_height, cell_height + (200 if box else 700))
+        return row_height
+
+    def spans_by_row(spans: list[list[int]] | None) -> dict[int, dict[int, int]]:
+        """[row, col, row_span, col_span] 목록 → {row: {col: col_span}} (병합 시작 칸만)."""
+        result: dict[int, dict[int, int]] = {}
+        for span in spans or []:
+            try:
+                r, c, _rs, cs = (int(v) for v in span)
+            except (TypeError, ValueError):
+                continue
+            result.setdefault(r, {})[c] = max(1, cs)
+        return result
+
+    def estimate_table_height(
+        rows: list[list[str]], *, box: bool = False, width_aware: bool = False,
+        spans: list[list[int]] | None = None,
+    ) -> int:
         if not rows or not any(rows):
             return 0
         col_count = max(1, max(len(row) for row in rows))
-        cell_line_limit = max(16, 46 // col_count)
+        line_limit = table_cell_line_limit(col_count) if (width_aware or box) else None
+        row_spans = spans_by_row(spans)
         total = 800
-        for row in rows:
-            row_height = 1300
-            for cell in row:
-                cell_text = str(cell or "")
-                cell_height = 0
-                for part in _table_cell_render_lines(cell_text, cell_line_limit):
-                    cell_height += estimate_para_height(
-                        part,
-                        "body",
-                        math_blocks=native_math and template.key == "kice_math",
-                    )
-                row_height = max(row_height, cell_height + 700)
-            total += row_height
+        for row_index, row in enumerate(rows):
+            total += estimate_table_row_height(
+                row, col_count, box=box, line_limit=line_limit, col_spans=row_spans.get(row_index),
+            )
         return total + 800
 
-    def split_table_chunks(rows: list[list[str]]) -> list[list[list[str]]]:
+    def split_table_chunks(rows: list[list[str]], *, box: bool = False) -> list[list[list[str]]]:
         if not rows:
             return []
         max_height = column_body_height - PROBLEM_LAYOUT_GUARD * 2
-        if columns <= 1 or len(rows) <= 1 or estimate_table_height(rows) <= max_height:
+        # 지문 상자(box)는 1단 양식에서도 쪽 높이로 나눈다. 쪽을 넘는 표 하나를 그대로
+        # 두면 한컴/rhwp 가 셀 분할에 실패해 쪽이 수백 장으로 늘어난다(국어 HWP 491쪽).
+        if (columns <= 1 and not box) or len(rows) <= 1 or estimate_table_height(rows, box=box, width_aware=True) <= max_height:
             return [rows]
+        if box:
+            # 상자는 머리글 행이 없다: 문단 행을 순서대로 쪽 높이만큼 묶는다(반복 없음).
+            chunks: list[list[list[str]]] = []
+            current: list[list[str]] = []
+            for row in rows:
+                candidate = [*current, row]
+                if current and estimate_table_height(candidate, box=True) > max_height:
+                    chunks.append(current)
+                    current = [row]
+                else:
+                    current = candidate
+            if current:
+                chunks.append(current)
+            return chunks
         header_row = rows[0]
-        chunks: list[list[list[str]]] = []
-        current: list[list[str]] = [header_row]
+        chunks = []
+        current = [header_row]
         for row in rows[1:]:
             candidate = [*current, row]
-            if len(current) > 1 and estimate_table_height(candidate) > max_height:
+            if len(current) > 1 and estimate_table_height(candidate, width_aware=True) > max_height:
                 chunks.append(current)
                 current = [header_row, row]
             else:
@@ -1943,8 +1995,12 @@ def write_hwpx(
                     "body",
                     math_blocks=native_math and template.key == "kice_math",
                 )
-        for rows in problem.get("tables") or []:
-            total += estimate_table_height(rows)
+        problem_spans = (layout.get("table_spans") if isinstance(layout, dict) else None) or []
+        for table_index, rows in enumerate(problem.get("tables") or []):
+            total += estimate_table_height(
+                rows, box=bool(isinstance(layout, dict) and layout.get("passage_box")), width_aware=True,
+                spans=problem_spans[table_index] if table_index < len(problem_spans) else None,
+            )
         for image_path in problem.get("image_paths") or []:
             total += estimate_picture_height(image_path)
         if source_marker:
@@ -2350,9 +2406,30 @@ def write_hwpx(
                     preserve_inline_math=source_layout_flow and template.key == "kice_math",
                 )
 
-        for rows in problem.get("tables") or []:
-            for table_rows in split_table_chunks(rows):
-                table_height = estimate_table_height(table_rows)
+        # HWP 가져오기 보조 정보: 지문 상자(passage_box)와 병합 셀(table_spans, 표 순서 정렬).
+        passage_box = bool(isinstance(layout, dict) and layout.get("passage_box"))
+        layout_spans = (layout.get("table_spans") if isinstance(layout, dict) else None) or []
+        for table_index, rows in enumerate(problem.get("tables") or []):
+            spans = layout_spans[table_index] if table_index < len(layout_spans) else None
+            # 병합 셀이 있는 표는 행 단위 분할이 병합 영역을 가를 수 있어 통째로 낸다.
+            chunks = [rows] if spans else split_table_chunks(rows, box=passage_box)
+            for table_rows in chunks:
+                table_height = estimate_table_height(table_rows, box=passage_box, width_aware=True, spans=spans)
+                col_count = max(1, max(len(row) for row in table_rows))
+                line_limit = table_cell_line_limit(col_count)
+                # 상자 행(문단 길이가 제각각)과 병합 표(내용이 특정 행에 몰림)는 균등 분배 대신
+                # 행별 추정 높이를 준다.
+                row_spans = spans_by_row(spans)
+                row_heights = (
+                    [
+                        estimate_table_row_height(
+                            row, col_count, box=passage_box, line_limit=line_limit,
+                            col_spans=row_spans.get(row_index),
+                        )
+                        for row_index, row in enumerate(table_rows)
+                    ]
+                    if (passage_box or spans) else None
+                )
                 _add_table(
                     doc,
                     table_rows,
@@ -2365,6 +2442,10 @@ def write_hwpx(
                     content_width=content_width,
                     height=table_height,
                     paragraph_attrs=reserve_object_height(table_height),
+                    spans=spans,
+                    box_frame=passage_box,
+                    row_heights=row_heights,
+                    cell_line_limit=line_limit,
                 )
         for line in table_tail_lines:
             para(
@@ -2479,6 +2560,10 @@ def _add_table(
     paragraph_attrs: dict[str, str] | None = None,
     native_paragraphs: bool = False,
     source_geometry: dict[str, Any] | None = None,
+    spans: list[list[int]] | None = None,
+    box_frame: bool = False,
+    row_heights: list[int] | None = None,
+    cell_line_limit: int | None = None,
 ) -> None:
     if not rows or not any(rows):
         return
@@ -2486,6 +2571,9 @@ def _add_table(
         equation_counter = [0]
     row_cnt = len(rows)
     col_cnt = max(len(r) for r in rows)
+    if spans:
+        # 병합 영역이 표 범위를 벗어나지 않게 폭을 맞춘다(덮인 칸은 빈 문자열이어야 한다).
+        col_cnt = max(col_cnt, max(int(c) + int(cs) for _, c, _, cs in spans))
     source_cells = (source_geometry or {}).get("cell_bounds", [])
     def axes(indices):
         values = sorted(float(cell[i]) for row in source_cells for cell in row if cell for i in indices)
@@ -2495,7 +2583,8 @@ def _add_table(
                 grouped.append(value)
         return grouped
     source_x, source_y = axes((0, 2)), axes((1, 3))
-    cell_line_limit = max(16, 46 // col_cnt)
+    # 호출부가 셀 폭 기준 줄 단위를 주면 그것을, 아니면 기존 상수(2단 폭 기준)를 쓴다.
+    cell_line_limit = cell_line_limit or max(16, 46 // col_cnt)
     table = doc.add_table(
         row_cnt,
         col_cnt,
@@ -2540,6 +2629,12 @@ def _add_table(
             pos.set("horzAlign", "LEFT")
     except Exception:
         pass
+    span_cols: dict[tuple[int, int], int] = {}
+    for span in spans or []:
+        try:
+            span_cols[(int(span[0]), int(span[1]))] = max(1, int(span[3]))
+        except (TypeError, ValueError, IndexError):
+            continue
     for r, row in enumerate(rows):
         for c in range(col_cnt):
             value = row[c] if c < len(row) else ""
@@ -2554,10 +2649,27 @@ def _add_table(
                 equation_counter=equation_counter,
                 cell_para_pr_id_ref=cell_para_pr_id_ref,
                 min_line_height=min_line_height,
-                cell_line_limit=cell_line_limit,
+                # 병합 시작 칸은 덮는 열 수만큼 넓게 줄을 끊는다.
+                cell_line_limit=cell_line_limit * span_cols.get((r, c), 1),
                 native_paragraphs=native_paragraphs,
                 cell_width=widths[c] if content_width else None,
             )
+    if row_heights:
+        for r in range(min(row_cnt, len(row_heights))):
+            for c in range(col_cnt):
+                try:
+                    table.cell(r, c).set_size(height=max(100, int(row_heights[r])))
+                except Exception:
+                    pass
+    if box_frame and row_cnt > 1:
+        # 지문 상자: 문단마다 한 행인 표를 하나의 테두리 상자처럼 보이게 행 사이 선을 지운다.
+        for r in range(row_cnt):
+            fill_id = _ensure_box_border_fill(doc, top=(r == 0), bottom=(r == row_cnt - 1))
+            for c in range(col_cnt):
+                table.cell(r, c).element.set("borderFillIDRef", fill_id)
+        table.mark_dirty()
+    if spans:
+        _apply_table_spans(table, spans, row_cnt, col_cnt)
     borderless_columns = (source_geometry or {}).get("borderless_columns", [])
     if borderless_columns:
         fills = doc.headers[0].element.find(f".//{_HH}borderFills")
@@ -2620,6 +2732,87 @@ def _add_table(
                                        width=widths[col] - 600, spacing_ratio=0.0)
         cell.element.set("dirty", "1")
         table.mark_dirty()
+
+
+def _ensure_box_border_fill(doc: "HwpxDocument", *, top: bool, bottom: bool) -> str:
+    """좌·우(+선택적으로 위/아래) 선만 있는 셀 테두리를 header 에 만들거나 재사용한다.
+
+    지문 상자를 문단 행으로 나눈 표에서 행 사이 가로선을 없애 한 상자처럼 보이게 한다.
+    """
+    header = doc.headers[0]
+    border_fills = header.element.find(f".//{_HH}borderFills")
+    if border_fills is None:
+        return "3"
+    wanted = {
+        "leftBorder": "SOLID", "rightBorder": "SOLID",
+        "topBorder": "SOLID" if top else "NONE", "bottomBorder": "SOLID" if bottom else "NONE",
+    }
+    for fill in border_fills.findall(f"{_HH}borderFill"):
+        if fill.find(f"{_HH}fillBrush") is not None or fill.find("{http://www.hancom.co.kr/hwpml/2011/core}fillBrush") is not None:
+            continue
+        if all(
+            (edge := fill.find(f"{_HH}{name}")) is not None and (edge.get("type") or "NONE").upper() == kind
+            for name, kind in wanted.items()
+        ):
+            return str(fill.get("id"))
+    next_id = max((int(fill.get("id") or 0) for fill in border_fills.findall(f"{_HH}borderFill")), default=0) + 1
+    element = border_fills.makeelement(
+        f"{_HH}borderFill",
+        {"id": str(next_id), "threeD": "0", "shadow": "0", "centerLine": "NONE", "breakCellSeparateLine": "0"},
+    )
+    for child_name, attrs in (
+        ("slash", {"type": "NONE", "Crooked": "0", "isCounter": "0"}),
+        ("backSlash", {"type": "NONE", "Crooked": "0", "isCounter": "0"}),
+        *(
+            (name, {"type": kind, "width": "0.12 mm", "color": "#000000"})
+            for name, kind in wanted.items()
+        ),
+        ("diagonal", {"type": "SOLID", "width": "0.1 mm", "color": "#000000"}),
+    ):
+        element.append(element.makeelement(f"{_HH}{child_name}", attrs))
+    border_fills.append(element)
+    border_fills.set("itemCnt", str(len(border_fills.findall(f"{_HH}borderFill"))))
+    header.mark_dirty()
+    return str(next_id)
+
+
+def _apply_table_spans(table: Any, spans: list[list[int]], row_cnt: int, col_cnt: int) -> None:
+    """[row, col, row_span, col_span] 목록을 hp:cellSpan 으로 방출하고 덮인 칸 hp:tc 는 제거한다.
+
+    벤더 merge_cells 는 덮인 칸을 0 크기로 남겨 두는데, 한컴 HWPX 는 병합된 칸을 생략하므로
+    여기서 지운다(4×5 보기 표가 20칸이 아니라 9셀로 나가야 한다).
+    """
+    covered: set[tuple[int, int]] = set()
+    anchors: set[tuple[int, int]] = set()
+    for span in spans:
+        try:
+            r, c, rs, cs = (int(v) for v in span)
+        except (TypeError, ValueError):
+            continue
+        rs = min(rs, row_cnt - r)
+        cs = min(cs, col_cnt - c)
+        if r < 0 or c < 0 or rs < 1 or cs < 1 or (rs == 1 and cs == 1):
+            continue
+        region = {(rr, cc) for rr in range(r, r + rs) for cc in range(c, c + cs)}
+        if region & (covered | anchors):
+            continue  # 겹치는 병합은 원본 손상이므로 건너뛴다.
+        try:
+            table.merge_cells(r, c, r + rs - 1, c + cs - 1)
+        except Exception:
+            continue
+        anchors.add((r, c))
+        covered |= region - {(r, c)}
+    if not covered:
+        return
+    for row_element in table.element.findall(f"{_HP}tr"):
+        for cell in list(row_element.findall(f"{_HP}tc")):
+            addr = cell.find(f"{_HP}cellAddr")
+            if addr is None:
+                continue
+            key = (int(addr.get("rowAddr", "0")), int(addr.get("colAddr", "0")))
+            if key in covered:
+                row_element.remove(cell)
+    table.mark_dirty()
 
 
 def _add_native_picture_row(

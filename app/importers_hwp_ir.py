@@ -327,22 +327,44 @@ def _downscale_image(blob: bytes, *, max_dim: int = 1600, max_bytes: int = 900_0
         return blob
 
 
+class TableGrid(list):
+    """2차원 문자열 표 + 병합 셀 정보(spans).
+
+    표 모델(2차원 문자열 배열)은 그대로 두고, 병합 정보만 리스트 속성으로 얹는다.
+    spans 원소는 [row, col, row_span, col_span](병합 시작 칸 기준, 1 초과인 것만).
+    importers._import_hwp_via_ir 가 layout["table_spans"] 로 옮겨 저장한다.
+    """
+
+    spans: list[list[int]]
+
+    def __init__(self, rows: list[list[str]], spans: list[list[int]] | None = None) -> None:
+        super().__init__(rows)
+        self.spans = list(spans or [])
+
+
 def _table_rows(block: Any) -> list[list[str]]:
-    """TableBlock → 2차원 문자열(가능하면 cells, 없으면 text 파싱)."""
+    """TableBlock → 2차원 문자열(가능하면 cells, 없으면 text 파싱). 병합 셀은 TableGrid.spans."""
     cells = getattr(block, "cells", None)
     rows = getattr(block, "rows", None)
     cols = getattr(block, "cols", None)
     if cells and rows and cols:
         try:
             grid = [["" for _ in range(int(cols))] for _ in range(int(rows))]
+            spans: list[list[int]] = []
             for c in cells:
                 r = int(getattr(c, "row", 0) or 0)
                 col = int(getattr(c, "col", 0) or 0)
                 if 0 <= r < len(grid) and 0 <= col < len(grid[0]):
                     cell_text = _cell_blocks_text(getattr(c, "blocks", []) or [])
                     grid[r][col] = (cell_text or getattr(c, "text", "") or "").strip()
+                    # 병합 셀(row_span/col_span)을 기록한다. 원본 4×5 보기 표가 20칸으로
+                    # 풀려 나가던 문제를 writer 의 cellSpan 방출로 되돌리기 위한 정보.
+                    row_span = min(int(getattr(c, "row_span", 1) or 1), len(grid) - r)
+                    col_span = min(int(getattr(c, "col_span", 1) or 1), len(grid[0]) - col)
+                    if row_span > 1 or col_span > 1:
+                        spans.append([r, col, row_span, col_span])
             if any(any(cell for cell in row) for row in grid):
-                return grid
+                return TableGrid(grid, spans)
         except Exception:
             pass
     text = getattr(block, "text", "") or ""

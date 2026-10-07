@@ -694,10 +694,30 @@ def _format_choice(index: int, choice: str, template: ExamTemplate) -> str:
     return f"{_choice_label(index, template)} {clean}".rstrip()
 
 
-def _add_table(document: Document, rows: list[list[str]]) -> None:
+def _set_docx_cell_border(cell: Any, side: str, value: str) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    borders = tc_pr.find(qn("w:tcBorders"))
+    if borders is None:
+        borders = OxmlElement("w:tcBorders")
+        tc_pr.append(borders)
+    edge = borders.find(qn(f"w:{side}"))
+    if edge is None:
+        edge = OxmlElement(f"w:{side}")
+        borders.append(edge)
+    edge.set(qn("w:val"), value)
+
+
+def _add_table(
+    document: Document,
+    rows: list[list[str]],
+    spans: list[list[int]] | None = None,
+    box_frame: bool = False,
+) -> None:
     if not rows or not any(rows):
         return
     col_cnt = max(len(row) for row in rows)
+    if spans:
+        col_cnt = max(col_cnt, max(int(c) + int(cs) for _, c, _, cs in spans))
     table = document.add_table(rows=len(rows), cols=col_cnt)
     table.style = "Table Grid"
     for r, row in enumerate(rows):
@@ -705,6 +725,37 @@ def _add_table(document: Document, rows: list[list[str]]) -> None:
             cell = table.rows[r].cells[c]
             paragraph = cell.paragraphs[0]
             _add_text_runs(paragraph, str(row[c]) if c < len(row) else "")
+    if box_frame and len(rows) > 1:
+        # 지문 상자(HWPX 와 같은 의미): 문단 행 사이 가로선을 없애 한 상자처럼 보이게 한다.
+        for r in range(len(rows)):
+            for c in range(col_cnt):
+                cell = table.rows[r].cells[c]
+                if r > 0:
+                    _set_docx_cell_border(cell, "top", "nil")
+                if r < len(rows) - 1:
+                    _set_docx_cell_border(cell, "bottom", "nil")
+    # 병합 셀(HWP 가져오기 layout.table_spans): python-docx merge 로 HWPX cellSpan 과 맞춘다.
+    taken: set[tuple[int, int]] = set()
+    for span in spans or []:
+        try:
+            r, c, rs, cs = (int(v) for v in span)
+        except (TypeError, ValueError):
+            continue
+        rs, cs = min(rs, len(rows) - r), min(cs, col_cnt - c)
+        if r < 0 or c < 0 or rs < 1 or cs < 1 or (rs == 1 and cs == 1):
+            continue
+        region = {(rr, cc) for rr in range(r, r + rs) for cc in range(c, c + cs)}
+        if region & taken:
+            continue
+        try:
+            merged = table.cell(r, c).merge(table.cell(r + rs - 1, c + cs - 1))
+        except Exception:
+            continue
+        taken |= region
+        # merge 가 덮인 칸의 빈 문단을 이어 붙이므로 내용 없는 꼬리 문단은 지운다.
+        for paragraph in merged.paragraphs[1:]:
+            if not paragraph.text.strip() and not paragraph.runs:
+                paragraph._element.getparent().remove(paragraph._element)
 
 
 def _add_masthead(document: Document, title: str, template: ExamTemplate) -> None:
@@ -834,8 +885,15 @@ def write_docx(
                 for line in stem_lines:
                     _add_text_paragraph(document, line)
 
-        for table_rows in problem.get("tables") or []:
-            _add_table(document, table_rows)
+        problem_layout = problem.get("layout") if isinstance(problem.get("layout"), dict) else {}
+        layout_spans = problem_layout.get("table_spans") or []
+        for table_index, table_rows in enumerate(problem.get("tables") or []):
+            _add_table(
+                document,
+                table_rows,
+                spans=layout_spans[table_index] if table_index < len(layout_spans) else None,
+                box_frame=bool(problem_layout.get("passage_box")),
+            )
 
         for image_path in problem.get("image_paths") or []:
             full_path = storage.resolve_data_image_path(image_path)

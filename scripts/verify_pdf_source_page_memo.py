@@ -205,14 +205,19 @@ def main() -> int:
         memo.forget_file(Path(temp) / "missing.pdf")  # must not raise
 
     # _pdf_output_text cache == uncached normalizer, including None/empty inputs.
-    samples = ["", None, "x^2 + y^2", "√2  □ □", "15세기 국어 ‘코ᇰ’의 ‘’은", "a_{n}}", "①$63"]
+    # 2026-10-03 R2: a literal '□' in the input is a source text-layer glyph and is kept; only
+    # placeholders the normalizer makes from PUA (and the other marker chars) are stripped.
+    samples = ["", None, "x^2 + y^2", "√2 \ue000 □ □", "15세기 국어 ‘코ᇰ’의 ‘’은", "a_{n}}", "①$63", "a\ue06db", "□\ue999▢"]
     for text in samples:
+        protected = str(text or "").replace("□", "\ufdd0")
         expected = "".join(
-            ch for ch in writer.math_text.normalize_recognized_math_layout_text(str(text or ""))
+            ch for ch in writer.math_text.normalize_recognized_math_layout_text(protected)
             if ch not in writer._MATH_VISUAL_PLACEHOLDER_CHARS and not (0xE000 <= ord(ch) <= 0xF8FF)
-        )
+        ).replace("\ufdd0", "□")
         if writer._pdf_output_text(text) != expected or writer._pdf_output_text(text) != expected:
             failures.append(f"_pdf_output_text cache changed the result for {text!r}")
+    if writer._pdf_output_text("√2  □ □") != "√2  □ □" or writer._pdf_output_text("a\ue06db") != "ab":
+        failures.append("_pdf_output_text must keep source '□' and strip PUA-made placeholders")
 
     if failures:
         for failure in failures:

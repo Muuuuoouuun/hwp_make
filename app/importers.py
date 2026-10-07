@@ -3101,10 +3101,14 @@ def _import_hwp_via_ir(
             answer_section = True
             continue
         # 공유 지문은 원본 문제지처럼 테두리 박스로 낸다. writer 가 tables 를 테두리 표로
-        # 렌더하므로, 안내문("[1~3] 다음 글을...")은 stem(박스 위), 지문 본문은 1칸 표(박스
-        # 안)에 넣으면 편집 가능한 텍스트가 박스 안에 배치된다(writer 수정 불필요).
+        # 렌더하므로, 안내문("[1~3] 다음 글을...")은 stem(박스 위), 지문 본문은 1열 표(박스
+        # 안)에 넣으면 편집 가능한 텍스트가 박스 안에 배치된다.
+        # 본문은 문단마다 한 행으로 나눈다(1×1 표 한 칸에 3천 자를 넣으면 셀이 쪽 높이를
+        # 넘어 한컴/rhwp 가 쪽을 수백 장 만든다). writer 는 layout.passage_box 를 보고 행
+        # 사이 선을 지우고 쪽 높이 기준으로 표를 나눠 하나의 상자처럼 보이게 한다.
         if prob.get("is_passage"):
             head, _, body = stem_text.partition("\n")
+            body_rows = [[line.strip()] for line in body.split("\n") if line.strip()]
             sink.add(
                 {
                     **metadata,
@@ -3116,7 +3120,8 @@ def _import_hwp_via_ir(
                     "stem": head.strip(),
                     "choices": [],
                     "image_paths": prob.get("image_paths", []),
-                    "tables": [[[body.strip()]]] if body.strip() else [],
+                    "tables": [body_rows] if body_rows else [],
+                    "layout": {"passage_box": True} if body_rows else None,
                     # 공유 지문 1차 분리: 목록/집계에서 문항과 구분되는 행 타입.
                     "problem_type": "passage",
                 }
@@ -3145,6 +3150,11 @@ def _import_hwp_via_ir(
         problem_layout = dict(prob.get("layout") or {})
         if source_metadata:
             problem_layout["source_metadata"] = source_metadata
+        # 병합 셀: 표 모델(2차원 문자열)은 그대로 두고 TableGrid.spans 만 layout 에 옮긴다.
+        # 표 순서와 맞춘 리스트([[row, col, row_span, col_span], ...] / 없으면 []).
+        table_spans = [list(getattr(tbl, "spans", None) or []) for tbl in (prob.get("tables") or [])]
+        if any(table_spans):
+            problem_layout["table_spans"] = table_spans
         sink.add(
             {
                 **metadata,
