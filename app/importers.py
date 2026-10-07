@@ -8,6 +8,7 @@ import re
 import shutil
 import sqlite3
 import struct
+import unicodedata
 import uuid
 import zipfile
 import zlib
@@ -127,7 +128,7 @@ def _dedup_notices(sink: _Sink) -> list[str]:
 
 
 def safe_filename(filename: str) -> str:
-    name = Path(filename or "upload").name.strip() or "upload"
+    name = unicodedata.normalize("NFC", Path(filename or "upload").name).strip() or "upload"
     name = SAFE_NAME_RE.sub("_", name)
     return name[:120]
 

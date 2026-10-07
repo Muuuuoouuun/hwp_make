@@ -5,12 +5,13 @@ import json
 import re
 import shutil
 import threading
+import unicodedata
 import tempfile
 import zipfile
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -18,7 +19,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 from .host_guard import LocalHostGuardMiddleware
 from .request_limits import RequestBodyLimitMiddleware
 
@@ -98,6 +99,14 @@ app.mount("/files/uploads", StaticFiles(directory=storage.UPLOAD_DIR), name="fil
 app.mount("/files/exports", StaticFiles(directory=storage.EXPORT_DIR), name="files-exports")
 
 
+def _nfc(value: str) -> str:
+    # macOS 는 한글 파일명을 자모 분해형(NFD)으로 보낸다. 가-힣 허용 목록에서 '_' 로 깨지지 않게 합친다.
+    return unicodedata.normalize("NFC", value or "")
+
+
+UploadName = Annotated[str, AfterValidator(_nfc)]
+
+
 class ProblemPayload(BaseModel):
     source_type: str = Field(default="manual", max_length=40)
     source_name: str = Field(default="", max_length=255)
@@ -119,13 +128,13 @@ class ProblemPayload(BaseModel):
 
 class ImportPayload(BaseModel):
     kind: Literal["pdf", "image", "csv", "sqlite", "hwp", "hwpx", "docx", "text"]
-    filename: str = Field(min_length=1, max_length=255)
+    filename: UploadName = Field(min_length=1, max_length=255)
     data_base64: str = Field(min_length=1, max_length=MAX_BASE64_CHARS)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class PdfLayoutExportPayload(BaseModel):
-    filename: str = Field(min_length=1, max_length=255)
+    filename: UploadName = Field(min_length=1, max_length=255)
     data_base64: str = Field(min_length=1, max_length=MAX_BASE64_CHARS)
     max_pages: int | None = Field(default=None, ge=1, le=200)
     boxed_passages: bool = True
@@ -152,7 +161,7 @@ class CollectPayload(BaseModel):
 
 
 class AttachImagePayload(BaseModel):
-    filename: str = Field(min_length=1, max_length=255)
+    filename: UploadName = Field(min_length=1, max_length=255)
     data_base64: str = Field(min_length=1, max_length=MAX_BASE64_CHARS)
 
 
@@ -291,14 +300,14 @@ def _effective_native_math(payload: ExportPayload, template: exam_templates.Exam
 
 
 def _safe_export_name(title: str, extension: str) -> str:
-    name = re.sub(r"[^0-9A-Za-z가-힣._ -]+", "_", title or "문항 모음").strip()
+    name = re.sub(r"[^0-9A-Za-z가-힣._ -]+", "_", _nfc(title) or "문항 모음").strip()
     name = name[:80] or "문항 모음"
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"{stamp}_{name}.{extension}"
 
 
 def _safe_path_name(value: str, fallback: str = "output") -> str:
-    name = re.sub(r"[^0-9A-Za-z가-힣._ -]+", "_", value or fallback).strip(" ._")
+    name = re.sub(r"[^0-9A-Za-z가-힣._ -]+", "_", _nfc(value) or fallback).strip(" ._")
     return name[:80] or fallback
 
 
