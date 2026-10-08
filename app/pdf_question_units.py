@@ -23,7 +23,7 @@ def wrap_question_units(section, paragraphs, item_layouts, header, width):
     """
     from hwpx.oxml._document_impl import _create_rectangle_element
     from .hwpx_writer_v2 import _set_paragraph_element_lineseg
-    from .pdf_native_typography import _flow_height
+    from .pdf_native_typography import _flow_height, _source_literal_flow_bounds
 
     if len(paragraphs) != len(item_layouts):
         raise ValueError("question container paragraph/source mapping is incomplete")
@@ -62,6 +62,8 @@ def wrap_question_units(section, paragraphs, item_layouts, header, width):
             raise ValueError(f"question {group_id} is split into non-contiguous groups")
         seen.add(group_id)
         first, layout = entries[0]
+        from .pdf_wrapped_prose_frames import question_wrapped_width
+        group_width = question_wrapped_width(entries, float(page.get('width','59528')) if page is not None else 59528, width)
         from .pdf_question_tables import flatten_question_fraction_tables
 
         flatten_question_fraction_tables([paragraph for paragraph, _ in entries], header, width=width)
@@ -70,8 +72,16 @@ def wrap_question_units(section, paragraphs, item_layouts, header, width):
 
         apply_question_internal_spacing(entries, header, float(page.get("width", "59528")) if page is not None else 59528)
         styles = {p.get("id"): p for p in header.iter(HH + "paraPr")}
-        height = round(sum(_flow_height(paragraph) + sum(paragraph_spacing(paragraph, styles))
-                           for paragraph, _ in entries) + 400)
+        # Measured English caches already include the final font descender.
+        # A second blanket reserve on every question caused real source
+        # columns containing several native tables to spill onto a new page.
+        # Object reserves remain intact; incomplete/unproved and math groups
+        # retain the original wrapper reserve as well.
+        reserve = 0 if all(_source_literal_flow_bounds(paragraph, source)
+                           for paragraph, source in entries) else 400
+        height = round(sum(_flow_height(paragraph, source_layout=source)
+                           + sum(paragraph_spacing(paragraph, styles))
+                           for paragraph, source in entries) + reserve)
         if height > available - 1400:
             raise ValueError(
                 f"question {group_id} needs {height} HWPUNIT but a page holds "
@@ -89,7 +99,7 @@ def wrap_question_units(section, paragraphs, item_layouts, header, width):
         next_id += 1
         first_run = first.find(f"{HP}run")
         run = etree.SubElement(outer, f"{HP}run", charPrIDRef=(first_run.get("charPrIDRef", "0") if first_run is not None else "0"))
-        raw_shape = _create_rectangle_element(width, height, line_width="1", fill_color=None, treat_as_char=True)
+        raw_shape = _create_rectangle_element(group_width, height, line_width="1", fill_color=None, treat_as_char=True)
         shape = etree.fromstring(ElementTree.tostring(raw_shape, encoding="utf-8"))
         shape.set("id", str(next_id))
         shape.set("instid", str(next_id))
@@ -105,11 +115,11 @@ def wrap_question_units(section, paragraphs, item_layouts, header, width):
         comment = shape.find(f"{HP}shapeComment")
         if comment is not None:
             comment.text = f"문항 {number} ({group_id})"
-        draw = etree.Element(f"{HP}drawText", lastWidth=str(width), name=f"question:{group_id}", editable="1")
+        draw = etree.Element(f"{HP}drawText", lastWidth=str(group_width), name=f"question:{group_id}", editable="1")
         etree.SubElement(draw, f"{HP}textMargin", left="0", right="0", top="0", bottom="0")
         sub = etree.SubElement(
             draw, f"{HP}subList", id="", textDirection="HORIZONTAL", lineWrap="BREAK",
-            vertAlign="TOP", linkListIDRef="0", linkListNextIDRef="0", textWidth=str(width),
+            vertAlign="TOP", linkListIDRef="0", linkListNextIDRef="0", textWidth=str(group_width),
             textHeight=str(height), hasTextRef="0", hasNumRef="0",
         )
         for paragraph, _ in entries:
@@ -119,7 +129,7 @@ def wrap_question_units(section, paragraphs, item_layouts, header, width):
         shadow = shape.find(f"{HP}shadow")
         shape.insert(shape.index(shadow) if shadow is not None else len(shape), draw)
         run.append(shape)
-        _set_paragraph_element_lineseg(outer, height, width=width, spacing_ratio=0.0)
+        _set_paragraph_element_lineseg(outer, height, width=group_width, spacing_ratio=0.0)
         section.insert(anchor_index, outer)
         outputs.append(outer)
         source_groups.append(_source_group(layout))

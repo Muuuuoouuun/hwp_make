@@ -1,16 +1,15 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index 5032f9d..5d232a4 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -1,6 +1,6 @@
  [package]
  name = "rhwp-python"
 -version = "0.7.0"
-+version = "0.7.0+nativecell1"
++version = "0.7.0+nativecell5"
  edition = "2021"
  # ^ rust-version 미명시 — 상위 rhwp crate 정책(stable Rust, MSRV unclaimed) 준수.
  #   PyO3 0.28 이 Rust 1.83+ 요구하지만, 이는 README 에 문서로 안내
-@@ -42,10 +42,10 @@ crate-type = ["cdylib", "rlib"]
+@@ -42,10 +42,10 @@
  extension-module = ["pyo3/extension-module"]
  
  [dependencies]

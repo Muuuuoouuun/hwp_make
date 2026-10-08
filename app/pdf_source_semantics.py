@@ -435,10 +435,12 @@ def source_grid_cells(page, raw_lines, figure_regions=(), *, raw_grid_collector=
             continue
         if any(figure.contains(bounds) for figure in figure_regions):
             continue
+        from .pdf_source_grid_geometry import source_grid_cell_bounds
+        source_cells = source_grid_cell_bounds(page, grid)
         matrix = []
-        for row in grid.rows:
+        for row in source_cells:
             values = []
-            for cell in row.cells:
+            for cell in row:
                 if cell is None:
                     values.append(None)
                     continue
@@ -490,7 +492,7 @@ def source_grid_cells(page, raw_lines, figure_regions=(), *, raw_grid_collector=
             matrix.append(values)
         from .pdf_source_table_semantics import source_grid_gutter
         for side in ("left", "right"):
-            gutter = source_grid_gutter(grid.rows, raw_lines, bounds, side=side)
+            gutter = source_grid_gutter(source_cells, raw_lines, bounds, side=side)
             if gutter is not None:
                 labels, edge = gutter
                 if side == "left":

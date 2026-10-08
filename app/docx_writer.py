@@ -655,8 +655,8 @@ def _set_font(paragraph, size: int = 10, bold: bool = False) -> None:
         _style_run(run, size, bold)
 
 
-def _add_text_runs(paragraph, text: str, size: int = 10, bold: bool = False) -> None:
-    parts = split_math_text(text)
+def _add_text_runs(paragraph, text: str, size: int = 10, bold: bool = False, *, literal_text: bool = False) -> None:
+    parts = [(text, False)] if literal_text else split_math_text(text)
     if not parts:
         run = paragraph.add_run("")
         _style_run(run, size, bold)
@@ -668,9 +668,9 @@ def _add_text_runs(paragraph, text: str, size: int = 10, bold: bool = False) -> 
         _style_run(run, size, bold, math=is_math)
 
 
-def _add_text_paragraph(document: Document, text: str = "", size: int = 10, bold: bool = False):
+def _add_text_paragraph(document: Document, text: str = "", size: int = 10, bold: bool = False, *, literal_text: bool = False):
     paragraph = document.add_paragraph()
-    _add_text_runs(paragraph, text, size=size, bold=bold)
+    _add_text_runs(paragraph, text, size=size, bold=bold, literal_text=literal_text)
     return paragraph
 
 
@@ -712,6 +712,7 @@ def _add_table(
     rows: list[list[str]],
     spans: list[list[int]] | None = None,
     box_frame: bool = False,
+    literal_text: bool = False,
 ) -> None:
     if not rows or not any(rows):
         return
@@ -724,7 +725,7 @@ def _add_table(
         for c in range(col_cnt):
             cell = table.rows[r].cells[c]
             paragraph = cell.paragraphs[0]
-            _add_text_runs(paragraph, str(row[c]) if c < len(row) else "")
+            _add_text_runs(paragraph, str(row[c]) if c < len(row) else "", literal_text=literal_text)
     if box_frame and len(rows) > 1:
         # 지문 상자(HWPX 와 같은 의미): 문단 행 사이 가로선을 없애 한 상자처럼 보이게 한다.
         for r in range(len(rows)):
@@ -848,19 +849,22 @@ def write_docx(
         subject = problem.get("subject") or ""
         unit = problem.get("unit") or ""
         meta = " / ".join(part for part in [subject, unit] if part)
+        problem_layout = problem.get("layout") if isinstance(problem.get("layout"), dict) else {}
+        literal_text = bool(problem_layout.get("source_literal_text")
+                            and problem_layout.get("block_type") in {"problem", "problem_with_shared_passage"})
 
         stem = problem.get("stem") or ""
         stem_lines = stem.splitlines()
-        if template.source_number_line:
+        if template.source_number_line or problem.get("_shared_numbering_prepared"):
             for text, style in numbered_stem_paragraphs(
                 stem_lines, label, numbered=bool(problem.get("number")),
                 prepared=bool(problem.get("_numbering_prepared")),
             ):
                 paragraph = document.add_paragraph()
                 if style == "heading":
-                    _add_text_runs(paragraph, text, 11, True)
+                    _add_text_runs(paragraph, text, 11, True, literal_text=literal_text)
                 else:
-                    _add_text_runs(paragraph, text)
+                    _add_text_runs(paragraph, text, literal_text=literal_text)
             if meta:
                 _add_text_paragraph(document, f"[{meta}]", 9, False)
         elif template.merge_question_number:
@@ -871,19 +875,19 @@ def write_docx(
                 else problem.get("title") or "문제"
             )
             paragraph = document.add_paragraph()
-            _add_text_runs(paragraph, f"{label}. {first_line}", 11, True)
+            _add_text_runs(paragraph, f"{label}. {first_line}", 11, True, literal_text=literal_text)
             if meta:
                 _add_text_runs(paragraph, f"  [{meta}]", 9, False)
             for line in stem_lines[1:]:
-                _add_text_paragraph(document, line)
+                _add_text_paragraph(document, line, literal_text=literal_text)
         else:
             paragraph = document.add_paragraph()
-            _add_text_runs(paragraph, f"{label}. {problem.get('title') or '문제'}", 11, True)
+            _add_text_runs(paragraph, f"{label}. {problem.get('title') or '문제'}", 11, True, literal_text=literal_text)
             if meta:
                 _add_text_runs(paragraph, f"  [{meta}]", 9, False)
             if stem:
                 for line in stem_lines:
-                    _add_text_paragraph(document, line)
+                    _add_text_paragraph(document, line, literal_text=literal_text)
 
         problem_layout = problem.get("layout") if isinstance(problem.get("layout"), dict) else {}
         layout_spans = problem_layout.get("table_spans") or []
@@ -893,6 +897,7 @@ def write_docx(
                 table_rows,
                 spans=layout_spans[table_index] if table_index < len(layout_spans) else None,
                 box_frame=bool(problem_layout.get("passage_box")),
+                literal_text=literal_text,
             )
 
         for image_path in problem.get("image_paths") or []:
@@ -909,10 +914,10 @@ def write_docx(
             for choice_index, choice in enumerate(problem.get("choices") or [], start=1)
         ]
         if choices and template.inline_short_choices and sum(len(choice) for choice in choices) <= 90:
-            _add_text_paragraph(document, "    ".join(choices))
+            _add_text_paragraph(document, "    ".join(choices), literal_text=literal_text)
         else:
             for choice in choices:
-                _add_text_paragraph(document, choice)
+                _add_text_paragraph(document, choice, literal_text=literal_text)
         if needs_answer_blank(problem, template):
             _add_text_paragraph(document, answer_blank_text(template))
 

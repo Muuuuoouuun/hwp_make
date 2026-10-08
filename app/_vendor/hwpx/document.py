@@ -367,6 +367,8 @@ class HwpxDocument:
         self._managed_resources = list(managed_resources)
         self._closed = False
         self.validate_on_save = validate_on_save
+        from .tools.native_gap_state import capture_open
+        capture_open(self)
 
     def __repr__(self) -> str:
         """Return a compact and safe summary of the document state."""

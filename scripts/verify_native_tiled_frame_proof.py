@@ -47,22 +47,35 @@ def main():
     assert not _native_tiled_frame_reconstructions(
         page, images, [], ["A different native paragraph."]
     )
-    for kind in ("gap", "wrong_grid"):
+    for kind in ("gap", "wrong_grid", "zero_width", "zero_height", "zero_pixels"):
         changed = deepcopy(images)
         if kind == "gap":
             changed[1]["bbox"] = tuple(
                 v + 1 if i in (1, 3) else v for i, v in enumerate(changed[1]["bbox"])
             )
-        else:
+        elif kind == "wrong_grid":
             changed[1]["width"] += 1
+        elif kind == "zero_pixels":
+            changed[1]["height"] = 0
+        else:
+            box = list(changed[1]["bbox"])
+            box[2 if kind == "zero_width" else 3] = box[0 if kind == "zero_width" else 1]
+            changed[1]["bbox"] = tuple(box)
         assert not _native_tiled_frame_reconstructions(page, changed, [], texts), kind
+    # A fully clipped extra strip at a tile boundary must neither crash the
+    # proof nor stand in for one of the visible strips.
+    clipped = deepcopy(images[1])
+    clipped["number"] = 999
+    clipped["bbox"] = (45, 215, 285, 215)
+    proof = _native_tiled_frame_reconstructions(page, [clipped, *images], [], texts)
+    assert len(proof) == 3 and 999 not in proof
     doc.close()
     for options in ({"decoration": True}, {"broken": True}):
         doc, page, images, texts = fixture(**options)
         assert not _native_tiled_frame_reconstructions(page, images, [], texts), options
         doc.close()
     print(
-        "NATIVE_TILED_FRAME_PROOF_OK: complete three-tile frame accepted; missing native prose, non-touching grid, mismatched pixels, interior decoration and broken border rejected"
+        "NATIVE_TILED_FRAME_PROOF_OK: complete frame accepted; clipped/degenerate strips safe; missing prose, grid/pixel errors, decoration and broken border rejected"
     )
 
 

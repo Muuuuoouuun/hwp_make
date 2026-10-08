@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from copy import deepcopy
+import math
 from pathlib import Path
 import re
 from statistics import median
@@ -30,9 +31,14 @@ def _font_name(value):
     # PDF/PostScript names are not necessarily installed font-family names.
     # An unresolved TimesNewRoman fell back to fixed half-em Latin advances in
     # the renderer, overrunning columns despite measured source line caches.
+    name = re.sub(r",(?:Bold|Italic|BoldItalic)$", "", name, flags=re.I)
     name = {"TimesNewRoman": "Times New Roman",
             "TimesNewRomanPSMT": "Times New Roman",
-            "ArialMT": "Arial"}.get(name, name)
+            "TimesNewRomanPS-BoldMT": "Times New Roman",
+            "TimesNewRomanPS-ItalicMT": "Times New Roman",
+            "TimesNewRomanPS-BoldItalicMT": "Times New Roman",
+            "ArialMT": "Arial",
+            "ArialBlack": "Arial Black"}.get(name, name)
     if "eq" in name.lower():
         return "HY신명조"
     if "신명" in name and "고딕" not in name:
@@ -50,7 +56,7 @@ def _number(element, attribute, default=0):
     )
 
 
-def _paragraph_units(paragraph, font_height, widths):
+def _paragraph_units(paragraph, font_height, widths, char_styles=None, blank_styles=()):
     """Text offsets count UTF-16 characters; inline controls occupy eight units."""
     from ._vendor.hangul_units import hangul_clusters
     from ._vendor.hwpx_text_content import iter_text_parts
@@ -59,6 +65,12 @@ def _paragraph_units(paragraph, font_height, widths):
     for run in paragraph.findall(f"{HP}run"):
         for child in run:
             if child.tag == f"{HP}t":
+                text = "".join(child.itertext())
+                if run.get("charPrIDRef") in blank_styles and text and text.isspace() and not len(child):
+                    style = (char_styles or {}).get(run.get("charPrIDRef"))
+                    height = _number(style, "height", font_height)
+                    result.append((text, height * .5 * len(text), len(text.encode("utf-16-le")) // 2, 0))
+                    continue
                 for value, control in iter_text_parts(child):
                     if control is not None and control.tag == HP + 'lineBreak':
                         result.append(('\n', 0, 1, 0))
@@ -72,6 +84,7 @@ def _paragraph_units(paragraph, font_height, widths):
             elif child.tag in {f"{HP}equation", f"{HP}tbl", f"{HP}pic", f"{HP}rect"}:
                 size = child.find(f"{HP}sz")
                 height = _number(size, "height")
+                object_width = _number(size, "width", font_height)
                 if child.tag == f"{HP}equation":
                     from .hwpx_writer import _equation_size
 
@@ -82,13 +95,13 @@ def _paragraph_units(paragraph, font_height, widths):
                         / 1000,
                     )
                 result.append(
-                    ("\ufffc", _number(size, "width", font_height), 8, height)
+                    ("\ufffc", object_width, 8, height)
                 )
     return result
 
 
-def _line_cache(paragraph, width, font_height, line_step, widths):
-    units = _paragraph_units(paragraph, font_height, widths)
+def _line_cache(paragraph, width, font_height, line_step, widths, char_styles=None, blank_styles=()):
+    units = _paragraph_units(paragraph, font_height, widths, char_styles, blank_styles)
     if not units:
         return 0
     # Keep Latin words together when possible, while allowing long Korean words
@@ -153,11 +166,61 @@ def _line_cache(paragraph, width, font_height, line_step, widths):
     return top
 
 
-def _flow_height(paragraph):
+def _source_literal_flow_bounds(paragraph, source_layout):
+    """Whether source English and its native cached bounds are both proved.
+
+    ``source_literal_text`` is set by extraction only for an actual English
+    subject with no equation-font glyphs. A caller must also supply real source
+    typography and a cache retaining a positive font descender; a label or a
+    filename alone cannot remove the normal question-container reserve.
+    """
+    layout = source_layout or {}
+    meta = layout.get("source_typography") or {}
+    bbox = meta.get("source_bbox_pt") or []
+    try:
+        dimensions = [float(layout.get("source_page_width_pt", 0)),
+                      float(meta.get("font_size_pt", 0)), *map(float, bbox)]
+    except (TypeError, ValueError):
+        return False
+    if not (layout.get("source_content") is True
+            and layout.get("source_literal_text") is True
+            and len(dimensions) == 6 and all(math.isfinite(v) for v in dimensions)
+            and dimensions[0] > 0 and dimensions[1] > 0
+            and dimensions[4] > dimensions[2] and dimensions[5] > dimensions[3]
+            and meta.get("lines") and paragraph.find(".//" + HP + "equation") is None):
+        return False
+    lines = paragraph.findall(HP + "linesegarray/" + HP + "lineseg")
+    try:
+        if not lines or any(not (
+            0 <= _number(line, "baseline") < _number(line, "textheight")
+            and 0 < _number(line, "textheight") <= _number(line, "vertsize")
+            and _number(line, "spacing") >= 0
+            and all(math.isfinite(_number(line, key)) for key in
+                    ("vertpos", "vertsize", "textheight", "baseline", "spacing"))
+        ) for line in lines):
+            return False
+        return all(
+            0 < _number(obj.find(HP + "sz"), "height") < float("inf")
+            for run in paragraph.findall(HP + "run") for obj in run
+            if obj.tag in {HP + "tbl", HP + "pic", HP + "rect", HP + "container"}
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _flow_height(paragraph, *, source_layout=None):
     lines = paragraph.findall(f"{HP}linesegarray/{HP}lineseg")
     height = sum(
         _number(line, "vertsize", 1000) + _number(line, "spacing") for line in lines
     )
+    if _source_literal_flow_bounds(paragraph, source_layout):
+        # Caches can contain a measured gap between two baselines. Preserve
+        # that occupied band and the final positive descender, even when the
+        # question wrapper does not need another generic 400-unit reserve.
+        height = max(height, max(
+            _number(line, "vertpos") + _number(line, "vertsize")
+            + _number(line, "spacing") for line in lines
+        ) - min(_number(line, "vertpos") for line in lines))
     objects = [
         child
         for run in paragraph.findall(f"{HP}run")
@@ -252,7 +315,11 @@ def _paginate(section, paragraphs, source_groups, header=None):
                 paragraph.set("columnBreak", "1")
                 column += 1
             cursor = 0.0
-        limit = available - (header_height if page_index == 0 else 0) - 1400
+        # Page margins already reserve the footer, and _flow_height includes
+        # each native question's padding. An additional fixed 14pt reserve
+        # pushes a source-fitting last question into the next column and shifts
+        # every later source boundary (including the next booklet variant).
+        limit = available - (header_height if page_index == 0 else 0)
         before, after = paragraph_spacing(paragraph, styles)
         height = _flow_height(paragraph) + before + after
         if before and cursor + height > limit and header is not None:
@@ -281,6 +348,8 @@ def _paginate(section, paragraphs, source_groups, header=None):
 
 
 def apply_native_typography(path: Path, items: list[dict]) -> dict:
+    if items:
+        items[0].setdefault("layout", {}).pop("source_page_mastheads_restored", None)
     with zipfile.ZipFile(path) as archive:
         infos = archive.infolist()
         payloads = {info.filename: archive.read(info.filename) for info in infos}
@@ -292,6 +361,8 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
     char_by_id = {node.get("id"): node for node in chars}
     para_by_id = {node.get("id"): node for node in paras}
     char_cache = {}
+    answer_blank_cache = {}
+    answer_blank_styles = set()
     para_cache = {}
     equation_matches = equation_fallbacks = 0
     equation_width_matches = 0
@@ -299,6 +370,7 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
     choice_rows = 0
     changed_paragraphs = 0
     shared_table_paragraphs = 0
+    measured_masthead_sections = 0
     source_fonts = set()
     fraction_borders = {
         node.get("id")
@@ -340,8 +412,8 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
             ids[language] = font.get("id")
         return ids
 
-    def char_style(base, height, font, spacing, ratio, bold=None):
-        key = (base, round(height), font, spacing, ratio, bold)
+    def char_style(base, height, font, spacing, ratio, bold=None, *, italic=None):
+        key = (base, round(height), font, spacing, ratio, bold, italic)
         if key not in char_cache:
             node = deepcopy(char_by_id.get(base, next(iter(char_by_id.values()))))
             identifier = str(max(map(int, char_by_id)) + 1)
@@ -353,6 +425,12 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
                     etree.SubElement(node, HH + "bold")
                 elif not bold and weight is not None:
                     node.remove(weight)
+            if italic is not None:
+                slant = node.find(HH + "italic")
+                if italic and slant is None:
+                    etree.SubElement(node, HH + "italic")
+                elif not italic and slant is not None:
+                    node.remove(slant)
             refs = node.find(f"{HH}fontRef")
             ids = font_ids(font)
             for language in LANGUAGES:
@@ -367,6 +445,29 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
             char_by_id[identifier] = node
             char_cache[key] = identifier
         return char_cache[key]
+
+    def answer_blank_style(base, height, *, underline=False):
+        key = (base, round(height), underline)
+        if key not in answer_blank_cache:
+            node = deepcopy(char_by_id.get(base, next(iter(char_by_id.values()))))
+            identifier = str(max(map(int, char_by_id)) + 1)
+            node.set("id", identifier)
+            node.set("height", str(round(height)))
+            for kind, value in (("ratio", 100), ("spacing", 0)):
+                metric = node.find(HH + kind)
+                if metric is not None:
+                    for language in LANGUAGES:
+                        metric.set(language, str(value))
+            rule = node.find(HH + "underline")
+            if rule is None:
+                rule = etree.SubElement(node, HH + "underline")
+            rule.attrib.update({"type": "BOTTOM" if underline else "NONE",
+                                "shape": "SOLID", "color": "#000000"})
+            chars.append(node)
+            char_by_id[identifier] = node
+            answer_blank_styles.add(identifier)
+            answer_blank_cache[key] = identifier
+        return answer_blank_cache[key]
 
     def para_style(base, alignment, step, font_height, left=0, indent=0, right=0):
         percent = max(100, min(250, round(step * 100 / font_height)))
@@ -393,6 +494,7 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
             para_cache[key] = identifier
         return para_cache[key]
 
+    source_grid_ids = set()
     for filename, payload in list(payloads.items()):
         if not re.fullmatch(r"Contents/section\d+\.xml", filename):
             continue
@@ -459,6 +561,9 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
             )
             from .pdf_inline_label_writer import restore_inline_labels
             inline_label_count = restore_inline_labels(root_paragraph, layout, page_width, char_style, para_style)
+            from .pdf_answer_blanks import restore_answer_blanks
+            restore_answer_blanks(root_paragraph, layout, page_width, char_style=char_style,
+                                  blank_style=answer_blank_style)
             samples = defaultdict(list)
             for line in meta.get("lines") or []:
                 for span in line.get("spans") or []:
@@ -588,7 +693,7 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
                         break
                     ancestor = ancestor.getparent()
                 for run in paragraph.findall(f"{HP}run"):
-                    if run.find(f"{HP}t") is not None:
+                    if run.find(f"{HP}t") is not None and run.get("charPrIDRef") not in answer_blank_styles:
                         run.set(
                             "charPrIDRef",
                             char_style(
@@ -609,7 +714,7 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
                     # Editable Hangul operands use the measured source table
                     # font too. Keep their centered fraction paragraph style.
                     _line_cache(paragraph, max(1500, available), font_height,
-                                font_height * 1.2, widths)
+                                font_height * 1.2, widths, char_by_id, answer_blank_styles)
                     continue
                 if any(
                     (position := table.find(f"{HP}pos")) is None
@@ -627,7 +732,8 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
                     ),
                 )
                 if _line_cache(
-                    paragraph, max(1500, available), font_height, step, widths
+                    paragraph, max(1500, available), font_height, step, widths,
+                    char_by_id, answer_blank_styles
                 ):
                     changed_paragraphs += 1
                 if paragraph is root_paragraph:
@@ -636,9 +742,15 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
             if inline_label_count and root_paragraph.find(HP + 'run/' + HP + 'tbl') is None:
                 from .pdf_source_line_cache import apply_source_line_cache
                 apply_source_line_cache(root_paragraph, {**layout, 'native_page_width': page_width}, width)
+            from .pdf_source_run_styles import restore_source_run_styles
+            if restore_source_run_styles(root_paragraph, layout, page_width, char_style,
+                                         protected_styles=answer_blank_styles):
+                layout["source_run_styles_applied"] = True
+            from .pdf_source_question_body import restore_source_instruction_cache
+            restore_source_instruction_cache(root_paragraph, layout, header, page_width, width)
             from .pdf_table_paragraphs import restore_background_frame
             background_paragraphs = restore_background_frame(
-                root_paragraph, layout, header, page_width, default_width, para_style)
+                root_paragraph, layout, header, page_width, default_width, para_style, char_style)
             if background_paragraphs:
                 shared_table_paragraphs += background_paragraphs
                 item_layouts[-1]['source_bbox_pt'] = layout['native_tables'][0]['bbox_pt']
@@ -652,8 +764,16 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
                 shared_table_paragraphs += restore_table_paragraphs(root_paragraph, layout, header, page_width, para_style)
                 para_by_id.update({p.get("id"): p for p in paras})
         if flow_paragraphs:
-            for body_paragraph in flow_paragraphs:
+            from .pdf_illustrated_prose_frames import finalize_illustrated_frame_height
+            for body_paragraph, source_layout in zip(flow_paragraphs, item_layouts):
                 _fit_table_heights(body_paragraph, fraction_table, header)
+                finalize_illustrated_frame_height(body_paragraph, source_layout, header, page_width)
+                from .pdf_source_grid_layout import restore_source_grid_layout
+                if restore_source_grid_layout(body_paragraph, source_layout, header,
+                                              page_width, default_width, hrefs=hrefs, payloads=payloads):
+                    source_grid_ids.add(body_paragraph.find(HP + 'run/' + HP + 'tbl').get('id'))
+                    source_layout['source_bbox_pt'] = source_layout['native_tables'][0]['bbox_pt']
+                    para_by_id.update({p.get("id"): p for p in paras})
             from .pdf_floating_figures import restore_floating_figures
             flow_paragraphs, item_layouts, restored_floats = restore_floating_figures(
                 section, flow_paragraphs, item_layouts, default_width)
@@ -680,22 +800,42 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
             )
             from .pdf_paragraph_indentation import restore_paragraph_indentation
             restore_paragraph_indentation(paragraph_sources, header, page_width, default_width)
+            # Indentation regenerates its source cache. Reprove only complete
+            # multi-row instructions whose rows have different native heights.
+            from .pdf_source_question_body import restore_source_instruction_cache
+            for source_paragraph, source_layout in paragraph_sources:
+                source_meta = source_layout.get("source_typography") or {}
+                if (source_layout.get("source_question_instruction")
+                        and len(source_meta.get("lines") or []) > 1):
+                    restore_source_instruction_cache(source_paragraph, source_layout,
+                                                     header, page_width, default_width)
+            from .pdf_source_question_body import restore_source_question_body_right
+            restore_source_question_body_right(paragraph_sources, header, page_width, default_width)
             from .pdf_choice_tabs import restore_choice_tabs
             choice_rows += restore_choice_tabs(paragraph_sources, header, page_width, default_width)
             para_by_id.update({p.get("id"): p for p in paras})
             if filename == "Contents/section0.xml" and "Contents/section1.xml" not in payloads:
                 from .pdf_source_spacing import split_masthead_section
-                following = split_masthead_section(section, flow_paragraphs, source_groups, paragraph_sources, header)
-                if following is not None:
-                    payloads["Contents/section1.xml"] = etree.tostring(
-                        following, encoding="utf-8", xml_declaration=True, standalone=True)
+                from .pdf_masthead_sections import split_measured_masthead_sections
+                measured_sections = split_measured_masthead_sections(
+                    section, flow_paragraphs, source_groups, paragraph_sources, header, items, char_style)
+                if measured_sections:
+                    measured_masthead_sections += len(measured_sections)
+                following = (None if measured_sections else split_masthead_section(
+                    section, flow_paragraphs, source_groups, paragraph_sources, header))
+                additions = measured_sections[1:] if measured_sections else ([following] if following is not None else [])
+                if additions:
                     manifest = etree.fromstring(payloads["Contents/content.hpf"])
                     opf = "{" + etree.QName(manifest).namespace + "}"
-                    etree.SubElement(manifest.find(opf + "manifest"), opf + "item", id="section1",
-                                     href="Contents/section1.xml", attrib={"media-type": "application/xml"})
-                    etree.SubElement(manifest.find(opf + "spine"), opf + "itemref", idref="section1", linear="yes")
+                    for section_index, following_section in enumerate(additions, 1):
+                        name = f"section{section_index}"
+                        payloads[f"Contents/{name}.xml"] = etree.tostring(
+                            following_section, encoding="utf-8", xml_declaration=True, standalone=True)
+                        etree.SubElement(manifest.find(opf + "manifest"), opf + "item", id=name,
+                                         href=f"Contents/{name}.xml", attrib={"media-type": "application/xml"})
+                        etree.SubElement(manifest.find(opf + "spine"), opf + "itemref", idref=name, linear="yes")
                     payloads["Contents/content.hpf"] = etree.tostring(manifest, encoding="utf-8", xml_declaration=True)
-                    header.set("secCnt", "2")
+                    header.set("secCnt", str(len(additions) + 1))
             # Paginate each section using its own printable height. Running
             # the first-page margin over all later pages prematurely removed
             # valid whitespace before the section split could restore it.
@@ -711,6 +851,10 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
         if re.fullmatch(r"Contents/section\d+\.xml", filename):
             section = etree.fromstring(payloads[filename])
             native_question_gaps += arrange_question_gaps(section, header)
+            from hwpx.tools.ruled_grid_flow import seed as seed_source_grid
+            for table in section.iter(HP + 'tbl'):
+                if table.get('id') in source_grid_ids:
+                    seed_source_grid(table, section, header)
             payloads[filename] = etree.tostring(section, encoding="utf-8", xml_declaration=True, standalone=True)
     chars.set("itemCnt", str(len(chars)))
     paras.set("itemCnt", str(len(paras)))
@@ -721,16 +865,21 @@ def apply_native_typography(path: Path, items: list[dict]) -> dict:
         for info in infos:
             archive.writestr(info, payloads[info.filename])
         existing = {info.filename for info in infos}
-        for name in payloads.keys() - existing:
+        for name in sorted(payloads.keys() - existing, key=lambda name: (
+                int(match.group(1)) if (match := re.fullmatch(r"Contents/section(\d+)\.xml", name)) else -1,
+                name)):
             archive.writestr(name, payloads[name], compress_type=zipfile.ZIP_DEFLATED)
     from .hwpx_writer_v2 import _merge_native_paragraphs
 
     _merge_native_paragraphs(path)
+    if measured_masthead_sections and items:
+        items[0].setdefault("layout", {})["source_page_mastheads_restored"] = measured_masthead_sections
     return {
         "applied": bool(changed_paragraphs),
         "paragraphs": changed_paragraphs,
         "font_faces": sorted(source_fonts),
         "source_metrics": True,
+        "measured_masthead_sections": measured_masthead_sections,
         "equations_source_font_matched": equation_matches,
         "equations_source_item_font": equation_fallbacks,
         "equations_source_width_matched": equation_width_matches,

@@ -242,6 +242,11 @@ def inspect_pdf_editability(
                 if pos is None or pos.get("treatAsChar") != "1":
                     from .pdf_floating_geometry import inspect_floating_picture
                     floating = inspect_floating_picture(pic, header)
+                    cell_table = next((a for a in pic.iterancestors() if a.tag == f'{{{HP}}}tbl'),None)
+                    if cell_table is not None:
+                        from .pdf_wrapped_prose_frames import source_flow_wrapped_prose_frame_table
+                        if source_flow_wrapped_prose_frame_table(cell_table,root,header,hrefs,package,source):
+                            floating = {'ok': True, 'issues': []}
                     if not floating["ok"]:
                         issues.append("non_inline_picture")
                         issues.extend(floating["issues"])
@@ -406,6 +411,15 @@ def inspect_pdf_editability(
 
         for page_number, page_regions in regions.items():
             page = document[page_number - 1]
+            # A source chart can have a sentence-length title or source note.
+            # Authorize only independently detected chart frames whose exact
+            # crop is present and whose original pixels passed the image audit.
+            # A nearby picture, a claimed label or a prose frame is insufficient.
+            from .pdf_figure_labels import statistical_chart_regions
+            chart_regions = [chart for chart in statistical_chart_regions(page)
+                             if source_images.get("ok") and any(
+                                 max(abs(a - b) for a, b in zip(chart, region)) < .05
+                                 for region in page_regions)]
             for block in page.get_text(
                 "rawdict", flags=fitz.TEXTFLAGS_RAWDICT & ~fitz.TEXT_PRESERVE_IMAGES
             ).get("blocks", []):
@@ -425,6 +439,8 @@ def inspect_pdf_editability(
                         or re.match(r"^(?:\d{1,2}[.]|[①②③④⑤])\s*\S", text)
                     )
                     if not prose:
+                        continue
+                    if any(chart.contains(fitz.Rect(line["bbox"])) for chart in chart_regions):
                         continue
                     covered = 0
                     for char in chars:

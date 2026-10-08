@@ -5,8 +5,10 @@ from __future__ import annotations
 from copy import deepcopy
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -74,6 +76,30 @@ def verify_rules():
         "block_type": "problem", "bbox_px": [1, 2, 100, 300], "column_index": 1,
     }}]
     assert prepare_export_problems(editable, "sequential")[0]["number"] == "1"
+    shared_question = {
+        "id": 21, "number": "21", "problem_type": "question",
+        "stem": "[21~23] 다음 글을 읽으시오.\nWhy do we ask questions?\nA complete shared passage.\n21. 글의 제목은?",
+        "choices": ["A title", "Another title"], "source_page": 1,
+        "layout": {"block_type": "problem_with_shared_passage", "bbox_px": [1, 2, 100, 300],
+                   "column_index": 1, "shared_passage": {"range": [21, 23], "source_page": 1, "line_count": 3}},
+    }
+    snapshot = prepare_export_problems([shared_question], "preserve")[0]
+    assert snapshot["stem"] == shared_question["stem"] and snapshot["number"] == "21"
+    assert snapshot["_shared_numbering_prepared"] is True
+    renumbered = prepare_export_problems([shared_question], "sequential")[0]
+    assert renumbered["number"] == "1" and renumbered["stem"].startswith("[1] 다음 글")
+    assert "\n1. 글의 제목은?" in renumbered["stem"] and "\n21." not in renumbered["stem"]
+    assert renumbered["layout"]["shared_passage"]["range"] == [21, 23]
+    # Pure passage rows, ambiguous body markers and genuine external links keep
+    # their review gate. Source objects and their provenance stay unchanged.
+    for stem in (shared_question["stem"].replace("[21~23]", "[20~23]"),
+                 shared_question["stem"] + "\n21. Another ambiguous numbered prompt."):
+        expect_error([{**shared_question, "stem": stem}], numbering_mode="sequential", reason="ambiguous_shared_number")
+    for additions, reason in (({"problem_type": "passage"}, "passage"),
+                              ({"number": "[21~23]"}, "passage"),
+                              ({"stem": "[21~23] A shared passage without a question."}, "passage"),
+                              ({"group_id": "external-group"}, "group")):
+        expect_error([{**shared_question, **additions}], numbering_mode="preserve", reason=reason)
     for prefix in ("27. 본문", "문제 27. 본문", "27) 본문"):
         result = prepare_export_problems([{**normal[0], "stem": prefix}], "sequential")
         assert result[0]["stem"] == "본문", result
@@ -83,6 +109,8 @@ def verify_rules():
     cloned[0]["choices"].append("다")
     assert normal[0]["choices"] == ["가", "나"]
     assert normal[0]["stem"] == "27. 본문" and "_numbering_prepared" not in normal[0]
+    forged = prepare_export_problems([{**normal[0], "_shared_numbering_prepared": True}], "sequential")[0]
+    assert "_shared_numbering_prepared" not in forged
     print("PASS validation, unsupported inputs, prefix safety, boundaries, deep-copy isolation")
 
 
@@ -130,6 +158,109 @@ def verify_documents(folder):
         writer(path, "Missing test", prepare_export_problems([{"number": "", "stem": "문항"}], "sequential"), "kice_math", include_answer_sheet=True)
         assert "1. 문항" in " ".join(document_text(path).split())
     print("PASS both writers: decimal content survives, missing answers/explanations accepted")
+
+    shared_sources = [{
+        "number": str(number), "problem_type": "question",
+        "stem": f"[21~22] 다음 글을 읽으시오.\nWhy do we ask questions?\nA complete shared passage.\n{number}. 공유문항{number}의 답은?",
+        "choices": ["A title", "Another title"],
+        "layout": {"block_type": "problem_with_shared_passage", "bbox_px": [1, 2, 100, 300],
+                   "shared_passage": {"range": [21, 22], "source_page": 1, "line_count": 3}},
+    } for number in (21, 22)]
+    for selected in ([shared_sources[1]], list(reversed(shared_sources))):
+        for extension, writer in [("hwpx", hwpx_writer_v2.write_hwpx), ("docx", docx_writer.write_docx)]:
+            path = Path(folder) / f"shared_{len(selected)}.{extension}"
+            writer(path, "Shared question test", prepare_export_problems(selected, "preserve"), "kice_english")
+            text = " ".join(document_text(path).split())
+            for problem in selected:
+                number = problem["number"]
+                assert text.count(f"{number}. 공유문항{number}") == 1, text
+                assert len(re.findall(r"(?<!\d)" + number + r"\s*\.", text)) == 1, text
+                assert f"{number}. {number}." not in text, text
+                assert f"{number}. Why do we ask" not in text, text
+            if len(selected) > 1:
+                assert text.index("공유문항22") < text.index("공유문항21"), text
+            assert text.count("A complete shared passage.") == len(selected), text
+    print("PASS shared questions alone and reversed: complete passages, one original label, both writers")
+
+    for selected in ([shared_sources[1]], list(reversed(shared_sources))):
+        for start in (1, 101):
+            prepared = prepare_export_problems(selected, "sequential", start)
+            for extension, writer in [("hwpx", hwpx_writer_v2.write_hwpx), ("docx", docx_writer.write_docx)]:
+                path = Path(folder) / f"shared_sequential_{len(selected)}_{start}.{extension}"
+                writer(path, "Shared sequential", prepared, "kice_english")
+                text = " ".join(document_text(path).split())
+                for offset, original in enumerate(selected):
+                    label = start + offset
+                    prompt = f"{label}. 공유문항{original['number']}의 답은?"
+                    assert text.count(prompt) == 1 and f"[{label}] 다음 글" in text, text
+                    assert text.index("A complete shared passage.") < text.index(prompt), text
+                    assert f"{original['number']}. 공유문항" not in text, text
+                assert text.count("A complete shared passage.") == len(selected), text
+    print("PASS sequential shared questions: singleton/rerordered selection, start101, native body labels and provenance")
+
+    # The browser defaults to basic. Its shared passage must precede the one
+    # actual question label just as it does in the English source template.
+    for template_key in ("basic", "simple"):
+        for mode in ("preserve", "sequential"):
+            for selected in ([shared_sources[1]], list(reversed(shared_sources))):
+                prepared = prepare_export_problems(selected, mode, 101)
+                for extension, writer in [("hwpx", hwpx_writer_v2.write_hwpx), ("docx", docx_writer.write_docx)]:
+                    path = Path(folder) / f"shared_ui_{template_key}_{mode}_{len(selected)}.{extension}"
+                    writer(path, "Shared UI default", prepared, template_key)
+                    text = " ".join(document_text(path).split())
+                    for offset, original in enumerate(selected):
+                        label = str(101 + offset) if mode == "sequential" else original["number"]
+                        prompt = f"{label}. 공유문항{original['number']}의 답은?"
+                        assert text.count(prompt) == 1, text
+                        assert len(re.findall(r"(?<!\d)" + label + r"\s*\.", text)) == 1, text
+                        assert text.index("A complete shared passage.") < text.index(prompt), text
+                    assert text.count("A complete shared passage.") == len(selected), text
+                    assert all("_shared_numbering_prepared" not in problem for problem in shared_sources)
+    print("PASS UI basic/simple templates: shared questions keep one label after the passage in both modes/formats")
+
+    # Use the actual English template for an article-only source number line.
+    # A duplicate before the range heading must fail even when the body has a
+    # single correct '34. A' line. Exercise direct and premium-prepared writers.
+    assert exam_templates.get_template("kice_english").source_number_line
+    article = {
+        "number": "34", "problem_type": "question",
+        "stem": "[31~34] 다음 빈칸에 들어갈 말로 알맞은 것을 고르시오.\n34. A\nparticularly powerful example follows.",
+        "choices": ["first answer", "second answer"],
+        "layout": {"block_type": "problem_with_shared_passage",
+                   "shared_passage": {"range": [31, 34], "source_page": 1, "line_count": 1}},
+    }
+    for selected in ([article], [shared_sources[1], shared_sources[0], article]):
+        for prepared in (False, True):
+            questions = prepare_export_problems(selected, "preserve") if prepared else selected
+            for extension, writer in [("hwpx", hwpx_writer_v2.write_hwpx), ("docx", docx_writer.write_docx)]:
+                path = Path(folder) / f"english_labels_{len(selected)}_{prepared}.{extension}"
+                writer(path, "English original labels", questions, "kice_english")
+                text = " ".join(document_text(path).split())
+                for problem in selected:
+                    number = problem["number"]
+                    assert len(re.findall(r"(?<!\d)" + number + r"\s*\.", text)) == 1, text
+                assert text.index("[31~34]") < text.index("34. A") < text.index("particularly powerful"), text
+                if len(selected) > 1:
+                    assert text.index("22. 공유문항22") < text.index("21. 공유문항21") < text.index("34. A"), text
+                    assert text.index("Why do we ask questions?") < text.index("22. 공유문항22"), text
+    print("PASS actual English template: one question label after each passage, direct/prepared, HWPX/DOCX")
+
+    # Basic PDF flow already contains source numbers and bypasses premium
+    # question numbering, including when the English template enables it.
+    for flow_flag in ("source_content", "source_text_flow"):
+        source = [{"number": "", "stem": "34. A particularly powerful example follows.\n①first answer",
+                   "choices": [], "tables": [], "image_paths": [], "source_page": 1,
+                   "layout": {flow_flag: True, "source_column": 1,
+                              "source_page_width_pt": 595, "column_count": 2}}]
+        path = Path(folder) / f"english_basic_{flow_flag}.hwpx"
+        with patch.object(hwpx_writer_v2, "numbered_stem_paragraphs",
+                          side_effect=AssertionError("Premium numbering used in basic PDF flow")):
+            hwpx_writer_v2.write_hwpx(path, "English source labels", source, "kice_english",
+                                     native_math=True, preserve_source_layout=True)
+        text = " ".join(document_text(path).split())
+        assert text.count("34. A particularly powerful example follows.") == 1, text
+        assert len(re.findall(r"(?<!\d)34\s*\.", text)) == 1, text
+    print("PASS basic English PDF native/text flow bypasses premium numbering")
 
 
 def main():

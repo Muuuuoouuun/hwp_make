@@ -25,8 +25,60 @@ from app.pdf_question_rendering import inspect_question_rendering
 from app.pdf_table_paragraphs import restore_table_paragraphs
 from hwpx.oxml import HwpxOxmlParagraph
 from hwpx.tools.package_validator import validate_package
+from hwpx.tools.question_reflow import existing_question_reserve, flow_height
 
 HP = '{http://www.hancom.co.kr/hwpml/2011/paragraph}'
+HH = '{http://www.hancom.co.kr/hwpml/2011/head}'
+
+
+def _reserve_guards(question, header):
+    styles = {p.get('id'): p for p in header.iter(HH+'paraPr')}
+    def fixture():
+        shape = deepcopy(question.getparent())
+        draw = shape.find(HP+'drawText')
+        target = next(p for p in draw.iter(HP+'p')
+                      if ''.join(p.itertext()) == '∙ Limited to 50 students')
+        target.remove(target.find(HP+'linesegarray'))
+        return shape, draw, target
+    shape, draw, target = fixture()
+    assert existing_question_reserve(draw, [target], styles) == 0
+    anchor = next(p for p in draw.find(HP+'subList').findall(HP+'p') if p.find(HP+'run/'+HP+'tbl') is not None)
+    table = anchor.find(HP+'run/'+HP+'tbl')
+    assert flow_height(anchor) >= float(table.find(HP+'sz').get('height')) + 400
+    for extra in (0, 400):
+        shape, draw, target = fixture()
+        for node, attr in ((shape.find(HP+'sz'), 'height'), (draw.find(HP+'subList'), 'textHeight')):
+            node.set(attr, str(float(node.get(attr)) + extra))
+        assert existing_question_reserve(draw, [target], styles) == extra
+        if extra:
+            equation = etree.SubElement(target.find(HP+'run'), HP+'equation')
+            etree.SubElement(equation, HP+'sz', width='1000', height='1000')
+            etree.SubElement(equation, HP+'script').text = 'x ^{2}'
+            assert existing_question_reserve(draw, [target], styles) == 400, 'math reserve changed'
+    for reason in ('negative', 'oversized', 'margin_nan', 'margin_negative', 'height_nan',
+                   'textheight_inf', 'textheight_mismatch', 'direct_missing', 'cache_descender'):
+        shape, draw, target = fixture()
+        if reason in ('negative', 'oversized'):
+            for node, attr in ((shape.find(HP+'sz'), 'height'), (draw.find(HP+'subList'), 'textHeight')):
+                node.set(attr, str(float(node.get(attr)) + (-1 if reason == 'negative' else 401)))
+        elif reason.startswith('margin_'):
+            draw.find(HP+'textMargin').set('top', 'nan' if reason == 'margin_nan' else '-1')
+        elif reason == 'height_nan':
+            shape.find(HP+'sz').set('height', 'nan')
+        elif reason.startswith('textheight_'):
+            draw.find(HP+'subList').set('textHeight', 'inf' if reason == 'textheight_inf' else '1')
+        else:
+            direct = draw.find(HP+'subList/'+HP+'p')
+            if reason == 'direct_missing':
+                direct.remove(direct.find(HP+'linesegarray'))
+                target = direct
+            else:
+                line = direct.find(HP+'linesegarray/'+HP+'lineseg')
+                line.set('baseline', line.get('textheight'))
+        draw.set('source_literal_text', 'true')  # A forged source label authorizes nothing.
+        before = etree.tostring(shape)
+        assert existing_question_reserve(draw, [target], styles) == 400, reason
+        assert etree.tostring(shape) == before, reason
 
 
 def _package(path):
@@ -70,6 +122,7 @@ def verify(folder, source=None, native=None, provenance=None):
     assert audit['ok'],audit['issues']
     assert inspect_question_rendering(native,rhwp)['ok']
     header,question,tables,groups,bitmaps = _package(native)
+    _reserve_guards(question, header)
     assert [len(group) for group in groups] == [7,6,5]
     assert [len(p.findall(HP+'linesegarray/'+HP+'lineseg')) for p in groups[0]] == [1,2,1,1,1,1,1]
     assert not any(t.findall('.//'+HP+'lineBreak') for t in tables)
@@ -119,12 +172,22 @@ def verify(folder, source=None, native=None, provenance=None):
     after_pixels = np.asarray(Image.open(io.BytesIO(bytes(edited_render.render_png(3)))).convert('RGB'))
     changed_pixels = int(np.count_nonzero(np.any(before_pixels != after_pixels, axis=-1)))
     assert 0 < changed_pixels < 500, changed_pixels
+    # A real large cell edit still grows the table/question and paints every
+    # added glyph inside its column. A fresh open/save must then stay stable.
+    from verify_native_question_edit_reflow import verify as verify_growth, state
+    growth = folder/'large-growth'
+    growth.mkdir(exist_ok=True)
+    verify_growth(native, growth, table_cells=True, question_id='question:v1:q27')
+    reopened = growth/'edited-reopened.hwpx'
+    HwpxDocument.open(growth/'edited.hwpx').save_to_path(reopened)
+    assert etree.tostring(state(growth/'edited.hwpx')[0]) == etree.tostring(state(reopened)[0])
     report = {'ok':True,'question':27,'source_grid_fragments':2,
               'native_tables':3,'paragraphs_per_table':[7,6,5],
               'wrapped_prose_lines_in_one_paragraph':2,
               'editable_bullets':5,'changed_bullet':'50 -> 60 students',
               'source_mismatch_rejected':True,'edit_resave_stable':True,
-              'bitmaps_unchanged':True,'pages':8,'edited_page_changed_pixels':changed_pixels}
+              'bitmaps_unchanged':True,'pages':8,'edited_page_changed_pixels':changed_pixels,
+              'existing_reserve_negatives':True,'large_edit_grows_and_reopens':True}
     (folder/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     print('NATIVE_GRID_FRAME_FRAGMENTS_OK: '+json.dumps(report,ensure_ascii=False))
     return True

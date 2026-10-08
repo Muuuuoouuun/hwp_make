@@ -15,6 +15,21 @@ def source_flow_background_table(table, root, header, hrefs, package, source, pr
     must contain ALL source text in order. Optional empty cap rows must match
     contiguous original bitmap regions and real native row dimensions.
     """
+    from .pdf_source_frame_geometry import source_flow_prose_frame_table
+    if source_flow_prose_frame_table(table, root, source):
+        return True
+    from .pdf_illustrated_prose_frames import source_flow_illustrated_frame_table
+    if source_flow_illustrated_frame_table(table, root, header, hrefs, package, source):
+        return True
+    from .pdf_wrapped_prose_frames import source_flow_wrapped_prose_frame_table
+    if source_flow_wrapped_prose_frame_table(table,root,header,hrefs,package,source):
+        return True
+    from .pdf_dialogue_frames import source_flow_dialogue_frame_table
+    if source_flow_dialogue_frame_table(table,root,header,hrefs,package,source):
+        return True
+    from .pdf_source_grid_layout import source_flow_grid_frame_table
+    if source_flow_grid_frame_table(table,root,header,hrefs,package,source,provenance):
+        return True
     from .pdf_source_backgrounds import native_background_assets
     from .pdf_layout_writer import _iter_text_lines, _line_text, _pdf_output_text
 
@@ -39,6 +54,7 @@ def source_flow_background_table(table, root, header, hrefs, package, source, pr
         return value
     try:
         records = []
+        repeated_records = []
         owners = [owner] if len(cells) == 1 else [etree.Element(c.tag, attrib=dict(c.attrib)) for c in cells]
         if len(cells) == 3:
             if table.get('rowCnt') != '3' or table.get('colCnt') != '1' or native_background_assets(owner, header, hrefs, package):
@@ -52,7 +68,15 @@ def source_flow_background_table(table, root, header, hrefs, package, source, pr
             candidates = [p for p in provenance if p.get('role') == 'source_background_frame'
                           and p.get('sha256') == assets[0][0]]
             if len(candidates) != 1:
-                return False
+                # A combined booklet can repeat the exact same decorative
+                # frame on distinct variant pages. Keep every source proof:
+                # only identical bounds on different pages may share an asset,
+                # and each page's complete native text is checked below.
+                if (len(cells) != 1 or not candidates
+                    or len({int(p['page']) for p in candidates}) != len(candidates)
+                    or any(p['bbox_px'] != candidates[0]['bbox_px'] for p in candidates[1:])):
+                    return False
+                repeated_records.extend(candidates[1:])
             records.append(candidates[0])
             if len(cells) == 3:
                 c = cells[index]
@@ -105,6 +129,16 @@ def source_flow_background_table(table, root, header, hrefs, package, source, pr
             original = ''.join(compact(_line_text(line)) for line in _iter_text_lines(page)
                                if bounds.contains(fitz.Rect(line['bbox'])))
             native = ''.join(compact(t.text or '') for t in cell.iter(HP+'t'))
-            return bool(original) and original == native
+            if not original or original != native:
+                return False
+            for repeated in repeated_records:
+                other = pdf[int(repeated['page'])-1]
+                if other.rect != page.rect or not other.rect.contains(bounds):
+                    return False
+                repeated_text = ''.join(compact(_line_text(line)) for line in _iter_text_lines(other)
+                                        if bounds.contains(fitz.Rect(line['bbox'])))
+                if repeated_text != native:
+                    return False
+            return True
     except (ValueError, TypeError, AttributeError, IndexError, KeyError, StopIteration):
         return False

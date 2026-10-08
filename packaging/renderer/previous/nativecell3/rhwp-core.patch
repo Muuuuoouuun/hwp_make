@@ -1,0 +1,660 @@
+diff --git a/src/renderer/font_alias.rs b/src/renderer/font_alias.rs
+new file mode 100644
+index 0000000..11aa34e
+--- /dev/null
++++ b/src/renderer/font_alias.rs
+@@ -0,0 +1,108 @@
++//! Exact aliases of loaded faces, only after the ordinary family query fails.
++//!
++//! Legacy family/name1 can differ from the typographic family/name16 exposed
++//! by a platform font manager. Never infer a weight from a family spelling.
++
++#[derive(Clone)]
++pub(crate) struct FaceAlias<T> {
++    pub(crate) id: T,
++    pub(crate) names: Vec<String>,
++    pub(crate) weight: u16,
++    pub(crate) width: u16,
++    /// OpenType/Skia upright=0, italic=1, oblique=2.
++    pub(crate) slant: u8,
++}
++
++fn qualified_name(name: &str) -> String {
++    name.chars()
++        .filter(|ch| !matches!(ch, ' ' | '-'))
++        .flat_map(char::to_lowercase)
++        .collect()
++}
++
++pub(crate) fn table_alias_names(data: &[u8]) -> Vec<String> {
++    let Some(table) = ttf_parser::name::Table::parse(data) else {
++        return Vec::new();
++    };
++    let mut names: Vec<String> = table.names.into_iter()
++        .filter(|name| matches!(name.name_id, 1 | 6))
++        .filter_map(|name| name.to_string())
++        .filter(|name| !name.trim().is_empty())
++        .collect();
++    names.sort();
++    names.dedup();
++    names
++}
++
++pub(crate) fn exact_face_alias<T: Clone + PartialEq>(
++    faces: &[FaceAlias<T>], requested: &str, weight: u16, width: u16, slant: u8,
++) -> Option<T> {
++    let requested = qualified_name(requested.trim());
++    if requested.is_empty() {
++        return None;
++    }
++    let mut selected = None;
++    for face in faces {
++        if face.slant != slant || face.width != width
++            // Normal text may name an intrinsically heavy face. Explicit
++            // bold must still be provided by a real bold face, never synthesis.
++            || !(weight == 400 || (weight >= 600 && face.weight >= 600) || weight == face.weight)
++            || !face.names.iter().any(|name| qualified_name(name) == requested)
++        {
++            continue;
++        }
++        if selected.as_ref().is_some_and(|id| *id != face.id) {
++            return None; // Multiple different qualified faces: keep fallback.
++        }
++        selected = Some(face.id.clone());
++    }
++    selected
++}
++
++pub(crate) fn fontdb_aliases(db: &usvg::fontdb::Database) -> Vec<FaceAlias<usvg::fontdb::ID>> {
++    let mut identities = std::collections::HashSet::new();
++    db.faces().filter_map(|face| {
++        let (identity, names) = db.with_face_data(face.id, |data, index| {
++            let parsed = ttf_parser::Face::parse(data, index).ok()?;
++            Some(((blake3::hash(data), index), table_alias_names(parsed.raw_face().table(ttf_parser::Tag::from_bytes(b"name"))?)))
++        })??;
++        // Identical files may be loaded through both system and --font-path
++        // directories. They represent one physical face, not ambiguity.
++        if !identities.insert(identity) { return None; }
++        Some(FaceAlias { id: face.id, names, weight: face.weight.0,
++            width: face.stretch.to_number(), slant: match face.style {
++                usvg::fontdb::Style::Normal => 0,
++                usvg::fontdb::Style::Italic => 1,
++                usvg::fontdb::Style::Oblique => 2,
++            } })
++    }).collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn face(id: u8, weight: u16, slant: u8) -> FaceAlias<u8> {
++        FaceAlias { id, names: vec!["Example Heavy".into(), "Example-Heavy".into()], weight, width: 5, slant }
++    }
++
++    #[test]
++    fn qualified_alias_preserves_intrinsic_face_and_rejects_unsupported_requests() {
++        let fonts = vec![face(1, 900, 0)];
++        assert_eq!(exact_face_alias(&fonts, "Example Heavy", 400, 5, 0), Some(1));
++        assert_eq!(exact_face_alias(&fonts, "example-heavy", 700, 5, 0), Some(1));
++        for name in ["Example", "Example Heavy Italic", "Example_Heavy", "Unknown Black", "Blackadder ITC", ""] {
++            assert_eq!(exact_face_alias(&fonts, name, 400, 5, 0), None);
++        }
++        assert_eq!(exact_face_alias(&fonts, "Example Heavy", 400, 5, 1), None);
++        assert_eq!(exact_face_alias(&fonts, "Example Heavy", 400, 3, 0), None);
++        assert_eq!(exact_face_alias(&[face(1, 400, 0)], "Example Heavy", 700, 5, 0), None);
++    }
++
++    #[test]
++    fn ambiguous_distinct_faces_retain_fallback_but_duplicate_identity_is_safe() {
++        assert_eq!(exact_face_alias(&[face(1, 900, 0), face(2, 900, 0)], "Example Heavy", 400, 5, 0), None);
++        assert_eq!(exact_face_alias(&[face(1, 900, 0), face(1, 900, 0)], "Example Heavy", 400, 5, 0), Some(1));
++        assert_eq!(exact_face_alias(&[face(1, 900, 0), face(2, 900, 1)], "Example Heavy", 400, 5, 1), Some(2));
++    }
++}
+diff --git a/src/renderer/layout/paragraph_layout.rs b/src/renderer/layout/paragraph_layout.rs
+index c2de353..f8c5be4 100644
+--- a/src/renderer/layout/paragraph_layout.rs
++++ b/src/renderer/layout/paragraph_layout.rs
+@@ -1219,7 +1219,10 @@ impl LayoutEngine {
+                         })
+                     })
+                     .unwrap_or(false);
+-            let (line_height, baseline) = if has_tac_shape && raw_lh > max_fs * 1.5 {
++            // An inline shape in a table/textbox cell consumes its saved line
++            // height. Compressing it to the font height lets the next line
++            // overlap the shape even when the source cache has enough space.
++            let (line_height, baseline) = if has_tac_shape && cell_ctx.is_none() && raw_lh > max_fs * 1.5 {
+                 // Shape 높이가 line_height에 포함 → 폰트 기반 line_height 사용
+                 let font_lh = max_fs * 1.2; // 폰트 크기의 120%
+                 let font_bl = max_fs * 0.85;
+@@ -3306,6 +3309,20 @@ impl LayoutEngine {
+                         continue;
+                     }
+                     if let Some(p) = para {
++                        // A line may contain only an equation and a textbox.
++                        // It still needs the same inline shape-position record
++                        // as a line containing ordinary text runs.
++                        if let Some(Control::Shape(shape)) = p.controls.get(tac_ci) {
++                            let shape_h = hwpunit_to_px(shape.common().height as i32, self.dpi);
++                            tree.set_inline_shape_position(
++                                section_index,
++                                para_index,
++                                tac_ci,
++                                cell_ctx.as_ref(),
++                                inline_x,
++                                (y + baseline - shape_h).max(y),
++                            );
++                        }
+                         if let Some(Control::Equation(eq)) = p.controls.get(tac_ci) {
+                             let tokens = crate::renderer::equation::tokenizer::tokenize(&eq.script);
+                             let ast =
+@@ -3377,9 +3394,11 @@ impl LayoutEngine {
+                                 inline_x,
+                                 eq_y,
+                             );
+-                            inline_x += tac_w;
+                         }
+                     }
++                    // Every inline control occupies width, including shapes
++                    // whose paint is emitted by the later object pass.
++                    inline_x += tac_w;
+                 }
+             }
+ 
+diff --git a/src/renderer/layout/table_cell_content.rs b/src/renderer/layout/table_cell_content.rs
+index 05cc62f..5898c52 100644
+--- a/src/renderer/layout/table_cell_content.rs
++++ b/src/renderer/layout/table_cell_content.rs
+@@ -19,6 +19,55 @@ use crate::model::paragraph::Paragraph;
+ use crate::model::style::Alignment;
+ use crate::model::table::VerticalAlign;
+ 
++// Only an ordinary horizontal cell with one paragraph-relative Square
++// picture can share its cached exclusion across semantic paragraphs. Keep
++// TAC, other wrap modes, captions and unsupported cell controls unchanged.
++fn embedded_cell_square_picture(cell: &crate::model::table::Cell) -> Option<(usize, usize)> {
++    use crate::model::shape::{HorzRelTo, TextWrap, VertRelTo};
++    if cell.text_direction != 0 || cell.vertical_align != VerticalAlign::Top
++        || cell.width as i32 <= 0 || cell.height as i32 <= 0
++    {
++        return None;
++    }
++    let mut picture = None;
++    for (pi, para) in cell.paragraphs.iter().enumerate() {
++        if para.line_segs.is_empty() || para.line_segs.iter().any(|line| {
++            line.vertical_pos < 0 || line.column_start < 0 || line.segment_width <= 0
++                || line.column_start.checked_add(line.segment_width)
++                    .is_none_or(|end| end > cell.width as i32)
++                || line.text_height <= 0 || line.line_height < line.text_height
++                || line.baseline_distance <= 0 || line.baseline_distance > line.text_height
++        }) {
++            return None;
++        }
++        for (ci, control) in para.controls.iter().enumerate() {
++            let Control::Picture(pic) = control else { return None; };
++            let common = &pic.common;
++            if picture.is_some() || common.treat_as_char || !common.flow_with_text
++                || common.text_wrap != TextWrap::Square || common.vert_rel_to != VertRelTo::Para
++                || !matches!(common.horz_rel_to, HorzRelTo::Para | HorzRelTo::Column)
++                || common.width as i32 <= 0 || common.height as i32 <= 0
++                || (common.horizontal_offset as i32) < 0 || (common.vertical_offset as i32) < 0
++                || pic.caption.is_some()
++            {
++                return None;
++            }
++            picture = Some((pi, ci));
++        }
++    }
++    picture
++}
++
++fn first_rendered_line_y(nodes: &[RenderNode]) -> Option<f64> {
++    for node in nodes {
++        if matches!(&node.node_type, RenderNodeType::TextLine(_)) {
++            return Some(node.bbox.y);
++        }
++        if let Some(y) = first_rendered_line_y(&node.children) { return Some(y); }
++    }
++    None
++}
++
+ impl LayoutEngine {
+     /// 세로쓰기 셀의 텍스트를 수직 방향으로 배치한다.
+     ///
+@@ -479,13 +528,25 @@ impl LayoutEngine {
+             .map(|rx| rx.last().copied().unwrap_or(0.0))
+             .fold(col_x.last().copied().unwrap_or(0.0), f64::max);
+         let table_height = row_y.last().copied().unwrap_or(0.0);
+-        // TAC 표: 호스트 문단 정렬에 따라 배치
+-        let table_x = match host_alignment {
+-            Alignment::Center | Alignment::Distribute => {
+-                container.x + (container.width - table_width).max(0.0) / 2.0
++        // Inline tables follow paragraph alignment. A floating table in a
++        // textbox retains its own horizontal alignment and source offset.
++        // Ignoring these fields shifts both the frame and its editable text.
++        let table_x = if table.common.treat_as_char {
++            match host_alignment {
++                Alignment::Center | Alignment::Distribute => {
++                    container.x + (container.width - table_width).max(0.0) / 2.0
++                }
++                Alignment::Right => container.x + (container.width - table_width).max(0.0),
++                _ => container.x,
++            }
++        } else {
++            use crate::model::shape::HorzAlign;
++            let offset = hwpunit_to_px(table.common.horizontal_offset as i32, self.dpi);
++            match table.common.horz_align {
++                HorzAlign::Right | HorzAlign::Outside => container.x + container.width - table_width - offset,
++                HorzAlign::Center => container.x + (container.width - table_width) / 2.0 + offset,
++                _ => container.x + offset,
+             }
+-            Alignment::Right => container.x + (container.width - table_width).max(0.0),
+-            _ => container.x, // 왼쪽 정렬 (기본)
+         };
+         let table_y = y_start;
+ 
+@@ -566,27 +627,18 @@ impl LayoutEngine {
+                 None
+             };
+ 
+-            // 셀 배경
+-            let fill_color = border_style.and_then(|bs| bs.fill_color);
+-            let gradient = border_style.and_then(|bs| bs.gradient.clone());
+-            if fill_color.is_some() || gradient.is_some() {
+-                let rect_id = tree.next_id();
+-                let rect_node = RenderNode::new(
+-                    rect_id,
+-                    RenderNodeType::Rectangle(RectangleNode::new(
+-                        0.0,
+-                        ShapeStyle {
+-                            fill_color,
+-                            stroke_color: None,
+-                            stroke_width: 0.0,
+-                            ..Default::default()
+-                        },
+-                        gradient,
+-                    )),
+-                    BoundingBox::new(cell_x, cell_y, cell_w, cell_h),
+-                );
+-                cell_node.children.push(rect_node);
+-            }
++            // Embedded table cells support the same native fills as ordinary
++            // cells, including images and patterns behind editable text.
++            self.render_cell_background(
++                tree,
++                &mut cell_node,
++                border_style,
++                cell_x,
++                cell_y,
++                cell_w,
++                cell_h,
++                bin_data_content,
++            );
+ 
+             // 셀 테두리를 엣지 그리드에 수집
+             if let Some(bs) = border_style {
+@@ -636,6 +688,8 @@ impl LayoutEngine {
+             let mut para_y = cell_y + pad_top;
+             let para_count = composed_paras.len();
+             let cell_idx = cell_enum_idx;
++            let square_picture = embedded_cell_square_picture(cell);
++            let mut square_bottom = None;
+             for (pidx, (composed, para)) in composed_paras
+                 .iter()
+                 .zip(cell.paragraphs.iter())
+@@ -663,6 +717,15 @@ impl LayoutEngine {
+                     Some((s, p, c)) => (s, pidx, Some(c)),
+                     None => (0, 0, None),
+                 };
++                let square_wrap = square_picture.and_then(|(owner, _)| {
++                    (pidx == owner || (pidx > owner && square_bottom.is_some_and(|bottom| para_y < bottom)))
++                        .then_some(crate::renderer::pagination::WrapAnchorRef {
++                            anchor_para_index: owner, anchor_cs: 0, anchor_sw: 0,
++                            anchor_image_margin_right: 0,
++                        })
++                });
++                let children_before = cell_node.children.len();
++                let para_y_before = para_y;
+                 para_y = self.layout_composed_paragraph(
+                     tree,
+                     &mut cell_node,
+@@ -674,19 +737,73 @@ impl LayoutEngine {
+                     composed.lines.len(),
+                     sec_for_layout,
+                     para_for_layout,
+-                    ctx,
++                    ctx.clone(),
+                     pidx + 1 == para_count,
+                     0.0,
+                     None,
+                     Some(para),
+                     None,
+-                    None, // 셀 컨텍스트 — wrap zone 무관
++                    square_wrap.as_ref(),
+                 );
++                // TextLine top includes ordinary before spacing exactly once.
++                // Raw cache vertical_pos may instead be absolute in the cell.
++                let first_line_y = first_rendered_line_y(&cell_node.children[children_before..])
++                    .unwrap_or(para_y_before);
+ 
+                 // 셀 내 그림/도형 컨트롤 렌더링
+                 for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
+                     match ctrl {
++                        Control::Shape(shape) if shape.common().treat_as_char => {
++                            // Paragraph layout reserves the inline gap and records its
++                            // position, but leaves shape painting to the object pass.
++                            // Keep the full enclosing cell path: a textbox containing
++                            // a table is not a top-level table or body paragraph.
++                            let Some((shape_x, shape_y)) = tree.get_inline_shape_position(
++                                sec_for_layout,
++                                para_for_layout,
++                                ctrl_idx,
++                                ctx.as_ref(),
++                            ) else {
++                                continue;
++                            };
++                            let common = shape.common();
++                            let empty_map = std::collections::HashMap::new();
++                            self.layout_shape_object(
++                                tree,
++                                &mut cell_node,
++                                shape.as_ref(),
++                                shape_x,
++                                shape_y,
++                                hwpunit_to_px(common.width as i32, self.dpi),
++                                hwpunit_to_px(common.height as i32, self.dpi),
++                                sec_for_layout,
++                                ctx.as_ref().map(|c| c.parent_para_index).unwrap_or(para_for_layout),
++                                ctrl_idx,
++                                styles,
++                                bin_data_content,
++                                &empty_map,
++                                ctx.as_ref().map(|c| c.path.as_slice()).unwrap_or(&[]),
++                            );
++                        }
+                         Control::Picture(pic) => {
++                            if square_picture == Some((pidx, ctrl_idx)) {
++                                let image_start = cell_node.children.len();
++                                // Reuse body-picture positioning and painting
++                                // once, retaining crop/effect/transform/border.
++                                // Square occupies an exclusion, not a separate
++                                // paragraph-height advance.
++                                self.layout_body_picture(
++                                    tree, &mut cell_node, pic, &inner_area, &inner_area,
++                                    &inner_area, &inner_area, bin_data_content, styles,
++                                    host_alignment, first_line_y, sec_for_layout,
++                                    ctx.as_ref().map(|c| c.parent_para_index).unwrap_or(para_for_layout),
++                                    ctrl_idx, false,
++                                );
++                                square_bottom = cell_node.children[image_start..].iter()
++                                    .filter(|node| matches!(&node.node_type, RenderNodeType::Image(_)))
++                                    .map(|node| node.bbox.y + node.bbox.height).reduce(f64::max);
++                                continue;
++                            }
+                             let pic_w = hwpunit_to_px(pic.common.width as i32, self.dpi);
+                             let pic_h = hwpunit_to_px(pic.common.height as i32, self.dpi);
+                             // 셀 내부에 맞추어 크기 제한
+diff --git a/src/renderer/mod.rs b/src/renderer/mod.rs
+index c352db5..be2c270 100644
+--- a/src/renderer/mod.rs
++++ b/src/renderer/mod.rs
+@@ -24,6 +24,8 @@ pub mod page_number;
+ pub mod pagination;
+ #[cfg(not(target_arch = "wasm32"))]
+ pub mod pdf;
++#[cfg(not(target_arch = "wasm32"))]
++mod font_alias;
+ pub mod pua_oldhangul;
+ pub mod render_tree;
+ pub mod scheduler;
+diff --git a/src/renderer/pdf.rs b/src/renderer/pdf.rs
+index fb419e4..8ccc27c 100644
+--- a/src/renderer/pdf.rs
++++ b/src/renderer/pdf.rs
+@@ -22,6 +22,87 @@ fn create_fontdb() -> usvg::fontdb::Database {
+     fontdb
+ }
+ 
++#[cfg(not(target_arch = "wasm32"))]
++fn exact_font_resolver(db: &usvg::fontdb::Database) -> usvg::FontResolver<'static> {
++    use super::font_alias::{exact_face_alias, fontdb_aliases};
++    use usvg::fontdb::{Family, Query, Style, Weight};
++    let aliases = fontdb_aliases(db);
++    let default = usvg::FontResolver::default_font_selector();
++    let fallback = usvg::FontResolver::default_fallback_selector();
++    let legacy_faces = std::sync::Arc::new(std::sync::Mutex::new(
++        std::collections::HashMap::<usvg::fontdb::ID, Option<usvg::fontdb::ID>>::new()));
++    let selected_legacy_faces = legacy_faces.clone();
++    usvg::FontResolver {
++        select_font: Box::new(move |font, db| {
++            let style = match font.style() {
++                usvg::FontStyle::Normal => Style::Normal,
++                usvg::FontStyle::Italic => Style::Italic,
++                usvg::FontStyle::Oblique => Style::Oblique,
++            };
++            let stretch = match font.stretch() {
++                usvg::FontStretch::UltraCondensed => usvg::fontdb::Stretch::UltraCondensed,
++                usvg::FontStretch::ExtraCondensed => usvg::fontdb::Stretch::ExtraCondensed,
++                usvg::FontStretch::Condensed => usvg::fontdb::Stretch::Condensed,
++                usvg::FontStretch::SemiCondensed => usvg::fontdb::Stretch::SemiCondensed,
++                usvg::FontStretch::Normal => usvg::fontdb::Stretch::Normal,
++                usvg::FontStretch::SemiExpanded => usvg::fontdb::Stretch::SemiExpanded,
++                usvg::FontStretch::Expanded => usvg::fontdb::Stretch::Expanded,
++                usvg::FontStretch::ExtraExpanded => usvg::fontdb::Stretch::ExtraExpanded,
++                usvg::FontStretch::UltraExpanded => usvg::fontdb::Stretch::UltraExpanded,
++            };
++            // Match CSS families in the original order. The default selector
++            // already appends a generic serif fallback, so only consulting it
++            // first would hide a failed requested-family lookup.
++            for family in font.families() {
++                let requested = match family {
++                    usvg::FontFamily::Named(name) => Family::Name(name),
++                    usvg::FontFamily::Serif => Family::Serif,
++                    usvg::FontFamily::SansSerif => Family::SansSerif,
++                    usvg::FontFamily::Monospace => Family::Monospace,
++                    usvg::FontFamily::Cursive => Family::Cursive,
++                    usvg::FontFamily::Fantasy => Family::Fantasy,
++                };
++                if let Some(id) = db.query(&Query { families: &[requested], weight: Weight(font.weight()), stretch, style }) {
++                    return Some(id);
++                }
++                if let usvg::FontFamily::Named(name) = family {
++                    let slant = match style { Style::Normal => 0, Style::Italic => 1, Style::Oblique => 2 };
++                    if let Some(id) = exact_face_alias(&aliases, name, font.weight(), stretch.to_number(), slant) {
++                        let legacy = default(font, db);
++                        let mut selections = selected_legacy_faces.lock().ok()?;
++                        // A face can be requested with different CSS fallback
++                        // chains. Without the original font specification in
++                        // select_fallback, conflicting chains must fail closed.
++                        if selections.get(&id).is_some_and(|previous| *previous != legacy) {
++                            return legacy;
++                        }
++                        selections.insert(id, legacy);
++                        return Some(id);
++                    }
++                }
++            }
++            default(font, db)
++        }),
++        select_fallback: Box::new(move |character, used, db| {
++            let legacy = legacy_faces.lock().ok()?.get(used.first()?).copied();
++            let Some(legacy) = legacy else { return fallback(character, used, db); };
++            let legacy = legacy?;
++            // Recovering a Latin face must not change the previous CJK or
++            // other missing-glyph fallback. Reuse the old selected face first,
++            // then preserve the original fallback selector and its base style.
++            if !used.contains(&legacy) && db.with_face_data(legacy, |data, index| {
++                ttf_parser::Face::parse(data, index).ok()
++                    .and_then(|face| face.glyph_index(character)).is_some()
++            }).unwrap_or(false) {
++                return Some(legacy);
++            }
++            let mut previous = vec![legacy];
++            previous.extend(used.iter().copied().filter(|id| *id != legacy));
++            fallback(character, &previous, db)
++        }),
++    }
++}
++
+ /// SVG에서 없는 한글 폰트명에 fallback 추가
+ #[cfg(not(target_arch = "wasm32"))]
+ fn add_font_fallbacks(svg: &str) -> String {
+@@ -40,6 +121,7 @@ fn add_font_fallbacks(svg: &str) -> String {
+ pub fn svg_to_pdf(svg_content: &str) -> Result<Vec<u8>, String> {
+     let fontdb = create_fontdb();
+     let mut options = usvg::Options::default();
++    options.font_resolver = exact_font_resolver(&fontdb);
+     options.fontdb = std::sync::Arc::new(fontdb);
+     let svg_with_fallback = add_font_fallbacks(svg_content);
+     let tree = usvg::Tree::from_str(&svg_with_fallback, &options)
+@@ -68,6 +150,7 @@ pub fn svgs_to_pdf(svg_pages: &[String]) -> Result<Vec<u8>, String> {
+ 
+     let fontdb = create_fontdb();
+     let mut options = usvg::Options::default();
++    options.font_resolver = exact_font_resolver(&fontdb);
+     options.fontdb = std::sync::Arc::new(fontdb);
+ 
+     let mut alloc = Ref::new(1);
+diff --git a/src/renderer/skia/font_alias.rs b/src/renderer/skia/font_alias.rs
+new file mode 100644
+index 0000000..2b21594
+--- /dev/null
++++ b/src/renderer/skia/font_alias.rs
+@@ -0,0 +1,36 @@
++use std::collections::{HashMap, HashSet};
++use skia_safe::{FontMgr, FontStyle, Typeface};
++use crate::renderer::font_alias::{exact_face_alias, table_alias_names, FaceAlias};
++
++pub(super) struct LoadedFaceAliases {
++    faces: Vec<Typeface>,
++    aliases: Vec<FaceAlias<usize>>,
++}
++
++impl LoadedFaceAliases {
++    pub(super) fn new(manager: &FontMgr, custom: &HashMap<String, Typeface>) -> Self {
++        let mut faces: Vec<Typeface> = custom.values().cloned().collect();
++        for family in 0..manager.count_families() {
++            let mut styles = manager.new_style_set(family);
++            for index in 0..styles.count() {
++                if let Some(face) = styles.new_typeface(index) { faces.push(face); }
++            }
++        }
++        let mut seen = HashSet::new();
++        faces.retain(|face| seen.insert(face.unique_id()));
++        let aliases = faces.iter().enumerate().filter_map(|(id, face)| {
++            let data = face.copy_table_data(u32::from_be_bytes(*b"name"))?;
++            let names = table_alias_names(data.as_bytes());
++            let style = face.font_style();
++            Some(FaceAlias { id, names, weight: *style.weight() as u16,
++                width: *style.width() as u16, slant: style.slant() as u8 })
++        }).collect();
++        Self { faces, aliases }
++    }
++
++    pub(super) fn find(&self, family: &str, style: FontStyle) -> Option<Typeface> {
++        let index = exact_face_alias(&self.aliases, family, *style.weight() as u16,
++                                    *style.width() as u16, style.slant() as u8)?;
++        self.faces.get(index).cloned()
++    }
++}
+diff --git a/src/renderer/skia/mod.rs b/src/renderer/skia/mod.rs
+index 409c934..36e76db 100644
+--- a/src/renderer/skia/mod.rs
++++ b/src/renderer/skia/mod.rs
+@@ -3,6 +3,7 @@
+ //! This module is available only with the `native-skia` feature.
+ 
+ mod equation_conv;
++mod font_alias;
+ mod image_conv;
+ mod renderer;
+ mod text_replay;
+diff --git a/src/renderer/skia/renderer.rs b/src/renderer/skia/renderer.rs
+index c58c5a7..4e36fc6 100644
+--- a/src/renderer/skia/renderer.rs
++++ b/src/renderer/skia/renderer.rs
+@@ -18,6 +18,7 @@ use crate::renderer::layer_renderer::{
+ use crate::renderer::{svg_arc_to_beziers, LineStyle, PathCommand, ShapeStyle, StrokeDash};
+ 
+ use super::equation_conv::render_equation;
++use super::font_alias::LoadedFaceAliases;
+ use super::image_conv::{draw_image_bytes, draw_svg_fragment, ImageSampling};
+ use super::text_replay::SkiaTextReplay;
+ 
+@@ -107,6 +108,7 @@ fn native_skia_glyph_run_contract_is_replayable(
+ 
+ pub struct SkiaLayerRenderer {
+     font_mgr: FontMgr,
++    font_aliases: std::cell::OnceCell<LoadedFaceAliases>,
+     /// 사용자 지정 폰트 디렉토리에서 미리 로드한 폰트 캐시.
+     /// key = primary face name (Typeface::family_name), value = Typeface.
+     /// SVG 의 `--font-path` 와 같은 패턴으로 ttfs 디렉토리의 한컴 전용 폰트 (HY견명조 등) 도 사용 가능.
+@@ -117,6 +119,7 @@ impl SkiaLayerRenderer {
+     pub fn new() -> Self {
+         Self {
+             font_mgr: FontMgr::default(),
++            font_aliases: std::cell::OnceCell::new(),
+             custom_typefaces: HashMap::new(),
+         }
+     }
+@@ -124,6 +127,7 @@ impl SkiaLayerRenderer {
+     /// 사용자 지정 폰트 디렉토리 (ttfs 등) 의 폰트를 로드하여 Skia 가 직접 사용 가능하게 한다.
+     /// SVG 의 `--font-path` 와 동일한 패턴.
+     pub fn with_font_paths(mut self, font_paths: &[std::path::PathBuf]) -> Self {
++        self.font_aliases.take();
+         let mut search_dirs: Vec<std::path::PathBuf> = font_paths.to_vec();
+         for dir in &["ttfs/hwp", "ttfs/windows", "ttfs"] {
+             search_dirs.push(std::path::PathBuf::from(dir));
+@@ -373,6 +377,7 @@ impl SkiaLayerRenderer {
+             canvas,
+             font_mgr: &self.font_mgr,
+             custom_typefaces: &self.custom_typefaces,
++            font_aliases: &self.font_aliases,
+             output_options,
+         };
+         let open_shape_transform =
+diff --git a/src/renderer/skia/text_replay.rs b/src/renderer/skia/text_replay.rs
+index a78aba2..c55f33a 100644
+--- a/src/renderer/skia/text_replay.rs
++++ b/src/renderer/skia/text_replay.rs
+@@ -14,11 +14,13 @@ use crate::renderer::render_tree::BoundingBox;
+ use crate::renderer::{clamp_tab_leader_end_x, TextStyle};
+ 
+ use super::renderer::colorref_to_skia;
++use super::font_alias::LoadedFaceAliases;
+ 
+ pub(super) struct SkiaTextReplay<'a> {
+     pub(super) canvas: &'a Canvas,
+     pub(super) font_mgr: &'a FontMgr,
+     pub(super) custom_typefaces: &'a HashMap<String, Typeface>,
++    pub(super) font_aliases: &'a std::cell::OnceCell<LoadedFaceAliases>,
+     pub(super) output_options: &'a LayerOutputOptions,
+ }
+ 
+@@ -106,7 +108,12 @@ impl SkiaTextReplay<'_> {
+                         }
+                     }
+                     for family in &families {
+-                        if let Some(tf) = self.font_mgr.match_family_style(family, font_style) {
++                        let face = self.font_mgr.match_family_style(family, font_style).or_else(|| {
++                            if *family != style.font_family.as_str() { return None; }
++                            self.font_aliases.get_or_init(|| LoadedFaceAliases::new(
++                                self.font_mgr, self.custom_typefaces)).find(family, font_style)
++                        });
++                        if let Some(tf) = face {
+                             push(&mut chain, &mut seen, tf);
+                         }
+                     }
+@@ -284,7 +291,10 @@ impl SkiaTextReplay<'_> {
+                     return;
+                 }
+ 
+-                let text = expand_pua_render_text(text);
++                // Inline objects paint themselves. As in SVG/web_canvas,
++                // their U+FFFC paragraph marker must not become a font glyph.
++                let text: String = text.chars().filter(|&c| c != '\u{FFFC}').collect();
++                let text = expand_pua_render_text(&text);
+                 let text = text.as_str();
+                 let char_positions = compute_char_positions(text, style);
+                 let clusters = split_into_clusters(text);

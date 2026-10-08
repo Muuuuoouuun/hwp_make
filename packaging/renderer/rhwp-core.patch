@@ -1,8 +1,156 @@
+diff --git a/src/renderer/font_alias.rs b/src/renderer/font_alias.rs
+new file mode 100644
+--- /dev/null
++++ b/src/renderer/font_alias.rs
+@@ -0,0 +1,108 @@
++//! Exact aliases of loaded faces, only after the ordinary family query fails.
++//!
++//! Legacy family/name1 can differ from the typographic family/name16 exposed
++//! by a platform font manager. Never infer a weight from a family spelling.
++
++#[derive(Clone)]
++pub(crate) struct FaceAlias<T> {
++    pub(crate) id: T,
++    pub(crate) names: Vec<String>,
++    pub(crate) weight: u16,
++    pub(crate) width: u16,
++    /// OpenType/Skia upright=0, italic=1, oblique=2.
++    pub(crate) slant: u8,
++}
++
++fn qualified_name(name: &str) -> String {
++    name.chars()
++        .filter(|ch| !matches!(ch, ' ' | '-'))
++        .flat_map(char::to_lowercase)
++        .collect()
++}
++
++pub(crate) fn table_alias_names(data: &[u8]) -> Vec<String> {
++    let Some(table) = ttf_parser::name::Table::parse(data) else {
++        return Vec::new();
++    };
++    let mut names: Vec<String> = table.names.into_iter()
++        .filter(|name| matches!(name.name_id, 1 | 6))
++        .filter_map(|name| name.to_string())
++        .filter(|name| !name.trim().is_empty())
++        .collect();
++    names.sort();
++    names.dedup();
++    names
++}
++
++pub(crate) fn exact_face_alias<T: Clone + PartialEq>(
++    faces: &[FaceAlias<T>], requested: &str, weight: u16, width: u16, slant: u8,
++) -> Option<T> {
++    let requested = qualified_name(requested.trim());
++    if requested.is_empty() {
++        return None;
++    }
++    let mut selected = None;
++    for face in faces {
++        if face.slant != slant || face.width != width
++            // Normal text may name an intrinsically heavy face. Explicit
++            // bold must still be provided by a real bold face, never synthesis.
++            || !(weight == 400 || (weight >= 600 && face.weight >= 600) || weight == face.weight)
++            || !face.names.iter().any(|name| qualified_name(name) == requested)
++        {
++            continue;
++        }
++        if selected.as_ref().is_some_and(|id| *id != face.id) {
++            return None; // Multiple different qualified faces: keep fallback.
++        }
++        selected = Some(face.id.clone());
++    }
++    selected
++}
++
++pub(crate) fn fontdb_aliases(db: &usvg::fontdb::Database) -> Vec<FaceAlias<usvg::fontdb::ID>> {
++    let mut identities = std::collections::HashSet::new();
++    db.faces().filter_map(|face| {
++        let (identity, names) = db.with_face_data(face.id, |data, index| {
++            let parsed = ttf_parser::Face::parse(data, index).ok()?;
++            Some(((blake3::hash(data), index), table_alias_names(parsed.raw_face().table(ttf_parser::Tag::from_bytes(b"name"))?)))
++        })??;
++        // Identical files may be loaded through both system and --font-path
++        // directories. They represent one physical face, not ambiguity.
++        if !identities.insert(identity) { return None; }
++        Some(FaceAlias { id: face.id, names, weight: face.weight.0,
++            width: face.stretch.to_number(), slant: match face.style {
++                usvg::fontdb::Style::Normal => 0,
++                usvg::fontdb::Style::Italic => 1,
++                usvg::fontdb::Style::Oblique => 2,
++            } })
++    }).collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn face(id: u8, weight: u16, slant: u8) -> FaceAlias<u8> {
++        FaceAlias { id, names: vec!["Example Heavy".into(), "Example-Heavy".into()], weight, width: 5, slant }
++    }
++
++    #[test]
++    fn qualified_alias_preserves_intrinsic_face_and_rejects_unsupported_requests() {
++        let fonts = vec![face(1, 900, 0)];
++        assert_eq!(exact_face_alias(&fonts, "Example Heavy", 400, 5, 0), Some(1));
++        assert_eq!(exact_face_alias(&fonts, "example-heavy", 700, 5, 0), Some(1));
++        for name in ["Example", "Example Heavy Italic", "Example_Heavy", "Unknown Black", "Blackadder ITC", ""] {
++            assert_eq!(exact_face_alias(&fonts, name, 400, 5, 0), None);
++        }
++        assert_eq!(exact_face_alias(&fonts, "Example Heavy", 400, 5, 1), None);
++        assert_eq!(exact_face_alias(&fonts, "Example Heavy", 400, 3, 0), None);
++        assert_eq!(exact_face_alias(&[face(1, 400, 0)], "Example Heavy", 700, 5, 0), None);
++    }
++
++    #[test]
++    fn ambiguous_distinct_faces_retain_fallback_but_duplicate_identity_is_safe() {
++        assert_eq!(exact_face_alias(&[face(1, 900, 0), face(2, 900, 0)], "Example Heavy", 400, 5, 0), None);
++        assert_eq!(exact_face_alias(&[face(1, 900, 0), face(1, 900, 0)], "Example Heavy", 400, 5, 0), Some(1));
++        assert_eq!(exact_face_alias(&[face(1, 900, 0), face(2, 900, 1)], "Example Heavy", 400, 5, 1), Some(2));
++    }
++}
 diff --git a/src/renderer/layout/paragraph_layout.rs b/src/renderer/layout/paragraph_layout.rs
-index c2de353..f8c5be4 100644
 --- a/src/renderer/layout/paragraph_layout.rs
 +++ b/src/renderer/layout/paragraph_layout.rs
-@@ -1219,7 +1219,10 @@ impl LayoutEngine {
+@@ -42,6 +42,13 @@
+     }
+     let min_baseline = max_font_size * 0.8;
+     raw_baseline.max(min_baseline)
++}
++
++/// Inline tab records belong to the paragraph's tab order, not to each shaped run.
++/// Text measurement starts its tab index at zero, so each run needs the suffix
++/// beginning at its own first tab. Exhausted records fall back to paragraph stops.
++fn inline_tabs_from(tab_extended: &[[u16; 7]], tab_index: usize) -> Vec<[u16; 7]> {
++    tab_extended.get(tab_index..).unwrap_or(&[]).to_vec()
+ }
+ 
+ /// run 이 `\t` 로 끝날 때, 그 마지막 `\t` 가 cross-run 우측/가운데 탭으로 동작해야 하는지 판정한다.
+@@ -1158,8 +1165,21 @@
+             }
+         }
+ 
++        let mut paragraph_tab_cursor = composed.lines[..start_line.min(composed.lines.len())]
++            .iter()
++            .flat_map(|line| &line.runs)
++            .flat_map(|run| run.text.chars())
++            .filter(|c| *c == '\t')
++            .count();
+         for line_idx in start_line..end {
+             let comp_line = &composed.lines[line_idx];
++            let line_tab_start = paragraph_tab_cursor;
++            paragraph_tab_cursor += comp_line
++                .runs
++                .iter()
++                .flat_map(|run| run.text.chars())
++                .filter(|c| *c == '\t')
++                .count();
+ 
+             // 다단 필터링: segment_width가 현재 단 너비와 불일치하면 건너뜀
+             if let Some(col_w) = multi_col_width_hu {
+@@ -1219,7 +1239,10 @@
                          })
                      })
                      .unwrap_or(false);
@@ -14,7 +162,151 @@ index c2de353..f8c5be4 100644
                  // Shape 높이가 line_height에 포함 → 폰트 기반 line_height 사용
                  let font_lh = max_fs * 1.2; // 폰트 크기의 120%
                  let font_bl = max_fs * 0.85;
-@@ -3306,6 +3309,20 @@ impl LayoutEngine {
+@@ -1421,7 +1444,7 @@
+             let mut pending_right_leader_digit_est = false;
+             let mut run_char_pos_est = comp_line.char_start;
+             // cross-run 탭 감지용 inline_tabs(composed.tab_extended) 커서 — Task #290
+-            let mut inline_tab_cursor_est: usize = 0;
++            let mut inline_tab_cursor_est = line_tab_start;
+             for (run_idx_est, run) in comp_line.runs.iter().enumerate() {
+                 let run_char_count_est = if run.char_overlap.is_some() {
+                     let chars: Vec<char> = run.text.chars().collect();
+@@ -1440,7 +1463,7 @@
+                 ts.auto_tab_right = auto_tab_right;
+                 ts.available_width = available_width;
+                 ts.text_start_offset = effective_margin_left;
+-                ts.inline_tabs = composed.tab_extended.clone();
++                ts.inline_tabs = inline_tabs_from(&composed.tab_extended, inline_tab_cursor_est);
+                 if pending_right_leader_digit_est {
+                     if run.text.trim().is_empty() {
+                         pending_right_leader_digit_est = true;
+@@ -1555,8 +1578,14 @@
+                     let tac_rel = tac_abs_pos - run_char_pos_est;
+                     if seg_start_est < tac_rel {
+                         let seg: String = run_chars_est[seg_start_est..tac_rel].iter().collect();
+-                        ts.line_x_offset = est_x;
+-                        est_x += estimate_text_width(&seg, &ts);
++                        let preceding_tabs = run_chars_est[..seg_start_est]
++                            .iter()
++                            .filter(|c| **c == '\t')
++                            .count();
++                        let mut seg_ts = ts.clone();
++                        seg_ts.inline_tabs = inline_tabs_from(&ts.inline_tabs, preceding_tabs);
++                        seg_ts.line_x_offset = est_x;
++                        est_x += estimate_text_width(&seg, &seg_ts);
+                     }
+                     est_x += tac_w;
+                     seg_start_est = tac_rel;
+@@ -1564,6 +1593,12 @@
+                 // 마지막 세그먼트 처리
+                 let remaining_est: String = run_chars_est[seg_start_est..].iter().collect();
+                 ts.line_x_offset = est_x;
++                let preceding_tabs = run_chars_est[..seg_start_est]
++                    .iter()
++                    .filter(|c| **c == '\t')
++                    .count();
++                let mut remaining_ts = ts.clone();
++                remaining_ts.inline_tabs = inline_tabs_from(&ts.inline_tabs, preceding_tabs);
+                 // [Task #874 #2] composer lang split (예: "F3→Alt+I" → "F3"/"→"/"Alt+I")
+                 // 으로 auto_tab_right post-tab 콘텐츠가 후속 run 으로 흩어진 경우, 현재
+                 // run 내부 seg_w 만으로는 우측 정렬 위치가 어긋남. 후속 run 합산을 미리
+@@ -1581,7 +1616,7 @@
+                         .skip(run_idx_est + 1)
+                         .all(|r| !r.text.contains('\t'));
+                     if no_more_tabs_after_in_run && no_tabs_in_subsequent {
+-                        let mut ts_measure = ts.clone();
++                        let mut ts_measure = remaining_ts.clone();
+                         ts_measure.right_tab_block_width_override = None;
+                         let post_tab_w = estimate_text_width(&post_tab, &ts_measure);
+                         let subsequent_w = right_tab_block_width(
+@@ -1593,11 +1628,12 @@
+                             auto_tab_right,
+                             available_width,
+                         );
+-                        ts.right_tab_block_width_override = Some(post_tab_w + subsequent_w);
++                        remaining_ts.right_tab_block_width_override =
++                            Some(post_tab_w + subsequent_w);
+                     }
+                 }
+                 if !remaining_est.is_empty() {
+-                    est_x += estimate_text_width(&remaining_est, &ts);
++                    est_x += estimate_text_width(&remaining_est, &remaining_ts);
+                 }
+                 // run이 \t로 끝나면 다음 run에 오른쪽/가운데 탭 조정 필요 — Task #290:
+                 // inline_tabs(composed.tab_extended) 가 LEFT 를 명시하면 cross-run pending 을 설정하지 않는다.
+@@ -2026,7 +2062,7 @@
+             // 이미 삽입한 도형 마커 추적
+             let mut shape_marker_inserted = vec![false; shape_markers.len()];
+             // cross-run 탭 감지용 inline_tabs(composed.tab_extended) 커서 — Task #290
+-            let mut inline_tab_cursor_render: usize = 0;
++            let mut inline_tab_cursor_render = line_tab_start;
+             for (run_idx, run) in comp_line.runs.iter().enumerate() {
+                 // 조판부호: 이 run 시작 위치 이전의 도형 마커를 먼저 삽입
+                 for (smi, (spos, stext)) in shape_markers.iter().enumerate() {
+@@ -2072,7 +2108,8 @@
+                 text_style.auto_tab_right = auto_tab_right;
+                 text_style.available_width = available_width;
+                 text_style.text_start_offset = effective_margin_left;
+-                text_style.inline_tabs = composed.tab_extended.clone();
++                text_style.inline_tabs =
++                    inline_tabs_from(&composed.tab_extended, inline_tab_cursor_render);
+                 if pending_right_leader_digit_render {
+                     if run.text.trim().is_empty() {
+                         pending_right_leader_digit_render = true;
+@@ -2249,7 +2286,7 @@
+                         &run.text,
+                         &positions,
+                         &text_style,
+-                        &composed.tab_extended,
++                        &text_style.inline_tabs,
+                     );
+                 }
+                 // 교차 run 오른쪽/가운데 탭 감지 — Task #290:
+@@ -2617,6 +2654,12 @@
+                         if seg_start < tac_rel {
+                             let seg_text: String = run_chars[seg_start..tac_rel].iter().collect();
+                             let mut seg_style = text_style.clone();
++                            let preceding_tabs = run_chars[..seg_start]
++                                .iter()
++                                .filter(|c| **c == '\t')
++                                .count();
++                            seg_style.inline_tabs =
++                                inline_tabs_from(&text_style.inline_tabs, preceding_tabs);
+                             seg_style.line_x_offset = x - col_area.x;
+                             // 탭 리더 계산
+                             if has_tabs && seg_text.contains('\t') {
+@@ -2625,7 +2668,7 @@
+                                     &seg_text,
+                                     &positions,
+                                     &seg_style,
+-                                    &composed.tab_extended,
++                                    &seg_style.inline_tabs,
+                                 );
+                             }
+                             let seg_w = estimate_text_width(&seg_text, &seg_style);
+@@ -2919,6 +2962,12 @@
+                     let remaining: String = run_chars[seg_start..].iter().collect();
+                     if !remaining.is_empty() {
+                         let mut seg_style = text_style.clone();
++                        let preceding_tabs = run_chars[..seg_start]
++                            .iter()
++                            .filter(|c| **c == '\t')
++                            .count();
++                        seg_style.inline_tabs =
++                            inline_tabs_from(&text_style.inline_tabs, preceding_tabs);
+                         seg_style.line_x_offset = x - col_area.x;
+                         if has_tabs && remaining.contains('\t') {
+                             let positions = compute_char_positions(&remaining, &seg_style);
+@@ -2926,7 +2975,7 @@
+                                 &remaining,
+                                 &positions,
+                                 &seg_style,
+-                                &composed.tab_extended,
++                                &seg_style.inline_tabs,
+                             );
+                         }
+                         let seg_w = estimate_text_width(&remaining, &seg_style);
+@@ -3306,6 +3355,20 @@
                          continue;
                      }
                      if let Some(p) = para {
@@ -35,7 +327,7 @@ index c2de353..f8c5be4 100644
                          if let Some(Control::Equation(eq)) = p.controls.get(tac_ci) {
                              let tokens = crate::renderer::equation::tokenizer::tokenize(&eq.script);
                              let ast =
-@@ -3377,9 +3394,11 @@ impl LayoutEngine {
+@@ -3377,9 +3440,11 @@
                                  inline_x,
                                  eq_y,
                              );
@@ -48,11 +340,301 @@ index c2de353..f8c5be4 100644
                  }
              }
  
+@@ -4272,6 +4337,234 @@
+ }
+ 
+ #[cfg(test)]
++mod inline_tab_order_tests {
++    use super::*;
++    use crate::model::paragraph::{CharShapeRef, LineSeg};
++    use crate::renderer::composer::ComposedParagraph;
++    use crate::renderer::style_resolver::{ResolvedCharStyle, ResolvedParaStyle};
++
++    fn fixture(alignment: Alignment) -> (ComposedParagraph, ResolvedStyleSet) {
++        // Different language and character-shape boundaries split the two tabs
++        // on each line into different shaped runs. The second line also tests
++        // paragraph-global tab order when only a later line is laid out.
++        let text = "A\t한\tC\nD\t語\tF";
++        let para = Paragraph {
++            text: text.into(),
++            char_count: text.chars().count() as u32 + 1,
++            char_offsets: (0..text.chars().count() as u32).collect(),
++            char_shapes: vec![
++                CharShapeRef {
++                    start_pos: 0,
++                    char_shape_id: 0,
++                },
++                CharShapeRef {
++                    start_pos: 2,
++                    char_shape_id: 1,
++                },
++                CharShapeRef {
++                    start_pos: 4,
++                    char_shape_id: 0,
++                },
++                CharShapeRef {
++                    start_pos: 6,
++                    char_shape_id: 1,
++                },
++                CharShapeRef {
++                    start_pos: 8,
++                    char_shape_id: 0,
++                },
++            ],
++            line_segs: [0, 6]
++                .into_iter()
++                .map(|text_start| LineSeg {
++                    text_start,
++                    line_height: 1200,
++                    text_height: 1200,
++                    baseline_distance: 960,
++                    segment_width: 30000,
++                    ..Default::default()
++                })
++                .collect(),
++            tab_extended: [750, 2250, 3750, 5250]
++                .into_iter()
++                .map(|width| [width, 0, 0x0100, 0, 0, 0, 9])
++                .collect(),
++            ..Default::default()
++        };
++        let styles = ResolvedStyleSet {
++            char_styles: vec![
++                ResolvedCharStyle {
++                    font_size: 12.0,
++                    ..Default::default()
++                },
++                ResolvedCharStyle {
++                    font_size: 16.0,
++                    bold: true,
++                    ..Default::default()
++                },
++            ],
++            para_styles: vec![ResolvedParaStyle {
++                alignment,
++                ..Default::default()
++            }],
++            ..Default::default()
++        };
++        let composed = compose_paragraph(&para);
++        assert_eq!(composed.lines.len(), 2);
++        assert!(composed.lines.iter().all(|line| line.runs.len() >= 3));
++        assert!(composed.lines[0].runs.iter().any(|r| r.lang_index == 0));
++        assert!(composed.lines[0].runs.iter().any(|r| r.lang_index == 1));
++        assert!(composed.lines[0].runs.iter().any(|r| r.char_style_id == 1));
++        (composed, styles)
++    }
++
++    fn layout(composed: &ComposedParagraph, styles: &ResolvedStyleSet, start: usize) -> RenderNode {
++        let mut tree = PageRenderTree::new(0, 600.0, 800.0);
++        let area = LayoutRect {
++            x: 20.0,
++            y: 30.0,
++            width: 400.0,
++            height: 700.0,
++        };
++        let mut column = RenderNode::new(
++            tree.next_id(),
++            RenderNodeType::Column(0),
++            BoundingBox::new(area.x, area.y, area.width, area.height),
++        );
++        LayoutEngine::new(96.0).layout_composed_paragraph(
++            &mut tree,
++            &mut column,
++            composed,
++            styles,
++            &area,
++            area.y,
++            start,
++            composed.lines.len(),
++            0,
++            1,
++            None,
++            false,
++            0.0,
++            None,
++            None,
++            None,
++            None,
++        );
++        column
++    }
++
++    fn glyph(node: &RenderNode, wanted: char) -> (f64, f64) {
++        if let RenderNodeType::TextRun(run) = &node.node_type {
++            if let Some(i) = run.text.chars().position(|c| c == wanted) {
++                let positions = compute_char_positions(&run.text, &run.style);
++                return (node.bbox.x + positions[i], positions[i + 1] - positions[i]);
++            }
++        }
++        for child in &node.children {
++            let found = glyph(child, wanted);
++            if found.0.is_finite() {
++                return found;
++            }
++        }
++        (f64::NAN, f64::NAN)
++    }
++
++    fn close(actual: f64, expected: f64) {
++        assert!(
++            (actual - expected).abs() < 0.02,
++            "expected {expected}, got {actual}"
++        );
++    }
++
++    #[test]
++    fn inline_tabs_follow_style_language_runs_and_lines() {
++        let (composed, styles) = fixture(Alignment::Left);
++        let result = layout(&composed, &styles, 0);
++        for (before, after, width) in [
++            ('A', '한', 10.0),
++            ('한', 'C', 30.0),
++            ('D', '語', 50.0),
++            ('語', 'F', 70.0),
++        ] {
++            let a = glyph(&result, before);
++            let b = glyph(&result, after);
++            close(b.0 - a.0 - a.1, width);
++        }
++        let later_line = layout(&composed, &styles, 1);
++        for ch in ['D', '語', 'F'] {
++            close(glyph(&later_line, ch).0, glyph(&result, ch).0);
++        }
++    }
++
++    #[test]
++    fn inline_tab_width_changes_only_its_following_text() {
++        let (mut composed, styles) = fixture(Alignment::Left);
++        let baseline = layout(&composed, &styles, 0);
++        composed.tab_extended[1][0] += 750;
++        let changed = layout(&composed, &styles, 0);
++        for ch in ['A', '한', 'D', '語', 'F'] {
++            close(glyph(&changed, ch).0, glyph(&baseline, ch).0);
++        }
++        close(glyph(&changed, 'C').0 - glyph(&baseline, 'C').0, 10.0);
++    }
++
++    #[test]
++    fn inline_tab_estimation_matches_rendered_right_alignment() {
++        let (composed, styles) = fixture(Alignment::Right);
++        let result = layout(&composed, &styles, 0);
++        for (first, middle, end, tabs) in [('A', '한', 'C', 40.0), ('D', '語', 'F', 120.0)] {
++            let last = glyph(&result, end);
++            close(last.0 + last.1, 420.0);
++            let source_width = glyph(&result, first).1 + glyph(&result, middle).1 + last.1 + tabs;
++            close(glyph(&result, first).0, 420.0 - source_width);
++        }
++    }
++
++    #[test]
++    fn inline_tab_leaders_use_the_current_run_record() {
++        let (mut composed, styles) = fixture(Alignment::Left);
++        for (ext, fill) in composed.tab_extended.iter_mut().zip([1, 2, 3, 4]) {
++            ext[1] = fill;
++        }
++        let result = layout(&composed, &styles, 0);
++        let fills: Vec<u8> = result
++            .children
++            .iter()
++            .flat_map(|line| &line.children)
++            .filter_map(|node| match &node.node_type {
++                RenderNodeType::TextRun(run) => {
++                    Some(run.style.tab_leaders.iter().map(|l| l.fill_type))
++                }
++                _ => None,
++            })
++            .flatten()
++            .collect();
++        assert_eq!(fills, vec![1, 2, 3, 4]);
++    }
++
++    #[test]
++    fn inline_tabs_tac_segmentation_keeps_estimate_and_render_aligned() {
++        use crate::renderer::composer::ComposedTextRun;
++        let (mut composed, styles) = fixture(Alignment::Right);
++        composed.lines.truncate(1);
++        composed.lines[0].runs = vec![ComposedTextRun {
++            text: "A\tB\tC".into(),
++            lang_index: 1,
++            ..Default::default()
++        }];
++        composed.tac_controls = vec![(2, 1500, 0)];
++        let result = layout(&composed, &styles, 0);
++        let a = glyph(&result, 'A');
++        let b = glyph(&result, 'B');
++        let c = glyph(&result, 'C');
++        close(b.0 - a.0 - a.1, 10.0 + 20.0); // first tab + inline object
++        close(c.0 - b.0 - b.1, 30.0); // second tab after the object
++        close(c.0 + c.1, 420.0);
++        close(a.0, 420.0 - a.1 - b.1 - c.1 - 10.0 - 20.0 - 30.0);
++    }
++}
++
++#[cfg(test)]
+ mod pua_mapping_tests {
+     use super::map_pua_bullet_char;
+ 
 diff --git a/src/renderer/layout/table_cell_content.rs b/src/renderer/layout/table_cell_content.rs
-index 05cc62f..cb83bed 100644
 --- a/src/renderer/layout/table_cell_content.rs
 +++ b/src/renderer/layout/table_cell_content.rs
-@@ -479,13 +479,25 @@ impl LayoutEngine {
+@@ -18,6 +18,55 @@
+ use crate::model::paragraph::Paragraph;
+ use crate::model::style::Alignment;
+ use crate::model::table::VerticalAlign;
++
++// Only an ordinary horizontal cell with one paragraph-relative Square
++// picture can share its cached exclusion across semantic paragraphs. Keep
++// TAC, other wrap modes, captions and unsupported cell controls unchanged.
++fn embedded_cell_square_picture(cell: &crate::model::table::Cell) -> Option<(usize, usize)> {
++    use crate::model::shape::{HorzRelTo, TextWrap, VertRelTo};
++    if cell.text_direction != 0 || cell.vertical_align != VerticalAlign::Top
++        || cell.width as i32 <= 0 || cell.height as i32 <= 0
++    {
++        return None;
++    }
++    let mut picture = None;
++    for (pi, para) in cell.paragraphs.iter().enumerate() {
++        if para.line_segs.is_empty() || para.line_segs.iter().any(|line| {
++            line.vertical_pos < 0 || line.column_start < 0 || line.segment_width <= 0
++                || line.column_start.checked_add(line.segment_width)
++                    .is_none_or(|end| end > cell.width as i32)
++                || line.text_height <= 0 || line.line_height < line.text_height
++                || line.baseline_distance <= 0 || line.baseline_distance > line.text_height
++        }) {
++            return None;
++        }
++        for (ci, control) in para.controls.iter().enumerate() {
++            let Control::Picture(pic) = control else { return None; };
++            let common = &pic.common;
++            if picture.is_some() || common.treat_as_char || !common.flow_with_text
++                || common.text_wrap != TextWrap::Square || common.vert_rel_to != VertRelTo::Para
++                || !matches!(common.horz_rel_to, HorzRelTo::Para | HorzRelTo::Column)
++                || common.width as i32 <= 0 || common.height as i32 <= 0
++                || (common.horizontal_offset as i32) < 0 || (common.vertical_offset as i32) < 0
++                || pic.caption.is_some()
++            {
++                return None;
++            }
++            picture = Some((pi, ci));
++        }
++    }
++    picture
++}
++
++fn first_rendered_line_y(nodes: &[RenderNode]) -> Option<f64> {
++    for node in nodes {
++        if matches!(&node.node_type, RenderNodeType::TextLine(_)) {
++            return Some(node.bbox.y);
++        }
++        if let Some(y) = first_rendered_line_y(&node.children) { return Some(y); }
++    }
++    None
++}
+ 
+ impl LayoutEngine {
+     /// 세로쓰기 셀의 텍스트를 수직 방향으로 배치한다.
+@@ -479,13 +528,25 @@
              .map(|rx| rx.last().copied().unwrap_or(0.0))
              .fold(col_x.last().copied().unwrap_or(0.0), f64::max);
          let table_height = row_y.last().copied().unwrap_or(0.0);
@@ -60,6 +642,9 @@ index 05cc62f..cb83bed 100644
 -        let table_x = match host_alignment {
 -            Alignment::Center | Alignment::Distribute => {
 -                container.x + (container.width - table_width).max(0.0) / 2.0
+-            }
+-            Alignment::Right => container.x + (container.width - table_width).max(0.0),
+-            _ => container.x, // 왼쪽 정렬 (기본)
 +        // Inline tables follow paragraph alignment. A floating table in a
 +        // textbox retains its own horizontal alignment and source offset.
 +        // Ignoring these fields shifts both the frame and its editable text.
@@ -78,13 +663,11 @@ index 05cc62f..cb83bed 100644
 +                HorzAlign::Right | HorzAlign::Outside => container.x + container.width - table_width - offset,
 +                HorzAlign::Center => container.x + (container.width - table_width) / 2.0 + offset,
 +                _ => container.x + offset,
-             }
--            Alignment::Right => container.x + (container.width - table_width).max(0.0),
--            _ => container.x, // 왼쪽 정렬 (기본)
++            }
          };
          let table_y = y_start;
  
-@@ -566,27 +578,18 @@ impl LayoutEngine {
+@@ -566,27 +627,18 @@
                  None
              };
  
@@ -124,7 +707,32 @@ index 05cc62f..cb83bed 100644
  
              // 셀 테두리를 엣지 그리드에 수집
              if let Some(bs) = border_style {
-@@ -674,7 +677,7 @@ impl LayoutEngine {
+@@ -636,6 +688,8 @@
+             let mut para_y = cell_y + pad_top;
+             let para_count = composed_paras.len();
+             let cell_idx = cell_enum_idx;
++            let square_picture = embedded_cell_square_picture(cell);
++            let mut square_bottom = None;
+             for (pidx, (composed, para)) in composed_paras
+                 .iter()
+                 .zip(cell.paragraphs.iter())
+@@ -663,6 +717,15 @@
+                     Some((s, p, c)) => (s, pidx, Some(c)),
+                     None => (0, 0, None),
+                 };
++                let square_wrap = square_picture.and_then(|(owner, _)| {
++                    (pidx == owner || (pidx > owner && square_bottom.is_some_and(|bottom| para_y < bottom)))
++                        .then_some(crate::renderer::pagination::WrapAnchorRef {
++                            anchor_para_index: owner, anchor_cs: 0, anchor_sw: 0,
++                            anchor_image_margin_right: 0,
++                        })
++                });
++                let children_before = cell_node.children.len();
++                let para_y_before = para_y;
+                 para_y = self.layout_composed_paragraph(
+                     tree,
+                     &mut cell_node,
+@@ -674,19 +737,73 @@
                      composed.lines.len(),
                      sec_for_layout,
                      para_for_layout,
@@ -133,7 +741,16 @@ index 05cc62f..cb83bed 100644
                      pidx + 1 == para_count,
                      0.0,
                      None,
-@@ -686,6 +689,38 @@ impl LayoutEngine {
+                     Some(para),
+                     None,
+-                    None, // 셀 컨텍스트 — wrap zone 무관
++                    square_wrap.as_ref(),
+                 );
++                // TextLine top includes ordinary before spacing exactly once.
++                // Raw cache vertical_pos may instead be absolute in the cell.
++                let first_line_y = first_rendered_line_y(&cell_node.children[children_before..])
++                    .unwrap_or(para_y_before);
+ 
                  // 셀 내 그림/도형 컨트롤 렌더링
                  for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
                      match ctrl {
@@ -170,13 +787,447 @@ index 05cc62f..cb83bed 100644
 +                            );
 +                        }
                          Control::Picture(pic) => {
++                            if square_picture == Some((pidx, ctrl_idx)) {
++                                let image_start = cell_node.children.len();
++                                // Reuse body-picture positioning and painting
++                                // once, retaining crop/effect/transform/border.
++                                // Square occupies an exclusion, not a separate
++                                // paragraph-height advance.
++                                self.layout_body_picture(
++                                    tree, &mut cell_node, pic, &inner_area, &inner_area,
++                                    &inner_area, &inner_area, bin_data_content, styles,
++                                    host_alignment, first_line_y, sec_for_layout,
++                                    ctx.as_ref().map(|c| c.parent_para_index).unwrap_or(para_for_layout),
++                                    ctrl_idx, false,
++                                );
++                                square_bottom = cell_node.children[image_start..].iter()
++                                    .filter(|node| matches!(&node.node_type, RenderNodeType::Image(_)))
++                                    .map(|node| node.bbox.y + node.bbox.height).reduce(f64::max);
++                                continue;
++                            }
                              let pic_w = hwpunit_to_px(pic.common.width as i32, self.dpi);
                              let pic_h = hwpunit_to_px(pic.common.height as i32, self.dpi);
+                             // 셀 내부에 맞추어 크기 제한
+diff --git a/src/renderer/layout/text_measurement.rs b/src/renderer/layout/text_measurement.rs
+--- a/src/renderer/layout/text_measurement.rs
++++ b/src/renderer/layout/text_measurement.rs
+@@ -497,7 +497,20 @@
+             }
+             total += char_width(i);
+         }
+-        total.round()
++        // Explicit inline LEFT tabs already specify a run-relative advance.
++        // Keep its fraction when every tab in this run has such a record, so
++        // the next shaped run starts at the same end as compute_char_positions.
++        // Other tab kinds and fallback/missing records keep legacy rounding.
++        let fully_inline_left = tab_char_idx > 0
++            && style
++                .inline_tabs
++                .get(..tab_char_idx)
++                .is_some_and(|tabs| tabs.iter().all(|ext| inline_tab_type(ext) == 1));
++        if fully_inline_left {
++            total
++        } else {
++            total.round()
++        }
+     }
+ 
+     fn compute_char_positions(&self, text: &str, style: &TextStyle) -> Vec<f64> {
+@@ -1930,6 +1943,148 @@
+ mod tests {
+     use super::*;
+ 
++    fn fractional_inline_tab_style(types: &[u8]) -> TextStyle {
++        TextStyle {
++            font_family: "__rhwp_test_unregistered_font__".into(),
++            font_size: 13.4,
++            default_tab_width: 40.25,
++            inline_tabs: types
++                .iter()
++                .zip([751, 1127, 1501])
++                .map(|(&kind, width)| [width, 0, (kind as u16) << 8, 0, 0, 0, 9])
++                .collect(),
++            ..Default::default()
++        }
++    }
++
++    fn assert_inline_advance_close(actual: f64, expected: f64) {
++        assert!(
++            (actual - expected).abs() < 1e-9,
++            "expected {expected}, got {actual}"
++        );
++    }
++
++    #[test]
++    fn inline_left_fractional_advance_matches_rendered_end() {
++        let measurer = EmbeddedTextMeasurer;
++        let style = fractional_inline_tab_style(&[1]);
++        for text in ["\t", "A\tB", "A\t한", "\t\u{1100}\u{1161}\u{11ab}"] {
++            let end = *measurer
++                .compute_char_positions(text, &style)
++                .last()
++                .unwrap();
++            assert!((end - end.round()).abs() > 0.01);
++            assert_inline_advance_close(measurer.estimate_text_width(text, &style), end);
++        }
++    }
++
++    #[test]
++    fn inline_left_fractional_advance_covers_all_current_run_tabs() {
++        let measurer = EmbeddedTextMeasurer;
++        // A later run's RIGHT record must not disable this run's two LEFT tabs.
++        let style = fractional_inline_tab_style(&[1, 1, 2]);
++        let text = "A\t한\tC";
++        let end = *measurer
++            .compute_char_positions(text, &style)
++            .last()
++            .unwrap();
++        assert_inline_advance_close(end, 6.7 + 751.0 / 75.0 + 13.4 + 1127.0 / 75.0 + 6.7);
++        assert_inline_advance_close(measurer.estimate_text_width(text, &style), end);
++    }
++
++    #[test]
++    fn inline_left_fractional_advance_propagates_subpixel_width_change() {
++        let measurer = EmbeddedTextMeasurer;
++        let mut style = fractional_inline_tab_style(&[1, 1]);
++        let text = "A\t한\tC";
++        let before = measurer.estimate_text_width(text, &style);
++        let before_positions = measurer.compute_char_positions(text, &style);
++        style.inline_tabs[0][0] -= 30;
++        let after = measurer.estimate_text_width(text, &style);
++        let after_positions = measurer.compute_char_positions(text, &style);
++        assert_inline_advance_close(after - before, -0.4);
++        for index in 2..after_positions.len() {
++            assert_inline_advance_close(after_positions[index] - before_positions[index], -0.4);
++        }
++    }
++
++    #[test]
++    fn inline_left_fractional_advance_preserves_other_rounding() {
++        let measurer = EmbeddedTextMeasurer;
++        // No tab, missing records, partial coverage, and every other explicit
++        // tab type retain the existing whole-pixel estimate contract.
++        let cases: &[(&str, &[u8], f64)] = &[
++            ("ABC", &[1], 20.0),
++            ("A\tB\tC", &[], 87.0),
++            ("A\tB\tC", &[1], 47.0),
++            ("A\tB\tC", &[1, 0], 45.0),
++            ("A\tB\tC", &[1, 2], 45.0),
++            ("A\tB\tC", &[1, 3], 45.0),
++            ("A\tB\tC", &[1, 4], 45.0),
++            ("A\tB\tC", &[2, 1], 45.0),
++            ("A\tB", &[0], 23.0),
++            ("A\tB", &[2], 23.0),
++            ("A\tB", &[3], 23.0),
++            ("A\tB", &[4], 23.0),
++            ("A\tB", &[5], 23.0),
++        ];
++        for &(text, types, expected) in cases {
++            let style = fractional_inline_tab_style(types);
++            assert_inline_advance_close(measurer.estimate_text_width(text, &style), expected);
++        }
++        // Legacy raw types are not explicit high-byte LEFT records either.
++        for (raw_type, expected) in [(1, 17.0), (2, 20.0), (3, 23.0), (0xffff, 23.0)] {
++            let mut style = fractional_inline_tab_style(&[1]);
++            style.inline_tabs[0][2] = raw_type;
++            assert_inline_advance_close(measurer.estimate_text_width("A\tB", &style), expected);
++        }
++    }
++
++    #[test]
++    fn inline_left_fractional_advance_does_not_enable_auto_right_override() {
++        let measurer = EmbeddedTextMeasurer;
++        let mut style = fractional_inline_tab_style(&[1]);
++        style.auto_tab_right = true;
++        style.available_width = 400.5;
++        style.text_start_offset = 20.25;
++        style.line_x_offset = 10.75;
++        let text = "A\tB";
++        let end = *measurer
++            .compute_char_positions(text, &style)
++            .last()
++            .unwrap();
++        assert_inline_advance_close(end, 6.7 + 751.0 / 75.0 + 6.7);
++        assert_inline_advance_close(measurer.estimate_text_width(text, &style), end);
++    }
++
++    #[test]
++    fn inline_left_fractional_advance_matches_spacing_and_leader_rendering() {
++        let measurer = EmbeddedTextMeasurer;
++        let mut style = fractional_inline_tab_style(&[1, 1]);
++        style.inline_tabs[0][2] |= 3; // LEFT with a fill byte remains LEFT.
++        style.inline_tabs[1][2] |= 1;
++        style.ratio = 0.93;
++        style.letter_spacing = -0.2;
++        style.extra_char_spacing = 0.07;
++        style.extra_word_spacing = 0.17;
++        style.extra_dash_advance = 0.11;
++        let text = "A \t---한\tB";
++        for (font, bold, italic) in [
++            ("__rhwp_test_unregistered_font__", false, false),
++            ("Times New Roman", false, true),
++            ("함초롬돋움", true, false),
++        ] {
++            style.font_family = font.into();
++            style.bold = bold;
++            style.italic = italic;
++            let end = *measurer
++                .compute_char_positions(text, &style)
++                .last()
++                .unwrap();
++            assert_inline_advance_close(measurer.estimate_text_width(text, &style), end);
++        }
++    }
++
+     /// 테스트용 고정 폭 텍스트 측정기
+     ///
+     /// 모든 문자를 동일한 폭으로 측정한다.
+diff --git a/src/renderer/mod.rs b/src/renderer/mod.rs
+--- a/src/renderer/mod.rs
++++ b/src/renderer/mod.rs
+@@ -24,6 +24,8 @@
+ pub mod pagination;
+ #[cfg(not(target_arch = "wasm32"))]
+ pub mod pdf;
++#[cfg(not(target_arch = "wasm32"))]
++mod font_alias;
+ pub mod pua_oldhangul;
+ pub mod render_tree;
+ pub mod scheduler;
+diff --git a/src/renderer/pdf.rs b/src/renderer/pdf.rs
+--- a/src/renderer/pdf.rs
++++ b/src/renderer/pdf.rs
+@@ -20,6 +20,87 @@
+     fontdb.set_sans_serif_family("맑은 고딕");
+     fontdb.set_monospace_family("D2Coding");
+     fontdb
++}
++
++#[cfg(not(target_arch = "wasm32"))]
++fn exact_font_resolver(db: &usvg::fontdb::Database) -> usvg::FontResolver<'static> {
++    use super::font_alias::{exact_face_alias, fontdb_aliases};
++    use usvg::fontdb::{Family, Query, Style, Weight};
++    let aliases = fontdb_aliases(db);
++    let default = usvg::FontResolver::default_font_selector();
++    let fallback = usvg::FontResolver::default_fallback_selector();
++    let legacy_faces = std::sync::Arc::new(std::sync::Mutex::new(
++        std::collections::HashMap::<usvg::fontdb::ID, Option<usvg::fontdb::ID>>::new()));
++    let selected_legacy_faces = legacy_faces.clone();
++    usvg::FontResolver {
++        select_font: Box::new(move |font, db| {
++            let style = match font.style() {
++                usvg::FontStyle::Normal => Style::Normal,
++                usvg::FontStyle::Italic => Style::Italic,
++                usvg::FontStyle::Oblique => Style::Oblique,
++            };
++            let stretch = match font.stretch() {
++                usvg::FontStretch::UltraCondensed => usvg::fontdb::Stretch::UltraCondensed,
++                usvg::FontStretch::ExtraCondensed => usvg::fontdb::Stretch::ExtraCondensed,
++                usvg::FontStretch::Condensed => usvg::fontdb::Stretch::Condensed,
++                usvg::FontStretch::SemiCondensed => usvg::fontdb::Stretch::SemiCondensed,
++                usvg::FontStretch::Normal => usvg::fontdb::Stretch::Normal,
++                usvg::FontStretch::SemiExpanded => usvg::fontdb::Stretch::SemiExpanded,
++                usvg::FontStretch::Expanded => usvg::fontdb::Stretch::Expanded,
++                usvg::FontStretch::ExtraExpanded => usvg::fontdb::Stretch::ExtraExpanded,
++                usvg::FontStretch::UltraExpanded => usvg::fontdb::Stretch::UltraExpanded,
++            };
++            // Match CSS families in the original order. The default selector
++            // already appends a generic serif fallback, so only consulting it
++            // first would hide a failed requested-family lookup.
++            for family in font.families() {
++                let requested = match family {
++                    usvg::FontFamily::Named(name) => Family::Name(name),
++                    usvg::FontFamily::Serif => Family::Serif,
++                    usvg::FontFamily::SansSerif => Family::SansSerif,
++                    usvg::FontFamily::Monospace => Family::Monospace,
++                    usvg::FontFamily::Cursive => Family::Cursive,
++                    usvg::FontFamily::Fantasy => Family::Fantasy,
++                };
++                if let Some(id) = db.query(&Query { families: &[requested], weight: Weight(font.weight()), stretch, style }) {
++                    return Some(id);
++                }
++                if let usvg::FontFamily::Named(name) = family {
++                    let slant = match style { Style::Normal => 0, Style::Italic => 1, Style::Oblique => 2 };
++                    if let Some(id) = exact_face_alias(&aliases, name, font.weight(), stretch.to_number(), slant) {
++                        let legacy = default(font, db);
++                        let mut selections = selected_legacy_faces.lock().ok()?;
++                        // A face can be requested with different CSS fallback
++                        // chains. Without the original font specification in
++                        // select_fallback, conflicting chains must fail closed.
++                        if selections.get(&id).is_some_and(|previous| *previous != legacy) {
++                            return legacy;
++                        }
++                        selections.insert(id, legacy);
++                        return Some(id);
++                    }
++                }
++            }
++            default(font, db)
++        }),
++        select_fallback: Box::new(move |character, used, db| {
++            let legacy = legacy_faces.lock().ok()?.get(used.first()?).copied();
++            let Some(legacy) = legacy else { return fallback(character, used, db); };
++            let legacy = legacy?;
++            // Recovering a Latin face must not change the previous CJK or
++            // other missing-glyph fallback. Reuse the old selected face first,
++            // then preserve the original fallback selector and its base style.
++            if !used.contains(&legacy) && db.with_face_data(legacy, |data, index| {
++                ttf_parser::Face::parse(data, index).ok()
++                    .and_then(|face| face.glyph_index(character)).is_some()
++            }).unwrap_or(false) {
++                return Some(legacy);
++            }
++            let mut previous = vec![legacy];
++            previous.extend(used.iter().copied().filter(|id| *id != legacy));
++            fallback(character, &previous, db)
++        }),
++    }
+ }
+ 
+ /// SVG에서 없는 한글 폰트명에 fallback 추가
+@@ -40,6 +121,7 @@
+ pub fn svg_to_pdf(svg_content: &str) -> Result<Vec<u8>, String> {
+     let fontdb = create_fontdb();
+     let mut options = usvg::Options::default();
++    options.font_resolver = exact_font_resolver(&fontdb);
+     options.fontdb = std::sync::Arc::new(fontdb);
+     let svg_with_fallback = add_font_fallbacks(svg_content);
+     let tree = usvg::Tree::from_str(&svg_with_fallback, &options)
+@@ -68,6 +150,7 @@
+ 
+     let fontdb = create_fontdb();
+     let mut options = usvg::Options::default();
++    options.font_resolver = exact_font_resolver(&fontdb);
+     options.fontdb = std::sync::Arc::new(fontdb);
+ 
+     let mut alloc = Ref::new(1);
+diff --git a/src/renderer/skia/font_alias.rs b/src/renderer/skia/font_alias.rs
+new file mode 100644
+--- /dev/null
++++ b/src/renderer/skia/font_alias.rs
+@@ -0,0 +1,36 @@
++use std::collections::{HashMap, HashSet};
++use skia_safe::{FontMgr, FontStyle, Typeface};
++use crate::renderer::font_alias::{exact_face_alias, table_alias_names, FaceAlias};
++
++pub(super) struct LoadedFaceAliases {
++    faces: Vec<Typeface>,
++    aliases: Vec<FaceAlias<usize>>,
++}
++
++impl LoadedFaceAliases {
++    pub(super) fn new(manager: &FontMgr, custom: &HashMap<String, Typeface>) -> Self {
++        let mut faces: Vec<Typeface> = custom.values().cloned().collect();
++        for family in 0..manager.count_families() {
++            let mut styles = manager.new_style_set(family);
++            for index in 0..styles.count() {
++                if let Some(face) = styles.new_typeface(index) { faces.push(face); }
++            }
++        }
++        let mut seen = HashSet::new();
++        faces.retain(|face| seen.insert(face.unique_id()));
++        let aliases = faces.iter().enumerate().filter_map(|(id, face)| {
++            let data = face.copy_table_data(u32::from_be_bytes(*b"name"))?;
++            let names = table_alias_names(data.as_bytes());
++            let style = face.font_style();
++            Some(FaceAlias { id, names, weight: *style.weight() as u16,
++                width: *style.width() as u16, slant: style.slant() as u8 })
++        }).collect();
++        Self { faces, aliases }
++    }
++
++    pub(super) fn find(&self, family: &str, style: FontStyle) -> Option<Typeface> {
++        let index = exact_face_alias(&self.aliases, family, *style.weight() as u16,
++                                    *style.width() as u16, style.slant() as u8)?;
++        self.faces.get(index).cloned()
++    }
++}
+diff --git a/src/renderer/skia/mod.rs b/src/renderer/skia/mod.rs
+--- a/src/renderer/skia/mod.rs
++++ b/src/renderer/skia/mod.rs
+@@ -3,6 +3,7 @@
+ //! This module is available only with the `native-skia` feature.
+ 
+ mod equation_conv;
++mod font_alias;
+ mod image_conv;
+ mod renderer;
+ mod text_replay;
+diff --git a/src/renderer/skia/renderer.rs b/src/renderer/skia/renderer.rs
+--- a/src/renderer/skia/renderer.rs
++++ b/src/renderer/skia/renderer.rs
+@@ -18,6 +18,7 @@
+ use crate::renderer::{svg_arc_to_beziers, LineStyle, PathCommand, ShapeStyle, StrokeDash};
+ 
+ use super::equation_conv::render_equation;
++use super::font_alias::LoadedFaceAliases;
+ use super::image_conv::{draw_image_bytes, draw_svg_fragment, ImageSampling};
+ use super::text_replay::SkiaTextReplay;
+ 
+@@ -107,6 +108,7 @@
+ 
+ pub struct SkiaLayerRenderer {
+     font_mgr: FontMgr,
++    font_aliases: std::cell::OnceCell<LoadedFaceAliases>,
+     /// 사용자 지정 폰트 디렉토리에서 미리 로드한 폰트 캐시.
+     /// key = primary face name (Typeface::family_name), value = Typeface.
+     /// SVG 의 `--font-path` 와 같은 패턴으로 ttfs 디렉토리의 한컴 전용 폰트 (HY견명조 등) 도 사용 가능.
+@@ -117,6 +119,7 @@
+     pub fn new() -> Self {
+         Self {
+             font_mgr: FontMgr::default(),
++            font_aliases: std::cell::OnceCell::new(),
+             custom_typefaces: HashMap::new(),
+         }
+     }
+@@ -124,6 +127,7 @@
+     /// 사용자 지정 폰트 디렉토리 (ttfs 등) 의 폰트를 로드하여 Skia 가 직접 사용 가능하게 한다.
+     /// SVG 의 `--font-path` 와 동일한 패턴.
+     pub fn with_font_paths(mut self, font_paths: &[std::path::PathBuf]) -> Self {
++        self.font_aliases.take();
+         let mut search_dirs: Vec<std::path::PathBuf> = font_paths.to_vec();
+         for dir in &["ttfs/hwp", "ttfs/windows", "ttfs"] {
+             search_dirs.push(std::path::PathBuf::from(dir));
+@@ -373,6 +377,7 @@
+             canvas,
+             font_mgr: &self.font_mgr,
+             custom_typefaces: &self.custom_typefaces,
++            font_aliases: &self.font_aliases,
+             output_options,
+         };
+         let open_shape_transform =
 diff --git a/src/renderer/skia/text_replay.rs b/src/renderer/skia/text_replay.rs
-index a78aba2..90a5759 100644
 --- a/src/renderer/skia/text_replay.rs
 +++ b/src/renderer/skia/text_replay.rs
-@@ -284,7 +284,10 @@ impl SkiaTextReplay<'_> {
+@@ -14,11 +14,13 @@
+ use crate::renderer::{clamp_tab_leader_end_x, TextStyle};
+ 
+ use super::renderer::colorref_to_skia;
++use super::font_alias::LoadedFaceAliases;
+ 
+ pub(super) struct SkiaTextReplay<'a> {
+     pub(super) canvas: &'a Canvas,
+     pub(super) font_mgr: &'a FontMgr,
+     pub(super) custom_typefaces: &'a HashMap<String, Typeface>,
++    pub(super) font_aliases: &'a std::cell::OnceCell<LoadedFaceAliases>,
+     pub(super) output_options: &'a LayerOutputOptions,
+ }
+ 
+@@ -106,7 +108,12 @@
+                         }
+                     }
+                     for family in &families {
+-                        if let Some(tf) = self.font_mgr.match_family_style(family, font_style) {
++                        let face = self.font_mgr.match_family_style(family, font_style).or_else(|| {
++                            if *family != style.font_family.as_str() { return None; }
++                            self.font_aliases.get_or_init(|| LoadedFaceAliases::new(
++                                self.font_mgr, self.custom_typefaces)).find(family, font_style)
++                        });
++                        if let Some(tf) = face {
+                             push(&mut chain, &mut seen, tf);
+                         }
+                     }
+@@ -284,7 +291,10 @@
                      return;
                  }
  

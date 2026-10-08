@@ -105,9 +105,15 @@ def run(side="left"):
     for mutation in ("missing", "swapped", "wrong_cell"):
         mutant = deepcopy(box)
         cells = mutant.findall(f".//{HP}tbl/{HP}tr/{HP}tc")
-        labels = [c.find(".//" + HP + "t") for c in cells
+        # A merged data cell can leave ordinary empty gutter slots between
+        # labelled rows. Mutate the actual three source labels, rather than
+        # assuming the first two physical slots both contain text.
+        labels = [node for c in cells
                   if c.find(HP + "cellAddr").get("colAddr") == str(gutter_col)
-                  and c.find(HP + "cellAddr").get("rowAddr") != "0"]
+                  for node in c.findall(".//" + HP + "t")
+                  if any(char in (node.text or "") for char in "①②③")]
+        assert ["".join(node.text.split()) for node in labels] == (
+            ["①", "②", "③"] if side == "left" else ["…①", "…②", "…③"])
         a, b = labels[:2]
         if mutation == "missing":
             a.text = ""

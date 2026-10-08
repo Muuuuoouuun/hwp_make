@@ -53,6 +53,7 @@ __all__ = ["segment_pdf"]
 # 검사(선두가 숫자면 배제)로 걸러 오탐을 막는다.
 _MARKER_RE = re.compile(r"^([1-9][0-9]?)([.)])(?:\s|$)")
 _NUMERIC_CHOICE_MARKER_RE = re.compile(r"^\s*([1-5])([.)])(?:\s|$)")
+_PASSAGE_RANGE_RE = re.compile(r"\[\s*(\d{1,2})\s*[~～∼\-–]\s*(\d{1,2})\s*\]")
 
 # 인쇄일/헤더 날짜 라인 판정(edb `_looks_like_pdf_print_date_header`).
 _DATE_HEADER_RE = re.compile(r"^[0-9]{2,4}\s*[.\-/]?\s*[0-9]{1,2}\s*[.\-/]?\s*[0-9]{1,2}\.")
@@ -108,7 +109,11 @@ def _looks_like_footer_band_line(line: dict[str, Any], height_px: float) -> bool
         return False
     box = line.get("box")
     top = float(getattr(box, "top", 0.0) or 0.0)
-    if "저작권" in text or "한국교육과정평가원" in text:
+    if (top >= height_px * 0.88 and not _starts_with_choice_marker(text)
+            and not _MARKER_RE.match(text)
+            and "저작권" in text
+            and ("한국교육과정평가원" in text
+                 or re.search(r"(?:이\s*)?문제지(?:에\s*관한|의)\s*저작권", text))):
         return True
     if top >= height_px * 0.90 and re.fullmatch(r"\d{1,3}", text):
         return True
@@ -461,6 +466,26 @@ def _filter_figure_embedded_markers(
     max_region_area = page_area * 0.20
     margin = 2.0
 
+    def marker_height(marker: dict[str, Any]) -> float:
+        # A superscript in the question's later prose can enlarge the whole
+        # line bbox. Compare the number glyphs themselves, so a small numbered
+        # list inside a figure does not become a question merely because its
+        # sentence contains a raised footnote or exponent.
+        for span in marker.get("line", {}).get("pdf_line_spans", []):
+            text = str(span.get("text") or "").lstrip()
+            if not text:
+                continue
+            bbox = span.get("bbox")
+            if _MARKER_RE.match(text) and isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                try:
+                    height = float(bbox[3]) - float(bbox[1])
+                    if 0 < height < float("inf"):
+                        return height
+                except (TypeError, ValueError):
+                    pass
+            break
+        return float(marker["box"].height)
+
     def containing_region(marker: dict[str, Any]) -> Box | None:
         box: Box = marker["box"]
         candidates = [
@@ -475,9 +500,9 @@ def _filter_figure_embedded_markers(
         return min(candidates, key=lambda figure: figure.area) if candidates else None
 
     outside_heights = sorted(
-        float(marker["box"].height)
+        marker_height(marker)
         for marker in markers
-        if containing_region(marker) is None and float(marker["box"].height) > 0
+        if containing_region(marker) is None and marker_height(marker) > 0
     )
     if not outside_heights:
         return markers, 0
@@ -491,8 +516,8 @@ def _filter_figure_embedded_markers(
     suppressed = 0
     for marker in markers:
         region = containing_region(marker)
-        marker_height = float(marker["box"].height)
-        if region is not None and marker_height <= reference_height * 0.92:
+        glyph_height = marker_height(marker)
+        if region is not None and glyph_height <= reference_height * 0.92:
             suppressed += 1
             continue
         kept.append(marker)
@@ -733,6 +758,201 @@ def _line_inside_figure(line: dict[str, Any], figures: list[Box], problem_box: B
     return False
 
 
+def _english_reading_order(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Read fragments on one printed baseline from left to right.
+
+    Blank labels and circled markers can use a different font whose bounding
+    box starts slightly above the prose on the same row. Sorting by raw top
+    would put an inline (A) before the beginning of its sentence.
+    """
+    rows: list[list[dict[str, Any]]] = []
+    for line in sorted(lines, key=lambda item: (item["box"].top, item["box"].left)):
+        box = line["box"]
+        matched_row = None
+        for row in reversed(rows):
+            anchor = row[0]["box"]
+            if box.top - anchor.bottom > 0:
+                break
+            if abs((box.top + box.bottom) - (anchor.top + anchor.bottom)) <= min(box.height, anchor.height) * 0.65:
+                matched_row = row
+                break
+        if matched_row is None:
+            rows.append([line])
+        else:
+            matched_row.append(line)
+    return [line for row in rows for line in sorted(row, key=lambda item: item["box"].left)]
+
+
+def _english_blank_underlines(page: Any, lines: list[dict[str, Any]], scale: float,
+                              charts: list[Box]) -> int:
+    """Keep an empty answer rule as editable text, without rewriting underlined words."""
+    segments = []
+    for drawing in page.get_drawings():
+        for item in drawing.get("items", []):
+            if item[0] == "l":
+                segments.append((item[1].x * scale, item[1].y * scale,
+                                 item[2].x * scale, item[2].y * scale))
+    count = 0
+    seen = set()
+    insertions = {}
+    for x0, y0, x1, y1 in segments:
+        left, right = sorted((x0, x1))
+        if abs(y1 - y0) > .5 * scale or not 25 * scale <= right - left <= page.rect.width * scale * .45:
+            continue
+        signature = (round(left, 1), round(y0, 1), round(right, 1))
+        if signature in seen:
+            continue
+        seen.add(signature)
+        if any(chart.left <= (left + right) / 2 <= chart.right and chart.top <= y0 <= chart.bottom
+               for chart in charts):
+            continue
+        # A grid/frame edge joins a vertical edge. It is never an answer blank.
+        if any(abs(a - c) < scale and min(b, d) - scale <= y0 <= max(b, d) + scale
+               and max(b, d) - min(b, d) > 3 * scale
+               and min(abs(a - left), abs(a - right)) < 2 * scale for a, b, c, d in segments):
+            continue
+        candidates = []
+        for line in lines:
+            box = line["box"]
+            chars = line.get("pdf_line_chars") or []
+            if not chars or abs(box.bottom - y0) > max(2 * scale, box.height * .18):
+                continue
+            raw_text = "".join(str(char.get("c") or "") for char in chars)
+            # Isolated labels beside a vector diagram's leader lines are not
+            # sentence blanks. Empty punctuation/score tails and explicit
+            # source space runs still qualify for blank-only printed rows.
+            if (not re.search(r" {8,}", raw_text)
+                and len(raw_text.split()) < 2
+                and not re.search(r"[.,;:!?]", raw_text)):
+                continue
+            if right < box.left - 3 * scale or left > box.right + 3 * scale:
+                continue
+            ink = [char for char in chars if str(char.get("c") or "").strip()]
+            covered = sum(max(0, min(right, char["bbox"][2]) - max(left, char["bbox"][0]))
+                          for char in ink)
+            if covered > (right - left) * .07:
+                continue
+            candidates.append((abs(box.bottom - y0), line, chars))
+        if not candidates:
+            continue
+        _, line, chars = min(candidates, key=lambda candidate: candidate[0])
+        # The raw characters retain leading/trailing spaces that strip() would
+        # lose. Insert at the measured rule, before the next visible character.
+        insertion = next((i for i, char in enumerate(chars)
+                          if str(char.get("c") or "").strip() and char["bbox"][0] >= right - scale), len(chars))
+        record = insertions.setdefault(id(line), (line, chars, set()))
+        record[2].add(insertion)
+        count += 1
+    for line, chars, positions in insertions.values():
+        raw = "".join(str(char.get("c") or "") for char in chars)
+        parts, cursor = [], 0
+        for position in sorted(positions):
+            parts.extend((raw[cursor:position].strip(), "________"))
+            cursor = position
+        parts.append(raw[cursor:].strip())
+        line["text"] = " ".join(part for part in parts if part)
+    return count
+
+
+def _english_shared_regions(
+    text_lines: list[dict[str, Any]],
+    markers: list[dict[str, Any]],
+    descriptors: list[dict[str, Any]],
+    width_px: float,
+    height_px: float,
+    column_count: int,
+) -> list[dict[str, Any]]:
+    """Own range instructions and prose before their first printed question.
+
+    The passage can start at the bottom of the left column and continue at
+    the top of the right column. Remove it from the preceding question and
+    retain source geometry so every member can carry it into a new exam.
+    """
+    headings = [line for line in text_lines if _PASSAGE_RANGE_RE.search(line["text"])]
+    if not headings:
+        return []
+    body_top = min([m["box"].top for m in markers] + [line["box"].top for line in headings])
+    # A divider can establish an empty second question column whose prose
+    # continues on this page while the actual questions start on the next.
+    two_columns = column_count > 1
+
+    def key(line: dict[str, Any]) -> tuple[float, float, float]:
+        box = line["box"]
+        column = int(two_columns and box.left + box.width / 2 >= width_px / 2)
+        return column, box.top, box.left
+
+    body_lines = [line for line in text_lines if line["box"].bottom >= body_top - 2.0]
+    if two_columns:
+        # A later column can continue the passage above every question marker
+        # on the page. Keep that prose, excluding only recognizable masthead
+        # lines in the header band instead of applying one global body top.
+        header_token = (
+            r"(?:영\s*어\s*(?:영\s*역)?|English(?:\s+(?:Area|Section))?"
+            r"|(?:홀|짝)\s*수\s*형|(?:Odd|Even)\s+Form"
+            r"|(?:고|중)\s*[1-3](?:\s*학년)?|\d{1,3})")
+        running_header = re.compile(header_token + r"(?:\s*" + header_token + r")*", re.I)
+        body_lines = [line for line in text_lines
+                      if not (line["box"].top <= height_px * .13
+                              and (running_header.fullmatch(str(line["text"]).strip())
+                                   or _looks_like_header_band_line(line["text"])
+                                   or _looks_like_date_header(line["text"])))]
+    ordered = [line for column in range(2 if two_columns else 1)
+               for line in _english_reading_order([item for item in body_lines if key(item)[0] == column])]
+    marker_lines = {id(marker["line"]): marker["number"] for marker in markers}
+    shared_ids: set[int] = set()
+    passages: list[dict[str, Any]] = []
+    for index, line in enumerate(ordered):
+        match = _PASSAGE_RANGE_RE.search(line["text"])
+        if not match:
+            continue
+        start, end = int(match[1]), int(match[2])
+        if start > end:
+            continue
+        selected = []
+        for candidate in ordered[index:]:
+            if id(candidate) in marker_lines:
+                break
+            if candidate is not line and _PASSAGE_RANGE_RE.search(candidate["text"]):
+                break
+            selected.append(candidate)
+        following = next((candidate for candidate in ordered[index + 1:]
+                          if id(candidate) in marker_lines), None)
+        if not selected or (following is not None and marker_lines[id(following)] != start):
+            continue
+        shared_ids.update(id(candidate) for candidate in selected)
+        geometries = []
+        for candidate in selected:
+            box = candidate["box"]
+            geometries.append({
+                "text": candidate["text"],
+                "bbox_px": [box.left, box.top, box.width, box.height],
+                **{name: candidate[name] for name in ("pdf_line_chars", "pdf_line_spans") if name in candidate},
+            })
+        passages.append({"start": start, "end": end,
+                         "text": "\n".join(candidate["text"] for candidate in selected),
+                         "line_geometries": geometries})
+    for desc in descriptors:
+        desc["region_lines"] = [line for line in desc["region_lines"] if id(line) not in shared_ids]
+    return passages
+
+
+def _english_has_column_divider(page: Any, scale: float, width_px: float, height_px: float) -> bool:
+    """Recognize a page-spanning central rule, without guessing from prose."""
+    for drawing in page.get_drawings():
+        for item in drawing.get("items", []):
+            if item[0] != "l":
+                continue
+            x0, y0, x1, y1 = (item[1].x * scale, item[1].y * scale,
+                              item[2].x * scale, item[2].y * scale)
+            top, bottom = sorted((y0, y1))
+            if (abs(x1 - x0) <= scale
+                and abs((x0 + x1) / 2 - width_px / 2) <= width_px * .015
+                and bottom - top >= height_px * .50
+                and top <= height_px * .25 and bottom >= height_px * .75):
+                return True
+    return False
+
+
 def _refine_problem_bottom(
     *,
     region_lines: list[dict[str, Any]],
@@ -804,6 +1024,7 @@ def _segment_page(
     scale: float,
     dpi: int,
     subject: Subject,
+    inherited_subject: bool = False,
 ) -> PageModel:
     width_pt = float(page.rect.width)
     height_pt = float(page.rect.height)
@@ -828,6 +1049,21 @@ def _segment_page(
         if str(line.get("text") or "").strip()
         and getattr(line.get("box"), "top", float(height_px)) <= header_cutoff
     )
+    english_heading = re.compile(r"(?:제\s*3\s*교시\s*)?(?:영\s*어\s*(?:영\s*역)?|English(?:\s+(?:Area|Section))?)", re.I)
+    if any(line["box"].top <= float(height_px) * .20
+           and english_heading.fullmatch(str(line["text"]).strip()) for line in text_lines):
+        subject = Subject.ENGLISH
+    elif inherited_subject:
+        # A subject learned from a prior page is only a default. A new clear
+        # area heading starts a different subject in a mixed neutral document.
+        areas = {"국어": Subject.KOREAN, "수학": Subject.MATH, "과학탐구": Subject.SCIENCE,
+                 "사회탐구": Subject.SOCIAL, "한국사": Subject.SOCIAL}
+        for line in text_lines:
+            match = re.fullmatch(r"(국어|수학|과학\s*탐구|사회\s*탐구|한국사)\s*영역",
+                                 str(line["text"]).strip())
+            if line["box"].top <= float(height_px) * .20 and match:
+                subject = areas[re.sub(r"\s+", "", match[1])]
+                break
     footer_removed = sum(
         1 for line in text_lines if _looks_like_footer_band_line(line, float(height_px))
     )
@@ -835,9 +1071,25 @@ def _segment_page(
         line
         for line in text_lines
         if not _looks_like_footer_band_line(line, float(height_px))
+        and not (subject == Subject.ENGLISH and re.fullmatch(r"[━─═]{8,}", str(line["text"]).strip()))
     ]
     base_metadata["footer_line_removed_count"] = footer_removed
     figures = _extract_figures(page, scale)
+    chart_figures: list[Box] = []
+    if subject == Subject.ENGLISH:
+        from app.pdf_figure_labels import statistical_chart_regions
+
+        chart_figures = [box for rect in statistical_chart_regions(page)
+                         if (box := _scaled_box(tuple(rect), scale)) is not None]
+        # Chart labels belong to the genuine chart image. Bordered passages
+        # remain editable text even when generic drawing clustering joins
+        # their frames to a neighboring chart.
+        base_metadata["source_chart_indexes"] = list(range(len(figures), len(figures) + len(chart_figures)))
+        figures.extend(chart_figures)
+        source_images = [box for info in page.get_image_info()
+                         if (box := _scaled_box(info.get("bbox"), scale)) is not None]
+        base_metadata["answer_blank_count"] = _english_blank_underlines(
+            page, text_lines, scale, chart_figures + source_images)
     base_metadata["figure_bboxes_px"] = [
         [fig.left, fig.top, fig.right, fig.bottom] for fig in figures
     ]
@@ -914,6 +1166,20 @@ def _segment_page(
         return page_model
 
     columns, bounds = _cluster_columns(markers, float(width_px))
+    if subject == Subject.ENGLISH and len(columns) == 1:
+        middle = float(width_px) / 2
+        marker_sides = {int(marker["box"].left >= middle) for marker in markers}
+        range_sides = {int(line["box"].left >= middle) for line in text_lines
+                       if _PASSAGE_RANGE_RE.search(line["text"])}
+        # A passage can occupy the left column while all of its numbered
+        # questions occupy the right. Question markers alone cannot detect
+        # the two-column layout in that case.
+        divider_proves_columns = bool(range_sides) and _english_has_column_divider(
+            page, scale, float(width_px), float(height_px))
+        if len(marker_sides) == 1 and (range_sides - marker_sides or divider_proves_columns):
+            columns = [[marker for marker in markers if marker["box"].left < middle],
+                       [marker for marker in markers if marker["box"].left >= middle]]
+            bounds = [(0.0, middle), (middle, float(width_px))]
     base_metadata["column_count"] = len(columns)
 
     # 컬럼별로 문항 서술자(descriptor) 생성
@@ -940,7 +1206,9 @@ def _segment_page(
                 top=top,
                 bottom=initial_bottom,
             )
-            bottom = _refine_problem_bottom(
+            if subject == Subject.ENGLISH:
+                region_lines = _english_reading_order(region_lines)
+            bottom = initial_bottom if subject == Subject.ENGLISH else _refine_problem_bottom(
                 region_lines=region_lines,
                 figures=figures,
                 left=left_bound,
@@ -971,6 +1239,9 @@ def _segment_page(
 
     # 읽기 순서: (컬럼, top)
     descriptors.sort(key=lambda d: (d["column_index"], d["box"].top))
+    if subject == Subject.ENGLISH:
+        base_metadata["shared_passages"] = _english_shared_regions(
+            text_lines, markers, descriptors, float(width_px), float(height_px), len(columns))
 
     block_seq = 0
     unit_seq = 0
@@ -1012,7 +1283,11 @@ def _segment_page(
             child_text = str(line["text"])
             if not child_text:
                 continue
-            if _line_inside_figure(line, figures, desc["box"]):
+            # English frames contain editable passages and insertion sentences.
+            # A drawing around text must not turn that text into a discarded
+            # figure label. Genuine charts are handled separately below.
+            label_figures = chart_figures if subject == Subject.ENGLISH else figures
+            if _line_inside_figure(line, label_figures, desc["box"]):
                 continue
             block_type = classify_text_block(child_text)
             block_seq += 1
@@ -1115,20 +1390,23 @@ def segment_pdf(
         raise RuntimeError("PyMuPDF(fitz)가 설치되어 있지 않아 PDF 세그멘테이션을 할 수 없습니다.")
     scale = float(dpi) / 72.0
     pages: list[PageModel] = []
+    subject_hint = subject
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
         for page_index in range(doc.page_count):
             try:
                 page = doc.load_page(page_index)
-                pages.append(
-                    _segment_page(
-                        page,
-                        page_index=page_index,
-                        scale=scale,
-                        dpi=dpi,
-                        subject=subject,
-                    )
+                page_model = _segment_page(
+                    page,
+                    page_index=page_index,
+                    scale=scale,
+                    dpi=dpi,
+                    subject=subject_hint,
+                    inherited_subject=subject == Subject.UNKNOWN and subject_hint != Subject.UNKNOWN,
                 )
+                pages.append(page_model)
+                if subject == Subject.UNKNOWN and page_model.subject != Subject.UNKNOWN:
+                    subject_hint = page_model.subject
             except Exception as exc:  # 페이지 단위로 격리 — 절대 전체 실패시키지 않는다
                 pages.append(
                     PageModel(

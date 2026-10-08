@@ -138,7 +138,7 @@ def apply_question_internal_spacing(entries, header, page_width):
         previous = paragraph
 
 
-def apply_source_flow_spacing(section, paragraphs, layouts, header):
+def apply_source_flow_spacing(section, paragraphs, layouts, header, *, repeating_header=False):
     from .pdf_native_typography import _flow_height, _number
     from hwpx.tools.paragraph_spacing import paragraph_spacing
 
@@ -171,14 +171,15 @@ def apply_source_flow_spacing(section, paragraphs, layouts, header):
     header_height = sum(_flow_height(p) + sum(paragraph_spacing(p, styles)) for p in prologue)
     first_page = int(layouts[0][0].get("source_page") or 1)
     cursors = {}
+    previous_by_group = {}
     for paragraph, entries in zip(paragraphs, layouts):
         first = entries[0]
         group = (int(first.get("source_page") or 1), int(first.get("source_column") or 1))
         # Following pages receive a separate section margin below. Do not
         # clamp their leading gaps against the taller first-page masthead.
-        initial = _number(margin, "top")
+        initial = _number(margin, "top") + (_number(margin, "header") if repeating_header else 0)
         if group[0] == first_page:
-            initial += _number(margin, "header") + header_height
+            initial += (0 if repeating_header else _number(margin, "header")) + header_height
         cursor = cursors.get(group, initial)
         anchor = source_anchor(entries)
         before, after = paragraph_spacing(paragraph, styles)
@@ -195,8 +196,51 @@ def apply_source_flow_spacing(section, paragraphs, layouts, header):
                 if measured is not None:
                     target = measured
             before = max(0, target - cursor)
-            set_space_before(paragraph, header, before)
+            previous = previous_by_group.get(group)
+            if before > 0 and previous is not None and _complete_source_flow_frame(paragraph, entries):
+                # A paragraph-following table reserves its owning paragraph's
+                # before-space in the flow, but paints above that space. Put
+                # the same gap after the preceding prose so its anchor and
+                # occupied flow agree, including after ordinary text edits.
+                # The earlier spacing pass may already have allocated new
+                # style IDs; read the current header rather than stale IDs.
+                current_styles = {p.get("id"): p for p in header.iter(HH + "paraPr")}
+                _, previous_after = paragraph_spacing(previous, current_styles)
+                set_space_after(previous, header, previous_after + before)
+                set_space_before(paragraph, header, 0)
+            else:
+                set_space_before(paragraph, header, before)
         cursors[group] = cursor + before + _flow_height(paragraph) + after
+        previous_by_group[group] = paragraph
+
+
+def _complete_source_flow_frame(paragraph, entries):
+    """Recognize the complete source-vector frame restored before wrapping."""
+    from .pdf_source_frame_geometry import _compact
+
+    if len(entries) != 1:
+        return False
+    layout = entries[0]
+    geometries = layout.get("native_tables") or []
+    tables = paragraph.findall(HP + "run/" + HP + "tbl")
+    records = (layout.get("source_typography") or {}).get("lines") or []
+    if len(tables) != 1 or len(geometries) != 1 or not records:
+        return False
+    table, geometry = tables[0], geometries[0]
+    box = geometry.get("bbox_pt")
+    position = table.find(HP + "pos")
+    if (not geometry.get("source_prose_frame") or geometry.get("background_path")
+        or not box or geometry.get("cell_bounds") != [[box]] or position is None
+        or any(position.get(key) != value for key, value in (
+            ("treatAsChar", "0"), ("vertRelTo", "PARA"), ("vertOffset", "0"),
+            ("flowWithText", "1"), ("allowOverlap", "0")))
+        or any(table.find(".//" + HP + tag) is not None for tag in ("tbl", "pic", "rect", "equation"))):
+        return False
+    source = _compact(geometry.get("source_frame_text") or "")
+    return bool(source and source == _compact("".join(r.get("text", "") for r in records))
+                == _compact("".join(t.text or "" for t in table.iter(HP + "t")))
+                and all(box[0] <= r["bbox_pt"][0] <= r["bbox_pt"][2] <= box[2]
+                        and box[1] <= r["bbox_pt"][1] <= r["bbox_pt"][3] <= box[3] for r in records))
 
 
 def split_masthead_section(section, paragraphs, source_groups, paragraph_sources, header):

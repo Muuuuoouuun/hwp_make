@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
 from pathlib import Path
 import re
 
@@ -217,7 +218,15 @@ def _native_tiled_frame_reconstructions(page, images, verified, table_texts) -> 
     """
     if not table_texts:
         return {}
-    remaining = sorted(images, key=lambda image: (image["bbox"][0], image["bbox"][1]))
+    # MuPDF can report fully clipped image strips with zero display height.
+    # They have no pixel pitch and cannot prove a visible tiled frame. The
+    # independent image inventory below still checks every visible body image.
+    remaining = sorted((image for image in images
+        if all(math.isfinite(value) for value in image["bbox"])
+        and not fitz.Rect(image["bbox"]).is_empty
+        and not fitz.Rect(image["bbox"]).is_infinite
+        and image["width"] > 0 and image["height"] > 0),
+        key=lambda image: (image["bbox"][0], image["bbox"][1]))
     result = {}
     while remaining:
         first = remaining.pop(0)
@@ -305,7 +314,11 @@ def inspect_source_images(document, assets: dict[str, bytes], provenance: list[d
             else:
                 if record.get("role") == "source_background_frame":
                     from .pdf_source_backgrounds import compose_source_background, prove_background_source_text
-                    source_png = compose_source_background(page, region, record.get("source_image_numbers", []))
+                    from .pdf_dialogue_frames import compose_proved_dialogue_background
+                    numbers = record.get("source_image_numbers", [])
+                    source_png = compose_proved_dialogue_background(page, region, numbers)
+                    if source_png is None:
+                        source_png = compose_source_background(page, region, numbers)
                     result = compare_source_crop(source_png, actual)
                     proof = prove_background_source_text(page, region, source_png, (background_texts or {}).get(record.get("sha256"), ""))
                     if not proof["ok"]:

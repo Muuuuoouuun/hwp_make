@@ -9,7 +9,7 @@ HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
 
 def source_grid_gutter(rows, lines, bounds, *, side="left"):
     """Independently read an ordered choice gutter from individual PDF glyphs."""
-    edge_rows = [(i, [c for c in row.cells if c and abs(
+    edge_rows = [(i, [c for c in (row.cells if hasattr(row, "cells") else row) if c and abs(
         c[0] - bounds.x0 if side == "left" else c[2] - bounds.x1) < .5])
         for i, row in enumerate(rows)]
     edge_rows = [(i, boxes[0]) for i, boxes in edge_rows if len(boxes) == 1]

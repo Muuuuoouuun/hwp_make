@@ -25,6 +25,7 @@ from app.recognition import cutout
 from app.recognition.pdf_segment import segment_pdf
 from app.exam_header import masthead_from_text
 from app.math_text import is_recoverable_pua_math_char, normalize_recognized_math_layout_text
+from app.hancom_pua_map import is_hancom_eq_font
 
 # 문항 본문에서 이 비율 이상이 아직 복원되지 않은 PUA이면 텍스트만으로는 부족하다고 본다.
 # 이 경우 보존용 crop을 붙이되, 가능한 라인/문자 좌표는 계속 남겨 후속 수식 복원에 쓴다.
@@ -54,6 +55,8 @@ class RecognizedProblem:
     shared_passage_page_number: int = 0
     shared_passage_line_geometries: list[dict[str, Any]] = field(default_factory=list)
     figure_boxes: list[Box] = field(default_factory=list)
+    subject: Subject = Subject.UNKNOWN
+    source_literal_text: bool = False
 
 
 @dataclass(slots=True)
@@ -87,11 +90,52 @@ _SUBJECT_HINTS: list[tuple[tuple[str, ...], Subject]] = [
 
 
 def infer_subject(filename: str | None) -> Subject:
-    name = str(filename or "")
+    # The exam's generic name contains "수학" without describing its area.
+    name = str(filename or "").casefold().replace("대학수학능력시험", "")
     for keywords, subject in _SUBJECT_HINTS:
         if any(kw in name for kw in keywords):
             return subject
     return Subject.UNKNOWN
+
+
+def _source_literal_english_pages(pdf_bytes: bytes) -> list[bool]:
+    """Prove prose from actual source area/directions, independent of names.
+
+    KICE sometimes paints the area name as an image. Its actual 1-17 listening
+    directions still identify the English paper. Clear later area headings
+    reset the inherited proof in a mixed-subject PDF.
+    """
+    import fitz
+
+    proved: list[bool] = []
+    english = False
+    try:
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
+            for page in document:
+                header_lines = ["".join(span.get("text", "") for span in line.get("spans", []))
+                                for block in page.get_text("dict").get("blocks", [])
+                                for line in block.get("lines", [])
+                                if line["bbox"][1] <= page.rect.height * .25]
+                compact = [re.sub(r"\s+", "", line) for line in header_lines]
+                areas = [line for line in compact if re.fullmatch(
+                    r"(?:제[1-5]교시)?(?:국어|수학|영어|과학탐구|사회탐구|한국사)영역", line)]
+                english_area = any(re.fullmatch(r"(?:제3교시)?영어(?:영역)?|English(?:Area|Section)?", line, re.I)
+                                   for line in compact)
+                if areas:
+                    english = all("영어영역" in line for line in areas)
+                elif english_area:
+                    english = True
+                else:
+                    directions = "".join(compact)
+                    if ("1번부터17번까지는듣고답하는문제입니다" in directions
+                            and "15번까지는한번만들려주고" in directions
+                            and "16번부터17번까지는두번" in directions):
+                        english = True
+                proved.append(english)
+    except Exception:
+        # A missing source proof retains the existing equation-aware writer.
+        return []
+    return proved
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +208,7 @@ def _figures_from_metadata(page: PageModel) -> list[Box]:
 
 def _text_light_figures(page: PageModel, figures: list[Box]) -> list[Box]:
     """Return image candidates while excluding bordered editable-text blocks."""
+    chart_indexes = set(page.metadata.get("source_chart_indexes") or [])
     raw_counts = page.metadata.get("figure_text_char_counts") or []
     counts: list[int] = []
     for value in raw_counts:
@@ -179,7 +224,7 @@ def _text_light_figures(page: PageModel, figures: list[Box]) -> list[Box]:
         if figure.area >= _MIN_FIGURE_AREA_PX
         and figure.width >= 60.0
         and figure.height >= 60.0
-        and counts[index] < 24
+        and (counts[index] < 24 or index in chart_indexes)
     ]
 
 
@@ -389,6 +434,7 @@ def recognize_pdf(
         return result
 
     result.page_count = len(pages)
+    literal_english_pages = _source_literal_english_pages(pdf_bytes)
     header_source = " ".join(
         str(page.metadata.get("header_text") or "").strip()
         for page in pages
@@ -419,6 +465,8 @@ def recognize_pdf(
     for page_index, page in enumerate(pages):
         marker_count = int(page.metadata.get("marker_count") or 0)
         passage = _page_shared_passage(page, page_index + 1) if not page.problems else None
+        for shared in page.metadata.get("shared_passages", []):
+            pending_passages.append({**shared, "page_number": page_index + 1, "attach_all": True})
         if marker_count > 0:
             result.pages_with_markers += 1
         elif passage is not None:
@@ -430,6 +478,7 @@ def recognize_pdf(
 
         if not page.problems:
             if passage is not None:
+                passage["attach_all"] = page.subject == Subject.ENGLISH
                 pending_passages.append(passage)
                 continue
             if any_problems:
@@ -497,6 +546,7 @@ def recognize_pdf(
                     page_height_px=page.height_px,
                     line_geometries=line_geometries,
                     figure_boxes=figure_boxes,
+                    subject=page.subject,
                 )
             )
 
@@ -522,14 +572,27 @@ def recognize_pdf(
         if target is None:
             unlinked_passages.append(passage)
             continue
+        targets = [target]
+        if passage.get("attach_all"):
+            # Each library item must remain usable when selected on its own.
+            # Stop at the end of this occurrence, before another odd/even form.
+            targets = []
+            start_index = next(i for i, problem in enumerate(result.problems) if problem is target)
+            for problem in result.problems[start_index:]:
+                if not int(passage["start"]) <= problem.number <= int(passage["end"]):
+                    break
+                targets.append(problem)
+                if problem.number == int(passage["end"]):
+                    break
         passage_text = str(passage.get("text") or "").strip()
-        if target.shared_passage_text:
-            target.shared_passage_text = f"{target.shared_passage_text}\n{passage_text}".strip()
-        else:
-            target.shared_passage_text = passage_text
-        target.shared_passage_range = (int(passage["start"]), int(passage["end"]))
-        target.shared_passage_page_number = int(passage["page_number"])
-        target.shared_passage_line_geometries.extend(passage.get("line_geometries") or [])
+        for problem in targets:
+            if problem.shared_passage_text:
+                problem.shared_passage_text = f"{problem.shared_passage_text}\n{passage_text}".strip()
+            else:
+                problem.shared_passage_text = passage_text
+            problem.shared_passage_range = (int(passage["start"]), int(passage["end"]))
+            problem.shared_passage_page_number = int(passage["page_number"])
+            problem.shared_passage_line_geometries.extend(passage.get("line_geometries") or [])
         linked_passages += 1
 
     # 범위의 첫 문항을 찾지 못한 비정형 문서는 기존 안전망으로 되돌려 콘텐츠를 보존한다.
@@ -553,7 +616,18 @@ def recognize_pdf(
 
     if linked_passages:
         result.notices.append(
-            f"마커 없는 공유 지문 {linked_passages}쪽을 범위의 첫 문항에 편집 텍스트로 연결했습니다."
+            f"공통 지문 {linked_passages}개를 관련 문항에 편집 가능한 텍스트로 연결했습니다."
+        )
+
+    for problem in result.problems:
+        geometries = [*problem.shared_passage_line_geometries, *problem.line_geometries]
+        fonts = [str(span.get("font") or "") for line in geometries
+                 for span in (line.get("pdf_line_spans") or line.get("pdf_line_chars") or [])
+                 if isinstance(span, dict) and str(span.get("font") or "")]
+        problem.source_literal_text = bool(
+            0 < problem.page_number <= len(literal_english_pages)
+            and literal_english_pages[problem.page_number - 1]
+            and fonts and not any(is_hancom_eq_font(font) for font in fonts)
         )
 
     image_fallback = sum(1 for p in result.problems if not p.text_reliable)

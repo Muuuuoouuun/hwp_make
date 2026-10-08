@@ -1,6 +1,6 @@
-# 중첩 글상자 렌더러 수정본
+# 문항 글상자·폰트·셀 그림·선택지 TAB 렌더러 수정본
 
-Windows x64 / Python 3.10 이상에서 `rhwp-python 0.7.0+nativecell1`을 사용한다.
+Windows x64 / Python 3.10 이상에서 `rhwp-python 0.7.0+nativecell5`를 사용한다.
 프로젝트 루트에서 `python -m pip install -r requirements.txt`로 설치한다.
 공식 배포판이 아닌 이 프로젝트의 수정 빌드이며, 코어 버전 문자열은 0.7.13을 유지한다.
 
@@ -15,10 +15,26 @@ Windows x64 / Python 3.10 이상에서 `rhwp-python 0.7.0+nativecell1`을 사용
 - 글상자 안의 비인라인 표는 자체 가로 정렬과 위치 값을 사용한다.
 - 글상자 안의 표 셀에서도 이미지·패턴 배경을 일반 표와 같은 경로로 그린다.
 - PNG에서 내부 U+FFFC 개체 표시 문자를 글리프로 그리지 않는다. SVG·웹 캔버스와 같은 동작이다.
+- PNG/Skia와 PDF/fontdb에서 기존 family/style 조회가 실패할 때만 실제 로드된 face의 legacy family/name1 또는 PostScript/name6를 정확히 대응한다. 공백·하이픈 및 대소문자 정규화 후 유일한 face여야 하며 실제 width/slant와 intrinsic weight를 유지한다.
+- 수평·상단 정렬된 셀에 유효한 줄 캐시와 단일 non-TAC/flowWithText/Square/PARA 그림이 있을 때, 기존 body-picture 위치·그리기 경로를 사용한다. 소유 문단의 실제 첫 TextLine에 한 번만 anchor하며 그림 높이를 문단 높이에 다시 더하지 않는다. 그림 아래까지 후속 의미 문단도 자신의 캐시 cs/sw를 유지한다. TAC·다른 wrap·페이지 anchor·수식/다른 control·잘못된 캐시는 기존 경로를 유지한다.
+- 복구한 Latin face가 지원하지 않는 문자는 PDF의 기존 CSS 선택 face와 fallback을 유지한다. 서로 다른 fallback chain이 충돌하면 alias 복구를 포기한다. 일반 Arial400·명시 bold700·italic 및 모르는 이름은 기존 경로를 유지한다.
 
 문서를 이미지로 덮거나 출력 SVG/PNG를 후처리하는 변경은 없다.
 다른 OS/아키텍처에는 이 wheel을 적용하지 않으며 해당 환경의 새 빌드는 검증하지 않았다.
 기존 원본 보존·실제 표시 검사는 지원되지 않는 출력의 제공을 계속 차단한다.
+이전 `nativecell1`과 폰트 수정만 적용한 `nativecell2` wheel을 재현·비교용으로 함께 보존한다. `nativecell3`가 셀 Square 그림 배치를 추가한다. 실제 고2 Q27 prototype의 그림 위치 오차는 x +0.00224px / y −0.08456px이며, 이 결과는 전체 문서의 목표 품질 달성을 의미하지 않는다. 앱의 public edit/save 재캐시는 별도 검증 대상이다.
+
+## 선택지 TAB 수정과 현재 검증 범위
+
+`nativecell5`는 스타일·언어 run 및 줄 일부를 그릴 때 문단 전체의 TAB 순서에 맞는 inline TAB 폭을 전달한다. TAC 인라인 개체로 나뉜 구간도 폭 추정과 실제 그리기에 같은 순서를 사용한다. 현재 run의 모든 소비 TAB에 실제 inline LEFT TAB 기록이 있는 경우에만 끝 폭의 소수 픽셀을 보존한다. TAB 없음, 누락·불완전 기록 및 RIGHT/CENTER/DECIMAL TAB은 기존 반올림을 유지한다.
+
+격리된 실제 Windows 수정본으로 Rust focused 47개, 기본 앱 회귀 14개가 통과했다. 고3 실제 21개 TAB 행은 첫 보정 5개 후 두 번째 변경이 0개이며 HWPX·모든 페이지 SVG가 같다. 0.6px/−0.4px의 독립 TAB 이동도 뒤 표지에 정확히 전달된다. 285개 표지의 SVG/PDF 원점 대응과 TAB 행 밖 27,275개 글자 위치를 독립 확인했다. clean source patch 재적용과 실제 wheel/Pyd 일치를 별도로 기록했다. 이전 `nativecell3` 소스·lock·manifest는 `previous/nativecell3/`에, 기존 wheel은 `wheels/`에 보존했다. `nativecell4`는 중간 격리 시험본이며 배포 요구사항에 사용하지 않는다.
+
+렌더러 통합 당시 D checkpoint의 기본 API 고1·고2·고3 영어는 각 8쪽/45문항, 텍스트 보존 1.0, 열기·편집·렌더 검사를 통과했다. 당시 전체 페이지의 엄격한 품질 기준 6개는 세 시험지 모두 미달이며, 그 검사에서는 51개 중 나머지 48개를 실행하지 않았다. 이 기록은 해당 렌더러 검증의 범위이며 현재 제품 전체의 최신 판정이 아니다.
+
+같은 D checkpoint에서는 공개 편집 재저장의 generic `question_reflow`가 보수적인 글자 폭 추정으로 TAB stop을 건너뛰었다. 당시 실제 17번의 텍스트·TAB 구조와 재열기 동일성은 보존됐지만 원본 선택지 열 정렬은 실패했다. 이 과거 producer/vendor cache 한계는 렌더러 수정의 통과 범위와 분리하며, 근거는 `manifest.json`의 `isolated_validation`에 보존한다.
+
+후속 제품은 실제 폭 기반 공개 TAB 측정과 현재 상태 검사를 연결했다. 최신 전체51종 I는 HTTP200 11종·strict422 40종이며 영어3종의 전체 품질 기준 6개씩은 여전히 미달이다. 원본 fragment 간격·대시와 문항 전체 편집 지속성의 남은 과제도 구분한다. 현재 제품과 미적용 후보의 판정은 [작업 저장 요약](../../docs/audits/2026-10-07/commit-summary-20261009.md), [공개 TAB 기록](../../docs/audits/2026-10-07/native-public-tab-controls-20261009.md), [최신 병목 기록](../../docs/audits/2026-10-07/question-priority-bottlenecks-20261008.md)을 따른다.
 
 ## 소스에서 재빌드
 
@@ -43,3 +59,29 @@ python -X utf8 scripts/verify_native_background_frame_flow.py
 
 이 검사는 실제 출력, 라벨 교체, 문단 +162자 편집, 재저장, 8개 빈칸 보존,
 다음 문단과의 겹침, 내부 개체 문자의 불필요한 잉크를 포함한다.
+
+폰트 변경은 폰트 수정 이전 `nativecell1`과 비교한다. 양쪽에 **동일한 HWPX**를 전달한다:
+
+```powershell
+python -m pip install --no-deps --target tmp/renderer-baseline packaging/renderer/wheels/rhwp_python-0.7.0+nativecell1-cp310-abi3-win_amd64.whl
+python -m pip install --no-deps --target tmp/renderer-candidate packaging/renderer/wheels/rhwp_python-0.7.0+nativecell3-cp310-abi3-win_amd64.whl
+python -X utf8 packaging/renderer/verify-font-alias.py --baseline-site tmp/renderer-baseline --candidate-site tmp/renderer-candidate --artifacts tmp/renderer-font-comparison
+```
+
+전역 설치를 이미 바꿨다면 보존한 `nativecell1` wheel을 다른 `pip --target` 디렉터리에 설치하고 `--baseline-site`로 그 디렉터리를 지정한다. 이 비교는 실제 Arial/Arial Black/Blackadder ITC 및 한글 폰트가 설치된 Windows 검증 환경을 사용한다.
+
+검사는 regular/bold/italic, 알 수 없는 이름, 잘못된 suffix/slant, Blackadder ITC, 순수·혼합 한글 fallback, 실제 heavy family/PostScript를 포함한다. SVG/page geometry를 유지하고, 기존 경로의 PNG pixels/PDF face·glyph bounds가 동일한지 확인한다. 공통 Rust resolver의 unit tests는 존재하지 않는 이름·width/slant 불일치·여러 실제 face의 모호성·동일 identity 중복도 검사한다. 원본 66glyph의 독립 actual 검증과 세부 로그는 `docs/audits/2026-10-07/renderer-font-lookup-followup.md`를 참고한다.
+
+## 셀 Square 그림의 적용 범위 검사
+
+폰트 수정본 `nativecell2`와 `nativecell3`를 각각 별도 site에 설치하고 같은 실제 Q27 HWPX를 전달한다:
+
+```powershell
+python -X utf8 scripts/verify_renderer_embedded_cell_square.py --hwpx tmp/renderer-square/prototype-input.hwpx --baseline-site tmp/renderer-font-lookup/font1-final-site --candidate-site tmp/renderer-square/final-site --artifacts tmp/renderer-square/final-scope
+```
+
+최종 격리 검사에서 그림 위치가 바뀌는 positive와 18개의 지원 범위 밖 negative를 분리했다. TAC, 다른 wrap, PAGE/PAPER anchor, 음수 offset, 누락/잘못된 캐시, 복수 그림, 중앙 정렬, 수식 control은 SVG·PNG·페이지 수가 기존과 정확히 같다. 수식·혼합 표·중첩 글상자·공유 표·문항 편집 5개 회귀와 같은 입력 폰트 11개 PNG/SVG/PDF face·bounds 동일성도 통과했다. 패치의 clean upstream 적용과 실제 빌드 source 일치는 `tmp/renderer-square/final-artifacts/patch-replay-proof.json`에 기록했다. 실제 source glyph·최종 public edit/reopen 판단은 앱의 producer/save 변경과 함께 독립 검사한다.
+
+## macOS
+
+이 Windows ABI3 wheel은 macOS에서 사용할 수 없다. macOS 배포는 동일 upstream commit·공통 source patch·Cargo.lock으로 arm64/x86_64 native wheel을 각각 빌드하고, 로드한 실제 폰트의 name table·intrinsic style·CoreText/Skia 조회·PDF 한글 fallback을 확인해야 한다. Windows 전용 weight나 폰트 파일명을 새로 하드코딩하지 않았다. 실제 Mac runtime이 없어 Mac 빌드·실행·서명·품질 동등성은 미검증이다. 비Windows requirements의 PyPI 경로에는 이 수정본과의 패치 동일성을 보장하지 않는다.

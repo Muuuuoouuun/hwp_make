@@ -74,6 +74,13 @@ def apply_source_line_cache(paragraph, layout, width):
     mixed = False
     offset = 0
     hard_breaks = []
+    leading_rules = {}
+    source_values = source_line_values(records)
+    leading_blank_lines = {sum(map(len, source_values[:index])): index
+        for index, record in enumerate(records)
+        if any(blank.get("offset_nonspace") == 0 and
+               max(abs(a-b) for a,b in zip(blank["line_bbox_pt"], record["bbox_pt"])) < .05
+               for blank in layout.get("source_answer_blanks", []))}
 
     def append_text(value):
         nonlocal text, offset
@@ -82,6 +89,8 @@ def apply_source_line_cache(paragraph, layout, width):
             if not char.isspace():
                 positions.append(offset)
                 boundaries.append(True)
+            elif len(positions) in leading_blank_lines:
+                leading_rules.setdefault(leading_blank_lines[len(positions)], offset)
             offset += len(char.encode('utf-16-le')) // 2
 
     for run in paragraph.findall(HP + "run"):
@@ -170,7 +179,19 @@ def apply_source_line_cache(paragraph, layout, width):
             available = min(interval_start + interval_width, width) - max(0, x) - margin_right
             if available < size:
                 return False
-        if (record["bbox_pt"][2] - record["bbox_pt"][0]) * scale > available + size * .2:
+        right = record["bbox_pt"][2]
+        if layout.get("source_answer_blanks"):
+            # PDF line boxes include trailing whitespace. A long answer-gap
+            # row must be checked against its actual ink and measured rule,
+            # rather than rejecting an otherwise exact source wrap for an
+            # invisible final space outside the printed column.
+            ink = [g["bbox"][2] for span in record.get("spans", [])
+                   for g in span.get("chars", []) if str(g.get("c") or "").strip()]
+            rules = [blank["bbox_pt"][2] for blank in layout["source_answer_blanks"]
+                     if max(abs(a-b) for a,b in zip(blank["line_bbox_pt"], record["bbox_pt"])) < .05]
+            if ink:
+                right = max(ink+rules)
+        if (right - record["bbox_pt"][0]) * scale > available + size * .2:
             return False
         line_step = gaps[index] if index < len(gaps) else step
         height, baseline = size, size * .85
@@ -184,7 +205,8 @@ def apply_source_line_cache(paragraph, layout, width):
                 line_step = (records[index + 1]["bbox_pt"][1] - box[1]) * scale
             if not 0 < baseline <= height or (index < len(gaps) and height > line_step):
                 return False
-        etree.SubElement(cache, HP + "lineseg", textpos=str(0 if index == 0 else positions[start]),
+        textpos = min(positions[start], leading_rules.get(index, positions[start]))
+        etree.SubElement(cache, HP + "lineseg", textpos=str(0 if index == 0 else textpos),
                          vertpos=str(round(top)), vertsize=str(round(height)), textheight=str(round(height)),
                          baseline=str(round(baseline)), spacing=str(max(0, round(line_step - height))),
                          horzpos=str(max(0, round(relative_x))),

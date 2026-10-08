@@ -12,6 +12,7 @@ import unicodedata
 import uuid
 import zipfile
 import zlib
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,8 @@ QUESTION_START_RE = re.compile(
 # 시험지 제작 도구마다 서로 다른 원문자 블록을 쓴다. 한컴 기본 원문자(①),
 # dingbat 음각(❶), dingbat sans-serif(➀)를 모두 같은 선택지 마커로 취급한다.
 CIRCLED_CHOICE_MARKERS = "①②③④⑤⑥⑦⑧⑨❶❷❸❹❺❻❼❽❾➀➁➂➃➄➅➆➇➈"
+ENGLISH_CHOICE_MARKERS = "①②③④⑤❶❷❸❹❺➀➁➂➃➄"
+ENGLISH_CHOICE_CANONICAL = str.maketrans("❶❷❸❹❺➀➁➂➃➄", "①②③④⑤①②③④⑤")
 INLINE_CIRCLED_CHOICE_RE = re.compile(rf"([{CIRCLED_CHOICE_MARKERS}])\s*")
 INLINE_NUMERIC_CHOICE_RE = re.compile(r"(?<![\w/])([1-5])(?:[\.\)])?(?:\s+|$)")
 CHOICE_LINE_RE = re.compile(
@@ -302,7 +305,17 @@ def _import_pdf_recognized(
     answer_key_mapped = 0
     answer_key_numbers: set[str] = set()
     loose_seen: set[str] = set()
-    loose_dedup_enabled = _looks_like_math_pdf(filename, getattr(result, "exam_title", ""))
+    from .recognition.pipeline import infer_subject
+    from .recognition.schema import Subject
+
+    english_pdf = any(infer_subject(value) == Subject.ENGLISH for value in (
+        filename, str(getattr(result, "exam_title", "") or ""),
+        str(metadata.get("subject") or ""),
+    ))
+    # The generic title "대학수학능력시험" also contains "수학". English odd/even
+    # forms can share a stem while differing in choices, so stem-only math
+    # deduplication must never discard their distinct editable answer options.
+    loose_dedup_enabled = not english_pdf and _looks_like_math_pdf(filename, getattr(result, "exam_title", ""))
 
     def layout_payload(prob: Any) -> dict[str, Any]:
         box = getattr(prob, "box", None)
@@ -345,6 +358,8 @@ def _import_pdf_recognized(
             continue
         image_paths: list[str] = []
         math_geometry_repairs: dict[str, int] = {}
+        is_english_problem = (english_pdf or getattr(prob, "subject", None) == Subject.ENGLISH
+                              or bool(getattr(prob, "source_literal_text", False)))
         image_only_fallback = bool(prob.problem_image_png) and (
             not prob.text_reliable or not str(prob.text or "").strip()
         )
@@ -370,7 +385,7 @@ def _import_pdf_recognized(
                 for line in pdf_line_geometries
                 if isinstance(line, dict) and str(line.get("text") or "").strip()
             )
-            repaired_geometry_source = _repair_pdf_stem_fractions_from_geometry(
+            repaired_geometry_source = "" if is_english_problem else _repair_pdf_stem_fractions_from_geometry(
                 geometry_source,
                 pdf_line_geometries,
             )
@@ -386,7 +401,7 @@ def _import_pdf_recognized(
             # actually resolves structures the stream order hid, and the
             # re-ordered geometry then has to travel with the re-ordered text so
             # every later geometry lookup still matches line for line.
-            reading_order_geometries = reading_order_line_geometries(pdf_line_geometries)
+            reading_order_geometries = None if is_english_problem else reading_order_line_geometries(pdf_line_geometries)
             if reading_order_geometries is not None:
                 reading_order_source = line_geometry_source_text(reading_order_geometries)
                 if _placeholder_count_in_fields(
@@ -394,11 +409,15 @@ def _import_pdf_recognized(
                 ) < _placeholder_count_in_fields(source_text, []):
                     source_text = reading_order_source
                     pdf_line_geometries = reading_order_geometries
-            stem_text, choices = _split_stem_and_choices(source_text)
-            geometry_split = _split_stem_and_choices_from_pdf_geometry(
-                source_text,
-                pdf_line_geometries,
-            )
+            if is_english_problem:
+                stem_text, choices = _split_english_stem_and_choices(source_text, pdf_line_geometries)
+                geometry_split = None
+            else:
+                stem_text, choices = _split_stem_and_choices(source_text)
+                geometry_split = _split_stem_and_choices_from_pdf_geometry(
+                    source_text,
+                    pdf_line_geometries,
+                )
             if geometry_split is not None:
                 geometry_stem, geometry_choices = geometry_split
                 geometry_placeholder_count = _placeholder_count_in_fields(geometry_stem, geometry_choices)
@@ -425,22 +444,27 @@ def _import_pdf_recognized(
                     )
                 ):
                     stem_text, choices = geometry_stem, geometry_choices
-            stem_text = normalize_recognized_math_layout_text(stem_text)
-            choices = [normalize_recognized_math_layout_text(choice) for choice in choices]
-            geometry_stem = _repair_pdf_stem_fractions_from_geometry(stem_text, pdf_line_geometries)
-            if _placeholder_count_in_fields(geometry_stem, choices) < _placeholder_count_in_fields(stem_text, choices):
-                stem_text = geometry_stem
-            stem_text, choices, math_geometry_repairs = repair_problem_math_layout(
-                stem_text,
-                choices,
-                pdf_line_geometries,
-            )
+            if not is_english_problem:
+                # English prose, times, contractions and A/B blank labels must
+                # stay literal. Formula fencing can turn "A" or "don't" into
+                # spurious variables even though the source is plain text.
+                stem_text = normalize_recognized_math_layout_text(stem_text)
+                choices = [normalize_recognized_math_layout_text(choice) for choice in choices]
+                geometry_stem = _repair_pdf_stem_fractions_from_geometry(stem_text, pdf_line_geometries)
+                if _placeholder_count_in_fields(geometry_stem, choices) < _placeholder_count_in_fields(stem_text, choices):
+                    stem_text = geometry_stem
+                stem_text, choices, math_geometry_repairs = repair_problem_math_layout(
+                    stem_text,
+                    choices,
+                    pdf_line_geometries,
+                )
             shared_passage_text = str(getattr(prob, "shared_passage_text", "") or "").strip()
             if shared_passage_text:
                 stem_text = f"{shared_passage_text}\n{stem_text}".strip()
 
         number = str(prob.number) if prob.number else ""
-        loose_key = _recognized_pdf_loose_duplicate_key(number, stem_text) if loose_dedup_enabled else ""
+        loose_key = (_recognized_pdf_loose_duplicate_key(number, stem_text)
+                     if loose_dedup_enabled and not is_english_problem else "")
         if loose_key and loose_key in loose_seen:
             sink.skipped += 1
             continue
@@ -468,6 +492,7 @@ def _import_pdf_recognized(
                 "layout": {
                     **layout_payload(prob),
                     "math_geometry_repairs": math_geometry_repairs,
+                    "source_literal_text": bool(getattr(prob, "source_literal_text", False)),
                 },
             }
         )
@@ -1660,6 +1685,266 @@ def _normalize_pdf_choice_body(value: str) -> str:
         sign = "-" if match.group("sign") else ""
         return f"{sign}\\frac{{1}}{{{match.group('den')}}}"
     return text
+
+
+def _english_embedded_choice_markers(text: str) -> bool:
+    """Grammar/vocabulary and sentence-insertion labels belong to the passage.
+
+    Their circled numerals can land at a physical line start by coincidence;
+    treating that line as an answer option removes a piece of the sentence.
+    Lettered (a)-(e) questions still have a separate five-option answer row.
+    """
+    prompt = " ".join(str(text or "").splitlines()[:4])
+    return bool(
+        re.search(r"밑줄\s*친\s*(?:부분|낱말)", prompt)
+        or re.search(r"어법상\s*틀린", prompt)
+        or re.search(r"주어진\s*문장.{0,45}들어가", prompt)
+    )
+
+
+def _english_pdf_choice_fragments(line_geometries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Split multi-option PDF lines while retaining each option's real x position."""
+    fragments: list[dict[str, Any]] = []
+    for index, line in enumerate(line_geometries):
+        if not isinstance(line, dict):
+            continue
+        text = str(line.get("text") or "").strip()
+        bbox = line.get("bbox_px")
+        if not text or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        try:
+            left, top, width, height = map(float, bbox)
+        except (TypeError, ValueError):
+            continue
+        if width <= 0 or height <= 0:
+            continue
+        char_boxes = [_pdf_geometry_char_rect(char) for char in line.get("pdf_line_chars") or []
+                      if isinstance(char, dict)]
+        char_boxes = [box for box in char_boxes if box is not None]
+        if char_boxes:
+            # A title block's bbox covers its whole problem; the source glyphs
+            # retain the actual printed row of "34. A" and its following words.
+            left = min(box[0] for box in char_boxes)
+            top = min(box[1] for box in char_boxes)
+            width = max(box[2] for box in char_boxes) - left
+            height = max(box[3] for box in char_boxes) - top
+        # Inline labels inside a sentence are never independent option anchors.
+        matches = list(re.finditer(rf"[{ENGLISH_CHOICE_MARKERS}]", text)) if text[0] in ENGLISH_CHOICE_MARKERS else []
+        label_chars = [
+            char for char in line.get("pdf_line_chars") or []
+            if isinstance(char, dict) and str(char.get("c") or "") in tuple(ENGLISH_CHOICE_MARKERS)
+            and _pdf_geometry_char_rect(char) is not None
+        ]
+        starts = [match.start() for match in matches] or [0]
+        for part, start in enumerate(starts):
+            end = starts[part + 1] if part + 1 < len(starts) else len(text)
+            x = left
+            if matches:
+                if part < len(label_chars):
+                    x = float(label_chars[part]["bbox"][0])
+                else:
+                    x = left + width * start / max(1, len(text))
+            fragments.append({
+                "index": index, "part": part, "text": text[start:end].strip(),
+                "x": x, "y": top + height / 2, "height": height,
+                "label": matches[part].group().translate(ENGLISH_CHOICE_CANONICAL) if matches else "",
+            })
+    return fragments
+
+
+def _english_pdf_stem_rows(fragments: list[dict[str, Any]]) -> str:
+    """Join only fragments on the same printed baseline into one paragraph."""
+    rows: list[list[dict[str, Any]]] = []
+    for fragment in sorted(fragments, key=lambda item: (float(item["y"]), float(item["x"]))):
+        if (rows and abs(float(fragment["y"]) - float(rows[-1][0]["y"]))
+            <= min(float(fragment["height"]), float(rows[-1][0]["height"])) * 0.325):
+            rows[-1].append(fragment)
+        else:
+            rows.append([fragment])
+    return "\n".join(" ".join(str(fragment["text"]) for fragment in sorted(row, key=lambda item: float(item["x"])))
+                     for row in rows)
+
+
+def _english_centered_table_rows(
+    fragments: list[dict[str, Any]], anchors: list[dict[str, Any]], height: float,
+) -> tuple[list[str], set[tuple[int, int]]] | None:
+    """Keep two-line cells with their vertically centered option label.
+
+    Five separate labels on one rail and an aligned A-E program column prove
+    the comparison-table structure. Ordinary wrapped answer paragraphs do not
+    provide this second rail and continue through the usual choice splitter.
+    """
+    anchors = sorted(anchors, key=lambda item: float(item["y"]))
+    if (any(str(a["text"]) != str(a["label"]) for a in anchors)
+        or max(float(a["x"]) for a in anchors) - min(float(a["x"]) for a in anchors) > height * .25):
+        return None
+    gaps = [float(b["y"]) - float(a["y"]) for a, b in zip(anchors, anchors[1:])]
+    if min(gaps) < height * 1.4 or max(gaps) - min(gaps) > height * .5:
+        return None
+    program_cells = []
+    for letter, anchor in zip("ABCDE", anchors):
+        cells = [f for f in fragments if str(f["text"]) == letter
+                 and abs(float(f["y"]) - float(anchor["y"])) <= height * .65
+                 and float(f["x"]) - float(anchor["x"]) >= height * 1.25]
+        if len(cells) != 1:
+            return None
+        program_cells.append(cells[0])
+    if max(float(f["x"]) for f in program_cells) - min(float(f["x"]) for f in program_cells) > height * .25:
+        return None
+    row_parts: list[list[dict[str, Any]]] = []
+    for index, anchor in enumerate(anchors):
+        top = ((float(anchors[index - 1]["y"]) + float(anchor["y"])) / 2
+               if index else float(anchor["y"]) - gaps[0] / 2)
+        bottom = ((float(anchor["y"]) + float(anchors[index + 1]["y"])) / 2
+                  if index + 1 < len(anchors) else float(anchor["y"]) + gaps[-1] / 2)
+        row_parts.append([f for f in fragments if top <= float(f["y"]) < bottom
+                          and float(f["x"]) >= float(anchor["x"]) - height * .25
+                          and float(f["height"]) <= height * 1.8])
+    # Left edges of cells vary with centered words, while real columns have a
+    # larger gap. Preserve each cell's top-to-bottom words before the next cell.
+    lanes: list[float] = []
+    previous_x: float | None = None
+    for x in sorted(float(f["x"]) for parts in row_parts for f in parts):
+        if previous_x is None or x - previous_x > height * 2:
+            lanes.append(x)
+        previous_x = x
+    if len(lanes) < 5:
+        return None
+    choices = []
+    used: set[tuple[int, int]] = set()
+    for parts in row_parts:
+        parts.sort(key=lambda f: (max(i for i, x in enumerate(lanes) if x <= float(f["x"])),
+                                  float(f["y"]), float(f["x"])))
+        value = " ".join(str(f["text"]) for f in parts)
+        choices.append(re.sub(rf"^[{ENGLISH_CHOICE_MARKERS}]\s*", "", value).strip())
+        used.update((int(f["index"]), int(f["part"])) for f in parts)
+    return choices, used
+
+
+def _split_english_stem_and_choices(
+    text: str,
+    line_geometries: list[dict[str, Any]],
+) -> tuple[str, list[str]]:
+    """Separate English answer options without stealing in-passage numerals.
+
+    A full independent ①-⑤ set is required. PDF content streams often emit the
+    label, (A)/(B) word pair, or permutation dashes separately and out of order;
+    they are joined by physical row and x position before labels are stripped.
+    The general importer remains unchanged for mathematics, Korean, and HWP.
+    """
+    fragments = _english_pdf_choice_fragments(line_geometries)
+    source_content = re.sub(rf"[\s{ENGLISH_CHOICE_MARKERS}]", "", _clean_text(text))
+    merged_stem = _clean_text(_english_pdf_stem_rows(fragments))
+    source_full_content = re.sub(r"\s", "", _clean_text(text))
+    merged_full_content = re.sub(r"\s", "", merged_stem)
+    unsplit_stem = merged_stem if Counter(source_full_content) == Counter(merged_full_content) else _clean_text(text)
+    if _english_embedded_choice_markers(text):
+        return unsplit_stem, []
+    anchors = [fragment for fragment in fragments if fragment["label"]]
+    if sorted(fragment["label"] for fragment in anchors) != list("①②③④⑤"):
+        # Text-only imports still accept a complete labelled answer block. A
+        # partial set is kept in the stem, where every source word stays editable.
+        lines = str(text or "").splitlines()
+        labels = [label.translate(ENGLISH_CHOICE_CANONICAL)
+                  for line in lines if line.strip().startswith(tuple(ENGLISH_CHOICE_MARKERS))
+                  for label in re.findall(rf"[{ENGLISH_CHOICE_MARKERS}]", line)]
+        if sorted(labels) == list("①②③④⑤"):
+            return _split_stem_and_choices(text)
+        return unsplit_stem, []
+
+    heights = sorted(float(anchor["height"]) for anchor in anchors)
+    height = heights[len(heights) // 2]
+    row_tolerance = height * 0.65
+    rows: list[list[dict[str, Any]]] = []
+    for anchor in sorted(anchors, key=lambda item: (float(item["y"]), float(item["x"]))):
+        if rows and abs(float(anchor["y"]) - float(rows[-1][0]["y"])) <= row_tolerance:
+            rows[-1].append(anchor)
+        else:
+            rows.append([anchor])
+    ordered_anchors = [anchor for row in rows for anchor in sorted(row, key=lambda item: float(item["x"]))]
+    if [anchor["label"] for anchor in ordered_anchors] != list("①②③④⑤"):
+        return unsplit_stem, []
+
+    centered_table = _english_centered_table_rows(fragments, anchors, height)
+    if centered_table is not None:
+        choices, used = centered_table
+        stem = _clean_text(_english_pdf_stem_rows([f for f in fragments
+                           if (int(f["index"]), int(f["part"])) not in used]))
+        split_content = re.sub(rf"[\s{ENGLISH_CHOICE_MARKERS}]", "", stem + "".join(choices))
+        if all(choices) and Counter(source_content) == Counter(split_content):
+            return stem, choices
+        return unsplit_stem, []
+
+    used: set[tuple[int, int]] = set()
+    parts_by_label: dict[str, list[dict[str, Any]]] = {label: [] for label in "①②③④⑤"}
+    # First collect all fragments on the label's physical row. In a two-column
+    # answer table the next label is the right edge of the current option.
+    for row in rows:
+        row = sorted(row, key=lambda item: float(item["x"]))
+        for offset, anchor in enumerate(row):
+            right = float(row[offset + 1]["x"]) - height * 0.1 if offset + 1 < len(row) else float("inf")
+            for fragment in fragments:
+                key = (int(fragment["index"]), int(fragment["part"]))
+                if key in used or float(fragment["height"]) > height * 1.8:
+                    continue
+                if (abs(float(fragment["y"]) - float(anchor["y"])) <= row_tolerance
+                    and float(anchor["x"]) - height * 0.25 <= float(fragment["x"]) < right):
+                    parts_by_label[str(anchor["label"])].append(fragment)
+                    used.add(key)
+
+    # Rejoin wrapped choices in the same column until its next label. A new
+    # passage header, glossary, or question starts a new content block instead.
+    lane_starts: list[float] = []
+    for x in sorted(float(anchor["x"]) for anchor in anchors):
+        if not lane_starts or x - lane_starts[-1] > height:
+            lane_starts.append(x)
+    stop_re = re.compile(r"^(?:\[\s*\d+\s*[~～∼\-–]|\d+\s*[.)]|\([A-D]\)|\*)")
+    for fragment in sorted(fragments, key=lambda item: (float(item["y"]), float(item["x"]))):
+        key = (int(fragment["index"]), int(fragment["part"]))
+        if key in used or float(fragment["height"]) > height * 1.8 or stop_re.match(str(fragment["text"])):
+            continue
+        lane = max((x for x in lane_starts if x <= float(fragment["x"]) + height * 0.25), default=None)
+        if lane is None:
+            continue
+        candidates = [anchor for anchor in anchors
+                      if abs(float(anchor["x"]) - lane) <= height
+                      and float(anchor["y"]) < float(fragment["y"]) - row_tolerance]
+        if not candidates:
+            continue
+        anchor = max(candidates, key=lambda item: float(item["y"]))
+        parts = parts_by_label[str(anchor["label"])]
+        previous_y = max((float(part["y"]) for part in parts), default=float(anchor["y"]))
+        next_y = min((float(other["y"]) for other in anchors
+                      if abs(float(other["x"]) - lane) <= height
+                      and float(other["y"]) > float(anchor["y"]) + row_tolerance), default=float("inf"))
+        if (float(fragment["y"]) < next_y - row_tolerance
+            and 0 < float(fragment["y"]) - previous_y <= height * 1.8):
+            parts.append(fragment)
+            used.add(key)
+
+    choices: list[str] = []
+    for label in "①②③④⑤":
+        # Each physical row is ordered by x even when fonts have different tops.
+        part_rows: list[list[dict[str, Any]]] = []
+        for part in sorted(parts_by_label[label], key=lambda item: float(item["y"])):
+            if part_rows and abs(float(part["y"]) - float(part_rows[-1][0]["y"])) <= row_tolerance:
+                part_rows[-1].append(part)
+            else:
+                part_rows.append([part])
+        value = " ".join(str(part["text"]) for row in part_rows
+                         for part in sorted(row, key=lambda item: float(item["x"])))
+        choices.append(re.sub(rf"^[{ENGLISH_CHOICE_MARKERS}]\s*", "", value).strip())
+    if any(not choice for choice in choices):
+        return unsplit_stem, []
+    stem = _english_pdf_stem_rows([fragment for fragment in fragments
+                                  if (int(fragment["index"]), int(fragment["part"])) not in used])
+    stem, choices = _clean_text(stem), [_clean_text(choice) for choice in choices]
+    split_content = re.sub(rf"[\s{ENGLISH_CHOICE_MARKERS}]", "", stem + "".join(choices))
+    if Counter(source_content) != Counter(split_content):
+        # Incomplete geometry must not silently discard a source line. Keep the
+        # whole editable passage when a safe independent split cannot be proven.
+        return unsplit_stem, []
+    return stem, choices
 
 
 def _split_stem_and_choices(text: str) -> tuple[str, list[str]]:

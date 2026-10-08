@@ -1,5 +1,6 @@
 """Keep measured masthead fields in an editable native section header."""
 from copy import deepcopy
+from math import ceil
 from xml.etree import ElementTree
 
 from lxml import etree
@@ -7,6 +8,232 @@ from lxml import etree
 HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
 HC = "{http://www.hancom.co.kr/hwpml/2011/core}"
+
+
+def restore_measured_page_header(section, header, meta, char_style, *, body_top_hwp,
+                                 automatic_page_number=False, page_type="BOTH", header_top_hwp=None):
+    """Install one measured, editable full/running header without moving body text.
+
+    Call separately for EVEN and ODD when the source page number changes sides,
+    passing their shared minimum header_top_hwp to keep both source baselines.
+    The caller owns section boundaries and the automatic printed-page seed.
+    """
+    from hwpx.oxml._document_impl import HwpxOxmlTable, _create_line_element, _create_rectangle_element
+
+    roots = section.findall(HP + "p")
+    page = section.find(".//" + HP + "pagePr")
+    if not roots or page is None or page_type not in ("BOTH", "EVEN", "ODD"):
+        return False
+    margin = page.find(HP + "margin")
+    if margin is None or not meta.get("area"):
+        return False
+    scale = float(page.get("width")) / float(meta["source_page_width_pt"])
+    left = float(margin.get("left"))
+    width = round(float(page.get("width")) - left - float(margin.get("right")))
+    rows = []
+    if meta.get("title"):
+        rows.append([("title", meta["title"])])
+    rows.append([("area", meta["area"])])
+    for role in ("period_geometry", "variant_geometry", "grade_geometry"):
+        if meta.get(role):
+            rows[-1].append((role, meta[role]))
+    if meta.get("page_number"):
+        rows[0].append(("page_number", meta["page_number"]))
+    for row in rows:
+        row.sort(key=lambda entry: entry[1]["bbox_pt"][0])
+        if any(not record.get("spans") or record.get("baseline_pt") is None for _, record in row):
+            return False
+        if any(a[1]["bbox_pt"][2] > b[1]["bbox_pt"][0] + 1 for a, b in zip(row, row[1:])):
+            return False
+    starts = [min(record["baseline_pt"] * scale
+                  - max(s["font_size_pt"] for s in record["spans"]) * scale * .85 for _, record in row)
+              for row in rows]
+    if header_top_hwp is not None:
+        if float(header_top_hwp) > starts[0] + .5:
+            return False
+        starts[0] = float(header_top_hwp)
+    bottom = max(record["baseline_pt"] * scale
+                 + max(s["font_size_pt"] for s in record["spans"]) * scale * .15 for _, record in rows[-1])
+    rule = meta.get("bottom_rule")
+    # Printed page numbers and the separating rule may extend into the body
+    # margin. Give only this native header table its measured right-hand rail;
+    # changing the section margin would also move every body column.
+    right = max(record["bbox_pt"][2] * scale for row in rows for _, record in row)
+    if rule:
+        right = max(right, rule["right_pt"] * scale)
+    if right > float(page.get("width")):
+        return False
+    width = max(width, ceil(right - left))
+    if rule:
+        bottom = max(bottom, rule["y_pt"] * scale)
+    if not 0 < starts[0] < bottom < body_top_hwp or any(a >= b for a, b in zip(starts, starts[1:])):
+        return False
+    if any(record["bbox_pt"][0] * scale < left - scale * .5
+           or record["bbox_pt"][2] * scale > left + width + scale * .5
+           for row in rows for _, record in row):
+        return False
+    borders = header.find(".//" + HH + "borderFills")
+    properties = header.find(".//" + HH + "paraProperties")
+    if borders is None or properties is None:
+        return False
+    none = next((b for b in borders if all(
+        (edge := b.find(HH + kind + "Border")) is not None and edge.get("type") == "NONE"
+        for kind in ("left", "right", "top", "bottom"))), None)
+    if none is None:
+        return False
+    bottom_border = none.get("id")
+    rule_border = bool(rule and abs(bottom - rule["y_pt"] * scale) <= .5
+                       and left - scale * .5 <= rule["left_pt"] * scale
+                       and rule["right_pt"] * scale <= left + width + scale * .5)
+    rule_start = max(0, round(rule["left_pt"] * scale - left)) if rule_border else 0
+    rule_end = min(width, round(rule["right_pt"] * scale - left)) if rule_border else width
+    if rule_border:
+        border = deepcopy(none)
+        bottom_border = str(max(int(b.get("id")) for b in borders) + 1)
+        border.set("id", bottom_border)
+        edge = border.find(HH + "bottomBorder")
+        edge.set("type", "SOLID"); edge.set("color", "#000000")
+        edge.set("width", f'{rule["width_pt"] * scale / 100 * 25.4 / 72:.3f} mm')
+        borders.append(border); borders.set("itemCnt", str(len(borders)))
+    host = roots[0]
+    run = host.find(HP + "run")
+    if run is None:
+        return False
+    base = run.get("charPrIDRef", "0")
+    style = deepcopy(next(p for p in properties if p.get("id") == host.get("paraPrIDRef")))
+    style_id = str(max(int(p.get("id")) for p in properties) + 1)
+    style.set("id", style_id)
+    style.find(HH + "align").set("horizontal", "LEFT")
+    for margins in style.findall(".//" + HH + "margin"):
+        for edge in margins:
+            edge.set("value", "0"); edge.set("unit", "HWPUNIT")
+    for spacing in style.findall(".//" + HH + "lineSpacing"):
+        spacing.set("type", "PERCENT"); spacing.set("value", "100"); spacing.set("unit", "PERCENT")
+    properties.append(style); properties.set("itemCnt", str(len(properties)))
+    identifier = max((int(node.get("id")) for node in section.iter() if node.get("id", "").isdigit()), default=0) + 1
+
+    def pid():
+        nonlocal identifier
+        identifier += 1
+        return str(identifier)
+
+    def paragraph():
+        return etree.Element(HP + "p", id=pid(), paraPrIDRef=style_id, styleIDRef="0",
+                             pageBreak="0", columnBreak="0", merged="0")
+
+    def cache(p, height, available):
+        array = etree.SubElement(p, HP + "linesegarray")
+        etree.SubElement(array, HP + "lineseg", textpos="0", vertpos="0", vertsize=str(round(height)),
+                         textheight=str(round(height)), baseline=str(round(height * .85)), spacing="0",
+                         horzpos="0", horzsize=str(round(available)), flags="393216")
+
+    rails = sorted({0, width, rule_start, rule_end, *(max(0, round(record["bbox_pt"][0] * scale - left))
+                               for row in rows for _, record in row)})
+    heights = [round(end - start) for start, end in zip(starts, [*starts[1:], bottom])]
+    table = etree.fromstring(ElementTree.tostring(HwpxOxmlTable.create(
+        len(rows), len(rails) - 1, width=width, height=sum(heights), border_fill_id_ref=none.get("id"))))
+    table.set("id", pid())
+    table.find(HP + "pos").set("affectLSpacing", "1")
+    for tag in ("inMargin", "outMargin"):
+        for edge in table.find(HP + tag).attrib:
+            table.find(HP + tag).set(edge, "0")
+    for row_index, (row, tr) in enumerate(zip(rows, table.findall(HP + "tr"))):
+        template = deepcopy(tr[0])
+        for cell in list(tr):
+            tr.remove(cell)
+        entries = [(max(0, round(record["bbox_pt"][0] * scale - left)), role, record) for role, record in row]
+        if entries[0][0] > 0:
+            entries.insert(0, (0, "spacer", None))
+        if rule_border and row_index == len(rows) - 1:
+            for edge in (rule_start, rule_end):
+                if 0 < edge < width and not any(start == edge for start, _, _ in entries):
+                    entries.append((edge, "spacer", None))
+            entries.sort(key=lambda entry: entry[0])
+        for index, (start, role, record) in enumerate(entries):
+            end = entries[index + 1][0] if index + 1 < len(entries) else width
+            cell = deepcopy(template)
+            cell.set("name", "source-page-masthead:" + role)
+            cell.set("hasMargin", "1"); cell.set("editable", "1")
+            cell.set("borderFillIDRef", bottom_border if rule_border and row_index == len(rows) - 1
+                     and start >= rule_start and end <= rule_end else none.get("id"))
+            cell.find(HP + "cellAddr").set("colAddr", str(rails.index(start)))
+            cell.find(HP + "cellAddr").set("rowAddr", str(row_index))
+            cell.find(HP + "cellSpan").set("colSpan", str(rails.index(end) - rails.index(start)))
+            cell.find(HP + "cellSz").set("width", str(end - start))
+            cell.find(HP + "cellSz").set("height", str(heights[row_index]))
+            margins = cell.find(HP + "cellMargin")
+            for edge in margins.attrib:
+                margins.set(edge, "0")
+            sub = cell.find(HP + "subList")
+            sub.set("vertAlign", "TOP"); sub.set("textWidth", str(end - start)); sub.set("textHeight", str(heights[row_index]))
+            for child in list(sub):
+                sub.remove(child)
+            p = paragraph()
+            if record:
+                height = max(s["font_size_pt"] for s in record["spans"]) * scale
+                margins.set("top", str(max(0, round(record["baseline_pt"] * scale - starts[row_index] - height * .85))))
+                for span in record["spans"]:
+                    char = char_style(base, span["font_size_pt"] * scale, span["font_name"],
+                                      round(span.get("letter_spacing_percent", 0)),
+                                      round(span.get("font_width_percent", 100)), bool(span.get("bold")))
+                    field_run = etree.SubElement(p, HP + "run", charPrIDRef=char)
+                    if role == "page_number" and automatic_page_number:
+                        ctrl = etree.SubElement(field_run, HP + "ctrl")
+                        number = etree.SubElement(ctrl, HP + "autoNum", num=record["text"], numType="PAGE")
+                        etree.SubElement(number, HP + "autoNumFormat", type="DIGIT", userChar="", prefixChar="", suffixChar="", superscript="0")
+                    else:
+                        etree.SubElement(field_run, HP + "t").text = span["text"]
+            else:
+                height = 1
+                etree.SubElement(etree.SubElement(p, HP + "run", charPrIDRef=base), HP + "t")
+            cache(p, height, end - start); sub.append(p); tr.append(cell)
+    ctrl = etree.Element(HP + "ctrl")
+    running = etree.SubElement(ctrl, HP + "header", id=pid(), applyPageType=page_type)
+    sub = etree.SubElement(running, HP + "subList", id="", textDirection="HORIZONTAL", lineWrap="BREAK",
+                          vertAlign="TOP", linkListIDRef="0", linkListNextIDRef="0", textWidth=str(width),
+                          textHeight=str(round(body_top_hwp - starts[0])), hasTextRef="0", hasNumRef="0")
+    heading = paragraph(); heading_run = etree.SubElement(heading, HP + "run", charPrIDRef=base)
+    shapes = []
+    if rule and not rule_border:
+        shape = etree.fromstring(ElementTree.tostring(_create_line_element(
+            0, 0, round((rule["right_pt"] - rule["left_pt"]) * scale), 0,
+            line_width=str(max(1, round(rule["width_pt"] * scale))), treat_as_char=False)))
+        shapes.append((shape, rule["left_pt"], rule["y_pt"]))
+    for outline in meta.get("outlines", []):
+        bounds = outline["bbox_pt"]
+        shape = etree.fromstring(ElementTree.tostring(_create_rectangle_element(
+            round((bounds[2] - bounds[0]) * scale), round((bounds[3] - bounds[1]) * scale),
+            line_width=str(max(1, round(outline["width_pt"] * scale))), treat_as_char=False)))
+        shape.tag = HP + "polygon"; shape.attrib.pop("ratio", None)
+        for child in list(shape):
+            if etree.QName(child).localname.startswith("pt"):
+                shape.remove(child)
+        point_index = shape.index(shape.find(HP + "sz"))
+        for x, y in outline["points_pt"]:
+            point = etree.Element(HC + "pt", x=str(round((x - bounds[0]) * scale)),
+                                  y=str(round((y - bounds[1]) * scale)))
+            shape.insert(point_index, point)
+            point_index += 1
+        shapes.append((shape, bounds[0], bounds[1]))
+    for shape, x, y in shapes:
+        shape.set("id", pid()); shape.set("instid", pid()); shape.set("textWrap", "IN_FRONT_OF_TEXT")
+        position = shape.find(HP + "pos")
+        position.set("vertRelTo", "PARA"); position.set("horzRelTo", "COLUMN")
+        position.set("vertOffset", str(round(y * scale - starts[0])))
+        position.set("horzOffset", str(round(x * scale - left)))
+        for margins in shape.findall(HP + "outMargin"):
+            for edge in margins.attrib:
+                margins.set(edge, "0")
+        heading_run.append(shape)
+    heading_run.append(table); cache(heading, sum(heights), width); sub.append(heading)
+    for old in list(section.iter(HP + "header")):
+        if old.get("applyPageType", "BOTH") == page_type:
+            old.getparent().remove(old)
+    # Section properties must remain the first child of the first run.
+    run.append(ctrl)
+    margin.set("top", str(round(starts[0])))
+    margin.set("header", str(round(body_top_hwp) - round(starts[0])))
+    return True
 
 
 def restore_masthead_flow(section, header, meta, title, area, char_style, items):
@@ -53,6 +280,8 @@ def restore_masthead_flow(section, header, meta, title, area, char_style, items)
         rows[1].append(meta["period_geometry"])
     elif meta.get("period"):
         return False
+    if meta.get("variant_geometry"):
+        rows[1].append(meta["variant_geometry"])
     for row in rows:
         row.sort(key=lambda r: r["bbox_pt"][0])
         if any(r.get("baseline_pt") is None or not r.get("spans") for r in row):

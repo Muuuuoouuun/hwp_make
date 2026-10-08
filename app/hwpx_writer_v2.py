@@ -559,6 +559,12 @@ def _merge_native_paragraphs(path: Path) -> None:
                 else:
                     previous, previous_group = paragraph, group
             # Cache positions are cumulative within each body column or cell.
+            from hwpx.tools.paragraph_floats import wrapped_cell_layout
+            if (container.getparent() is not None and container.getparent().tag == f"{_HP}tc"
+                    and wrapped_cell_layout(container.getparent(), paragraph_styles) is not None):
+                from hwpx.tools.question_reflow import update_positions
+                update_positions(container, paragraph_styles)
+                continue
             cursor = 0
             for paragraph in container.findall(f"{_HP}p"):
                 if (paragraph.get("pageBreak") == "1" or paragraph.get("columnBreak") == "1"
@@ -639,6 +645,9 @@ def _save_hwpx_with_hancom_compat(
 
                 apply_native_typography(tmp_path, native_items)
             _strip_native_source_markers(tmp_path)
+            if native_items is not None:
+                from .pdf_wrapped_prose_frames import seed_source_wrapped_flow
+                seed_source_wrapped_flow(tmp_path,native_items)
 
         report = validate_editor_open_safety(tmp_path)
         if not report.ok:
@@ -958,10 +967,19 @@ def _replace_paragraph_runs(
     equation_counter: list[int],
     min_line_height: int = 1000,
     compact_math_placeholder: bool = False,
+    literal_text: bool = False,
 ) -> None:
     for child in list(paragraph.element):
         if str(child.tag).endswith("}run") or child.tag == "run":
             paragraph.element.remove(child)
+
+    if literal_text:
+        # Source-proven English prose can contain financial(A), variables in
+        # answer labels, and dollar prices. Preserve those glyphs and their
+        # prose font without passing through the generic math recognizer.
+        paragraph.add_run(text, char_pr_id_ref=char_pr_id_ref)
+        _set_paragraph_lineseg(paragraph, min_line_height)
+        return
 
     wrote = False
     previous_was_equation = False
@@ -1026,13 +1044,15 @@ def _set_table_cell_rich_text(
     cell_line_limit: int = 46,
     native_paragraphs: bool = False,
     cell_width: int | None = None,
+    literal_text: bool = False,
 ) -> None:
     cell = table.cell(row_index, col_index)
-    if native_paragraphs:
+    if native_paragraphs or literal_text:
         grouped_lines = [
             (group, line)
             for group, raw_line in enumerate(str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"))
-            for line in (_wrap_math_line_parts(raw_line, cell_line_limit) or [raw_line])
+            for line in ([raw_line] if literal_text else
+                         (_wrap_math_line_parts(raw_line, cell_line_limit) or [raw_line]))
         ]
     else:
         grouped_lines = list(enumerate(_table_cell_render_lines(text, cell_line_limit)))
@@ -1056,6 +1076,7 @@ def _set_table_cell_rich_text(
             native_math=native_math,
             equation_counter=equation_counter,
             min_line_height=min_line_height,
+            literal_text=literal_text,
         )
         if cell_para_pr_id_ref is not None:
             try:
@@ -1293,6 +1314,7 @@ def write_hwpx(
         left_margin_hwp: int = 0,
         line_spacing_percent: int | None = None,
         compact_math_placeholder: bool = False,
+        literal_text: bool = False,
         **attrs: str,
     ) -> int:
         nonlocal flow_y, pending_column_break, pending_page_break, current_flow_column
@@ -1379,6 +1401,7 @@ def write_hwpx(
             equation_counter=equation_counter,
             min_line_height=style_line_heights.get(style, 1000),
             compact_math_placeholder=compact_math_placeholder,
+            literal_text=literal_text,
         )
         flow_y += previous_margin_hwp + para_height
         return previous_margin_hwp + para_height
@@ -1429,6 +1452,7 @@ def write_hwpx(
         right: bool = False,
         math_enabled: bool = True,
         allow_column_break: bool = True,
+        literal_text: bool = False,
         **attrs: str,
     ) -> None:
         nonlocal native_paragraph_group
@@ -1436,6 +1460,13 @@ def write_hwpx(
             native_paragraph_group += 1
             attrs["nativeParagraphGroup"] = str(native_paragraph_group)
             attrs["nativeParagraphWidth"] = str(content_width)
+        if literal_text:
+            # Preserve the source paragraph itself. The math-aware wrapper can
+            # insert dollar delimiters before run creation even with math off.
+            add_single_para(line, style, center=center, right=right,
+                            math_enabled=False, allow_column_break=allow_column_break,
+                            literal_text=True, **attrs)
+            return
         if not (columns > 1 and not center and not right and style in {"heading", "body", "small"}):
             add_single_para(
                 line,
@@ -1474,6 +1505,11 @@ def write_hwpx(
         **attrs: str,
     ) -> None:
         value = str(text or "")
+        if current_problem_literal:
+            add_wrapped_line(value, style, center=center, right=right,
+                             math_enabled=False, allow_column_break=allow_column_break,
+                             literal_text=True, **attrs)
+            return
         if native_math and math_blocks:
             emitted = False
             for raw_line in value.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
@@ -1831,6 +1867,7 @@ def write_hwpx(
     def use_choice_grid(choices: list[str]) -> bool:
         return (
             native_math
+            and not current_problem_literal
             and template.key == "kice_math"
             and bool(choices)
             and any(has_math(choice) for choice in choices)
@@ -1954,7 +1991,7 @@ def write_hwpx(
             total += estimate_para_height(stem_lines[0] if stem_lines else label, "heading")
             for line in stem_lines[1:]:
                 total += estimate_para_height(line, "body")
-        elif template.source_number_line:
+        elif template.source_number_line or problem.get("_shared_numbering_prepared"):
             for text, style in numbered_stem_paragraphs(
                 stem_lines, label, numbered=bool(problem.get("number")),
                 prepared=bool(problem.get("_numbering_prepared")),
@@ -2110,6 +2147,14 @@ def write_hwpx(
             para(stem_lines[0] if stem_lines else str(label), "heading")
             for line in stem_lines[1:]:
                 para(line, "body")
+        elif template.source_number_line or problem.get("_shared_numbering_prepared"):
+            for text, style in numbered_stem_paragraphs(
+                stem_lines, label, numbered=bool(problem.get("number")),
+                prepared=bool(problem.get("_numbering_prepared")),
+            ):
+                para(text, style)
+            if meta:
+                para(f"[{meta}]", "small")
         elif template.merge_question_number:
             first_line = (
                 stem_lines[0] if problem.get("_numbering_prepared")
@@ -2169,6 +2214,7 @@ def write_hwpx(
         pending_page_break = False
         current_flow_column = 1
 
+    current_problem_literal = False
     # --- 머리말 ---
     # simple 양식도 머리말 장식 없이 원본 파일명 제목 한 줄만 둔다.
     # 2026-10-03: the exam title is prose; a file name such as "a_b_c" must not
@@ -2204,6 +2250,12 @@ def write_hwpx(
     # --- 문항 ---
     previous_problem: dict[str, Any] | None = None
     for index, problem in enumerate(problems, start=1):
+        problem_layout = problem.get("layout") or {}
+        current_problem_literal = bool(
+            not source_layout_flow and isinstance(problem_layout, dict)
+            and problem_layout.get("source_literal_text")
+            and problem_layout.get("block_type") in {"problem", "problem_with_shared_passage"}
+        )
         if source_layout_flow:
             # Source-faithful flow is driven by the recognised page/column of the
             # original exam, not by the height estimator.
@@ -2247,19 +2299,24 @@ def write_hwpx(
             # numbers. Use normal paragraph flow and native tables; never wrap
             # the body in positioned drawing objects or a page-sized table.
             source_paragraph_start = len(doc.paragraphs)
+            literal_text = bool(layout.get("source_literal_text"))
             for line in str(problem.get("stem") or "").splitlines():
-                para(line, "body", preserve_inline_math=True)
+                if literal_text:
+                    add_wrapped_line(line, "body", math_enabled=False, literal_text=True)
+                else:
+                    para(line, "body", preserve_inline_math=True)
             source_tables = {entry["index"]: entry for entry in layout.get("native_tables", [])}
             for table_index, rows in enumerate(problem.get("tables") or []):
                 geometry = source_tables.get(table_index)
                 for chunk in ([rows] if geometry else split_table_chunks(rows)):
                     table_height = estimate_table_height(chunk)
                     _add_table(doc, chunk, char_pr_id_ref=cp["body"],
-                               math_char_pr_id_ref=math_cp["body"], native_math=native_math,
+                               math_char_pr_id_ref=math_cp["body"], native_math=native_math and not literal_text,
                                equation_counter=equation_counter, cell_para_pr_id_ref=pr_left,
                                min_line_height=style_line_heights["body"], content_width=content_width,
                                height=table_height, paragraph_attrs=reserve_object_height(table_height),
-                               native_paragraphs=True, source_geometry=geometry)
+                               native_paragraphs=True, source_geometry=geometry,
+                               literal_text=literal_text)
             pictures = source_picture_sizes(problem)
             if pictures and layout.get("image_width_ratios"):
                 row_height = max(size[1] for _, size in pictures)
@@ -2360,7 +2417,7 @@ def write_hwpx(
             para(stem_lines[0] if stem_lines else str(label), "heading")
             for line in stem_lines[1:]:
                 para(line, "body")
-        elif template.source_number_line:
+        elif template.source_number_line or problem.get("_shared_numbering_prepared"):
             for text, style in numbered_stem_paragraphs(
                 stem_lines, label, numbered=bool(problem.get("number")),
                 prepared=bool(problem.get("_numbering_prepared")),
@@ -2446,6 +2503,7 @@ def write_hwpx(
                     box_frame=passage_box,
                     row_heights=row_heights,
                     cell_line_limit=line_limit,
+                    literal_text=current_problem_literal,
                 )
         for line in table_tail_lines:
             para(
@@ -2498,6 +2556,7 @@ def write_hwpx(
         if source_marker:
             para(source_marker, "small", right=True, allow_column_break=False)
 
+        current_problem_literal = False
         if template.include_answers and problem.get("answer"):
             para(f"정답: {format_answer(problem, template)}", "body")
         if template.include_explanations and problem.get("explanation"):
@@ -2543,6 +2602,14 @@ def write_hwpx(
     _save_hwpx_with_hancom_compat(doc, Path(path), native_math=native_math,
                                 native_paragraphs=native_content_document,
                                 native_items=problems if native_content_document else None)
+    if preserve_source_layout and native_content_document and template.key == "kice_english":
+        from .pdf_source_choice_geometry import apply_source_choice_geometry
+        from .pdf_source_choice_headers import apply_source_choice_headers
+        from .pdf_native_labeled_rules import apply_source_labeled_rules
+
+        apply_source_choice_geometry(Path(path), problems)
+        apply_source_choice_headers(Path(path), problems)
+        apply_source_labeled_rules(Path(path), problems)
 
 
 def _add_table(
@@ -2564,6 +2631,7 @@ def _add_table(
     box_frame: bool = False,
     row_heights: list[int] | None = None,
     cell_line_limit: int | None = None,
+    literal_text: bool = False,
 ) -> None:
     if not rows or not any(rows):
         return
@@ -2653,6 +2721,7 @@ def _add_table(
                 cell_line_limit=cell_line_limit * span_cols.get((r, c), 1),
                 native_paragraphs=native_paragraphs,
                 cell_width=widths[c] if content_width else None,
+                literal_text=literal_text,
             )
     if row_heights:
         for r in range(min(row_cnt, len(row_heights))):

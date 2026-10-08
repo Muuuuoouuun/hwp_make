@@ -3,6 +3,37 @@
 const VIEW_KEY = "hwpmake.premium.view.v1";
 const VIEWS = ["edit", "paper", "order"];
 
+export function previewNumberedStem(problem, outputLabel) {
+  const label = String(outputLabel || "—");
+  const original = String(problem?.number || "").trim();
+  const stem = String(problem?.stem || "문항을 확인할 수 없습니다.");
+  const heading = /^(\s*)\[\s*(\d{1,3})\s*[~∼～\-–]\s*(\d{1,3})\s*\]/.exec(stem);
+  const shared = problem?.layout?.shared_passage;
+  if (/^\d{1,3}$/.test(original) && heading
+      && problem?.layout?.block_type === "problem_with_shared_passage"
+      && Array.isArray(shared?.range) && shared.range.length === 2
+      && Number(heading[2]) === Number(shared.range[0])
+      && Number(heading[3]) === Number(shared.range[1])
+      && Number(shared.range[0]) <= Number(original) && Number(original) <= Number(shared.range[1])) {
+    const marker = new RegExp(`(^[ \\t]*(?:문제[ \\t]*)?)(${original})([ \\t]*[.)](?:[ \\t]+|(?=\\r?$)))`, "gm");
+    const matches = [...stem.matchAll(marker)];
+    if (matches.length === 1) {
+      if (label === original) return stem;
+      const match = matches[0];
+      const start = match.index + match[1].length;
+      const renumbered = stem.slice(0, start) + label + stem.slice(start + original.length);
+      return heading[1] + `[${label}]` + renumbered.slice(heading[0].length);
+    }
+  }
+  if (/^\s*\[\s*\d+\s*[~∼\-–]\s*\d+\s*\]?\s*$/.test(original)) return stem;
+  // Strip only the known, delimited source label. Decimals and expressions
+  // such as '27.5' or '27.+x' remain ordinary question content.
+  const body = /^\d{1,3}$/.test(original)
+    ? stem.replace(new RegExp(`^[ \\t]*(?:문제[ \\t]*)?${original}[ \\t]*[.)](?:[ \\t]+|(?=\\r?\\n|$))`), "")
+    : stem;
+  return `${label}. ${body}`;
+}
+
 export function createViewTransition({ active, save, apply, failed }) {
   let revision = 0;
   return async (next) => {
@@ -205,7 +236,7 @@ export function createStudioViews(api) {
       const problem = api.resolveBasketProblem(entry);
       const item = document.createElement("article");
       item.className = "studio-document-question";
-      item.append(textNode("p", "studio-document-stem", `${api.outputNumber(problem, index) || "—"}. ${problem?.stem || "문항을 확인할 수 없습니다."}`));
+      item.append(textNode("p", "studio-document-stem", previewNumberedStem(problem, api.outputNumber(problem, index))));
       if (problem?.choices?.length) {
         const choices = document.createElement("ol");
         choices.className = "studio-document-choices";

@@ -125,6 +125,30 @@ def check_display_stem() -> None:
     _check("접두사 없는 이름은 그대로", w.source_display_stem(Path("synthetic_math_20.pdf")) == "synthetic_math_20")
 
 
+def check_recognition_subject(tmp: Path) -> None:
+    from app.recognition.pipeline import infer_subject, recognize_pdf
+    from app.recognition.schema import Subject
+
+    for filename in ("ENGLISH.pdf", "English.pdf", "2026학년도 대학수학능력시험 영어 문제지.pdf"):
+        _check(f"가져오기 영어 파일명 {filename}", infer_subject(filename) == Subject.ENGLISH)
+    _check("시험명만으로 가져오기 수학 오인 없음", infer_subject("대학수학능력시험.pdf") == Subject.UNKNOWN)
+    _check("수학 과목명 인식 유지", infer_subject("대학수학능력시험 수학.pdf") == Subject.MATH)
+
+    source = tmp / "neutral.pdf"
+    _make_pdf(source, ["English", "Third period"], [
+        "1. Read the following passage.",
+        "A complete English passage remains editable.",
+    ])
+    result = recognize_pdf(source.read_bytes(), filename=source.name)
+    _check("중립 파일명도 영어 머리말로 가져오기 판별", bool(result.problems)
+           and all(problem.subject == Subject.ENGLISH for problem in result.problems))
+    math_source = tmp / "math.pdf"
+    _make_pdf(math_source, [], ["1. Compare English and mathematics scores.", "Compute their difference."])
+    result = recognize_pdf(math_source.read_bytes(), filename=math_source.name)
+    _check("본문의 English로 수학 과목 덮어쓰지 않음", bool(result.problems)
+           and all(problem.subject == Subject.MATH for problem in result.problems))
+
+
 def _hwpx_texts(path: Path) -> tuple[list[str], list[str]]:
     texts: list[str] = []
     scripts: list[str] = []
@@ -187,6 +211,7 @@ def main() -> int:
         tmp = Path(raw)
         check_display_stem()
         check_subject_detection(tmp)
+        check_recognition_subject(tmp)
         check_native_output(tmp)
     if FAILURES:
         print(f"\nPDF_TITLE_SUBJECT_FAIL — {len(FAILURES)}건")

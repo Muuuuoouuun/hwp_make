@@ -6,6 +6,7 @@ object's actual height and survives text growth and deletion. Convert the
 spacing without changing any text, object position offset or content height.
 """
 from copy import deepcopy
+import math
 import re
 
 from lxml import etree
@@ -125,6 +126,37 @@ def arrange_question_gaps(section, header, *, before_pagination=False):
         margin.set(edge, str(round(value)))
         resize_question_box(shape, float(shape.find(HP + 'sz').get('height')) + amount)
 
+    def add_trailing_whitespace(host, amount):
+        """Retain an oversized answer area without overflowing textMargin.
+
+        A native paragraph's after spacing has the ordinary HWPUNIT range.
+        Put only the portion that cannot fit in the drawing's bottom margin
+        after its last existing paragraph. The content origin and occupied
+        height stay identical, and question reflow measures this spacing on
+        subsequent edits; no extra paragraph or drawing is needed.
+        """
+        shape, draw, _ = host
+        margin = draw.find(HP + 'textMargin')
+        bottom = float(margin.get('bottom', '0'))
+        height = float(shape.find(HP + 'sz').get('height'))
+        if not all(math.isfinite(v) for v in (amount, bottom, height)) or not (
+                amount >= 0 and 0 <= bottom <= MAX_MARGIN and height > 0):
+            raise ValueError('Question trailing whitespace has invalid native geometry')
+        padding = min(amount, MAX_MARGIN - bottom)
+        remainder = amount - padding
+        if remainder:
+            paragraphs = draw.findall(HP + 'subList/' + HP + 'p')
+            if not paragraphs or paragraphs[-1].get('paraPrIDRef') not in styles:
+                raise ValueError('Question trailing whitespace needs an existing native paragraph')
+            last = paragraphs[-1]
+            inner_before, inner_after = paragraph_spacing(last, styles)
+            if not all(math.isfinite(v) for v in (inner_before, inner_after)):
+                raise ValueError('Question trailing paragraph spacing is not finite')
+            set_spacing(last, inner_before, inner_after + remainder)
+        add_padding(host, 'bottom', padding)
+        if remainder:
+            resize_question_box(shape, height + amount)
+
     for paragraph in paragraphs:
         host = question_host(paragraph)
         if host is None:
@@ -169,7 +201,7 @@ def arrange_question_gaps(section, header, *, before_pagination=False):
             before, after = paragraph_spacing(paragraph, styles)
             if before or after:
                 add_padding(host, 'top', before)
-                add_padding(host, 'bottom', after)
+                add_trailing_whitespace(host, after)
                 set_spacing(paragraph, 0, 0)
                 changed += 1
     return changed

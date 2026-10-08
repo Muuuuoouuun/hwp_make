@@ -29,6 +29,50 @@ def _figure_inside_table(figure: fitz.Rect, table: fitz.Rect) -> bool:
     return area > 0 and (figure & table).get_area() >= area * 0.90
 
 
+def _source_prose_frame(region, drawings):
+    """Recover actual four-rule bounds, excluding grouping-detector padding."""
+    edges = []
+    for drawing in drawings:
+        for part in drawing.get("items", []):
+            if part and part[0] == "l":
+                a, b = part[1:3]
+                edges.append((min(a.x, b.x), min(a.y, b.y),
+                              max(a.x, b.x), max(a.y, b.y)))
+            elif part and part[0] == "re":
+                box = fitz.Rect(part[1])
+                edges.extend([(box.x0, box.y0, box.x1, box.y0),
+                              (box.x0, box.y1, box.x1, box.y1),
+                              (box.x0, box.y0, box.x0, box.y1),
+                              (box.x1, box.y0, box.x1, box.y1)])
+    def horizontal(y):
+        return [edge for edge in edges if abs(edge[3] - edge[1]) < .5
+                and abs(edge[1] - y) < 4 and edge[2] - edge[0] > region.width * .9
+                and abs(edge[0] - region.x0) < 4 and abs(edge[2] - region.x1) < 4]
+    tops, bottoms = horizontal(region.y0), horizontal(region.y1)
+    if not tops or not bottoms:
+        return None
+    top = min(tops, key=lambda edge: abs(edge[1] - region.y0))
+    bottom = min(bottoms, key=lambda edge: abs(edge[1] - region.y1))
+    if max(abs(top[0] - bottom[0]), abs(top[2] - bottom[2])) > .5:
+        return None
+    box = fitz.Rect(top[0], top[1], top[2], bottom[1])
+    def continuous_side(x):
+        # Some PDFs emit each vertical side as one overlapping rule per text
+        # row. Require complete continuous coverage, rather than a single path.
+        intervals = sorted((edge[1], edge[3]) for edge in edges
+                           if abs(edge[2] - edge[0]) < .5 and abs(edge[0] - x) < .5
+                           and edge[3] >= box.y0 and edge[1] <= box.y1)
+        covered = box.y0
+        for start, end in intervals:
+            if start > covered + .5:
+                return False
+            covered = max(covered, end)
+        return covered >= box.y1 - .5
+    if all(continuous_side(x) for x in (box.x0, box.x1)):
+        return box
+    return None
+
+
 def source_margin_label_indices(page, lines: list[dict]) -> set[int]:
     """Recognize a duplicate header printed vertically in the outer page margin.
 
@@ -103,16 +147,56 @@ _PARAGRAPH_START = re.compile(
 )
 
 
+def _source_prose_ink_bounds(line):
+    """Measure paragraph-ending ink without changing source spaces or blanks.
+
+    A justified PDF span can contain trailing spaces beyond its printed rail.
+    Use its nonspace right edge only when the complete raw character inventory
+    independently reproduces the span text and bounding box. Keep the source
+    left/top/bottom, and retain the original geometry for unsupported spans.
+    """
+    from . import pdf_layout_writer as w
+
+    spans = [span for span in line.get("spans", [])
+             if not re.fullmatch(r"\s*\[[A-Z]\]\s*", str(span.get("text", "")))]
+    if not spans:
+        return w._item_bbox(line)
+    original = w._union_rect([fitz.Rect(span["bbox"]) for span in spans])
+    rights = []
+    for span in spans:
+        bounds = fitz.Rect(span["bbox"])
+        chars = span.get("chars") or []
+        if chars and all(char.get("bbox") and isinstance(char.get("c"), str) for char in chars):
+            raw_bounds = w._union_rect([fitz.Rect(char["bbox"]) for char in chars])
+            if ("".join(char["c"] for char in chars) == str(span.get("text", ""))
+                and all(abs(a - b) <= .1 for a, b in zip(bounds, raw_bounds))):
+                ink = [fitz.Rect(char["bbox"]) for char in chars if char["c"].strip()]
+                if ink:
+                    rights.append(max(box.x1 for box in ink))
+                continue
+        rights.append(bounds.x1)
+    if not rights:
+        return original
+    return fitz.Rect(original.x0, original.y0, max(rights), original.y1)
+
+
 def _semantic_line_groups(lines: list[dict], figures=(), *, framed_callout=False) -> list[list[dict]]:
     """Join printed line wraps; retain labels and actual paragraph boundaries."""
     from . import pdf_layout_writer as w
 
     def prose_bounds(line):
-        spans = [span for span in line.get("spans", [])
-                 if not re.fullmatch(r"\s*\[[A-Z]\]\s*", str(span.get("text", "")))]
-        return w._union_rect([fitz.Rect(s["bbox"]) for s in spans]) if spans else w._item_bbox(line)
+        return _source_prose_ink_bounds(line)
 
     groups: list[list[dict]] = []
+    source_texts = [w._pdf_output_text(w._line_text(line)).strip() for line in lines]
+    letter_frame = bool(source_texts and re.fullmatch(r"(?:Dear [A-Za-z][A-Za-z .'-]{0,60}|To whom it may concern),", source_texts[0])
+                        and any(re.fullmatch(r"(?:Best|Kind|Warm) regards,|Sincerely,", text)
+                                for text in source_texts[-3:]))
+    # The closing and each following physical signature row are meaningful
+    # lines. Joining them with spaces loses the source letter structure.
+    letter_closing_index = next((i for i, value in enumerate(source_texts)
+        if i >= len(source_texts) - 3
+        and re.fullmatch(r"(?:Best|Kind|Warm) regards,|Sincerely,", value)), len(source_texts))
     right_edge = max((prose_bounds(line).x1 for line in lines), default=0)
     for index, line in enumerate(lines):
         text = w._pdf_output_text(w._line_text(line)).strip()
@@ -172,6 +256,10 @@ def _semantic_line_groups(lines: list[dict], figures=(), *, framed_callout=False
                 or (re.fullmatch(r"[A-Z][A-Za-z &]{2,32}", text)
                     and re.match(r"^[A-Z][A-Za-z &]{2,24}:", previous_text))
             ))
+            letter_break = bool(letter_frame and (
+                previous_text == source_texts[0]
+                or re.fullmatch(r"(?:Best|Kind|Warm) regards,|Sincerely,", text)
+                or index > letter_closing_index))
             if len(groups[-1]) == 1 and (QUESTION_START.match(previous_text) or _PARAGRAPH_START.match(previous_text)):
                 new_indent = False  # hanging question/choice label
             returns_below_figure = any(
@@ -183,6 +271,7 @@ def _semantic_line_groups(lines: list[dict], figures=(), *, framed_callout=False
             )
             continuation = (
                 not callout_break
+                and not letter_break
                 and not _PARAGRAPH_START.match(text)
                 and not QUESTION_START.match(text)
                 and not (sentence_end and (short_last_line or new_indent))
@@ -199,7 +288,7 @@ def _semantic_line_groups(lines: list[dict], figures=(), *, framed_callout=False
     return groups
 
 
-def _semantic_flow_blocks(blocks: list[dict]) -> list[dict]:
+def _semantic_flow_blocks(blocks: list[dict], *, page=None, area_hint="", answer_blanks=()) -> list[dict]:
     """Keep prose in ordinary paragraphs, including question-number first lines."""
     from . import pdf_layout_writer as w
 
@@ -209,8 +298,32 @@ def _semantic_flow_blocks(blocks: list[dict]) -> list[dict]:
 
     def flush():
         if pending:
-            for group in _semantic_line_groups(pending, figures):
-                result.append({**source, "type": "paragraph", "lines": group})
+            groups = _semantic_line_groups(pending, figures)
+            for group_index, group in enumerate(groups):
+                from .pdf_source_question_body import split_source_question_body
+                semantic_groups = split_source_question_body(
+                    group, page=page, area_hint=area_hint, answer_blanks=answer_blanks)
+                existing_body_proof = None
+                if len(semantic_groups) == 1 and group_index:
+                    joined = groups[group_index - 1] + group
+                    previous_split = split_source_question_body(
+                        joined, page=page, area_hint=area_hint, answer_blanks=answer_blanks,
+                        existing_boundary=True)
+                    if (len(previous_split) == 2 and previous_split[0] == groups[group_index - 1]
+                            and previous_split[1] == group):
+                        existing_body_proof = {"boundary_mode": "existing", "lines": [
+                            {"bbox": list(w._item_bbox(part)), "spans": deepcopy(part.get("spans", []))}
+                            for part in joined]}
+                        if (result and result[-1].get("type") == "paragraph"
+                                and result[-1].get("lines") == groups[group_index - 1]):
+                            result[-1]["source_question_instruction"] = deepcopy(existing_body_proof)
+                for index, semantic in enumerate(semantic_groups):
+                    result.append({**source, "type": "paragraph", "lines": semantic,
+                        **({("source_question_instruction" if index == 0 else "source_question_body"): {"boundary_mode": "split", "lines": [
+                            {"bbox": list(w._item_bbox(part)), "spans": deepcopy(part.get("spans", []))}
+                            for part in group]}}
+                           if len(semantic_groups) == 2 else {}),
+                        **({"source_question_body": existing_body_proof} if existing_body_proof else {})})
             pending.clear()
 
     for block in blocks:
@@ -1243,7 +1356,7 @@ def recover_native_sum_limits(lines: list[dict]) -> list[dict]:
 
 
 def extract_native_content(
-    pdf_path: Path, *, max_pages: int | None = None
+    pdf_path: Path, *, max_pages: int | None = None, area_hint: str = ""
 ) -> tuple[list[dict], list[dict]]:
     from . import importers, pdf_layout_writer as w
     from .pdf_math_geometry import recover_native_radicals
@@ -1252,27 +1365,37 @@ def extract_native_content(
     output: list[dict] = []
     provenance: list[dict] = []
     source_masthead_area = ""
+    current_source_area = ""
     source_masthead_typography = {}
     source_running_headings = []
+    source_page_mastheads = []
     with fitz.open(pdf_path) as document:
         for page_index in range(min(len(document), max_pages or len(document))):
             page = document[page_index]
             page_start = len(output)
             body_top = w._page_body_top(page)
+            page_areas = [w._pdf_output_text(w._line_text(line)).strip()
+                          for line in w._iter_text_lines(page)
+                          if w._item_bbox(line).y1 < body_top
+                          and re.fullmatch(r".{1,16}영역(?:\s*\([^\n]+\))?",
+                                           w._pdf_output_text(w._line_text(line)).strip())]
             if page_index == 0:
                 from .pdf_masthead_typography import measure_source_masthead
-                source_masthead_typography = measure_source_masthead(page, body_top)
-                areas = [w._pdf_output_text(w._line_text(line)).strip()
-                         for line in w._iter_text_lines(page)
-                         if w._item_bbox(line).y1 < body_top
-                         and re.fullmatch(r".{1,16}영역(?:\s*\([^\n]+\))?",
-                                          w._pdf_output_text(w._line_text(line)).strip())]
-                source_masthead_area = max(areas, key=len, default="")
+                source_masthead_typography = measure_source_masthead(page, body_top, area_hint=area_hint)
+                source_masthead_area = max(page_areas, key=len, default="") or str(
+                    (source_masthead_typography.get('area') or {}).get('text') or '')
+            current_source_area = (max(page_areas, key=len, default="") or current_source_area
+                                   or source_masthead_area or area_hint)
             if page_index > 0:
                 from .pdf_running_headings import measure_running_heading
                 running = measure_running_heading(page, body_top, source_masthead_area)
                 if running:
                     source_running_headings.append(running)
+            from .pdf_masthead_typography import measure_source_page_masthead
+            page_masthead = measure_source_page_masthead(
+                page, body_top, area_hint=source_masthead_area or area_hint)
+            if page_masthead:
+                source_page_mastheads.append(page_masthead)
             lines = [
                 line
                 for line in recover_native_sum_limits(
@@ -1313,10 +1436,12 @@ def extract_native_content(
                     or region.height > page.rect.height * 0.4
                 ):
                     continue
+                from .pdf_source_grid_geometry import source_grid_cell_bounds
+                source_cells = source_grid_cell_bounds(page, found, drawings)
                 cells = []
-                for row in found.rows:
+                for row in source_cells:
                     cell_row = []
-                    for cell in row.cells:
+                    for cell in row:
                         bounds = fitz.Rect(cell) if cell else fitz.Rect()
                         from .pdf_source_characters import source_spans_in_cell
                         cell_row.append(source_spans_in_cell(
@@ -1324,8 +1449,8 @@ def extract_native_content(
                     cells.append(cell_row)
                 tables = [t for t in tables if not region.intersects(w._item_bbox(t))]
                 tables.append({"type": "native_table", "bbox": region, "cells": cells,
-                               "cell_bounds": [[list(cell) if cell else None for cell in row.cells]
-                                               for row in found.rows]})
+                               "cell_bounds": [[list(cell) if cell else None for cell in row]
+                                               for row in source_cells]})
             for table in w._raster_native_table_items(page, lines, dark):
                 region = w._item_bbox(table)
                 if not any(
@@ -1356,8 +1481,9 @@ def extract_native_content(
             native_images, raster_frames = _native_images_and_frames(page, lines, cell_regions, raster_backgrounds)
             from .pdf_graph_annotations import associate_graph_annotations
             graph_labels = associate_graph_annotations(page, native_images, lines, table_regions)
-            from .pdf_figure_labels import include_diagram_labels
-            diagram_labels = include_diagram_labels(page, [p for p in native_images if not p.get('native_graph')], lines, table_regions)
+            from .pdf_figure_labels import include_diagram_labels, include_statistical_chart_labels
+            chart_labels = include_statistical_chart_labels(page, native_images, lines, table_regions)
+            diagram_labels = chart_labels | include_diagram_labels(page, [p for p in native_images if not p.get('native_graph') and not p.get('source_chart')], lines, table_regions)
             # PDF producers can encode one decorative frame as overlapping
             # bitmap strips. Unite their frame geometry before assigning prose.
             united = []
@@ -1373,6 +1499,29 @@ def extract_native_content(
                     united.remove(other)
                 united.append(background)
             raster_backgrounds = united
+            # A picture wholly inside a decorative prose frame belongs to the
+            # same background geometry. Compose only its original bitmap
+            # objects into that fill; PDF prose remains an editable native
+            # table. Keeping it as a separate flow item splits the surrounding
+            # notice at the illustration's top edge and paints the frame twice.
+            embedded = set()
+            source_bitmaps = [b for b in source_text_dict(page).get("blocks", [])
+                              if b.get("type") == 1]
+            for background in raster_backgrounds:
+                region = background["region"]
+                for picture in native_images:
+                    bounds = w._item_bbox(picture)
+                    if (not region.contains(bounds)
+                        or picture.get("native_graph")
+                        or any(bounds.intersects(w._item_bbox(line))
+                               for line in lines)):
+                        continue
+                    numbers = [b["number"] for b in source_bitmaps
+                               if bounds.contains(fitz.Rect(b["bbox"]))]
+                    if numbers:
+                        background["numbers"] = sorted(set(background["numbers"] + numbers))
+                        embedded.add(id(picture))
+            native_images = [picture for picture in native_images if id(picture) not in embedded]
             raster_frames = [entry["region"] for entry in united]
             assigned_images = set()
             for table in tables:
@@ -1418,7 +1567,18 @@ def extract_native_content(
                 and id(line) not in retained_labels
             ]
             items = w._merge_same_row_flow_lines(page, line_items + images + tables)
+            from .pdf_answer_blanks import measure_answer_blanks
+            # A PDF may separate the words before a blank and its trailing
+            # period into different source lines on the same baseline. Measure
+            # after their native row merge so the rule keeps the whole sentence.
+            page_answer_blanks = measure_answer_blanks(
+                page, [item for item in items if item.get('type') == 'line'],
+                area_hint=source_masthead_area or area_hint)
             boxes = w._flow_box_rects(page, lines, drawings, dark)
+            # Detector padding helps group text, but it is not part of the
+            # original frame or the column's starting rail. Keeping those
+            # extra points shifts every cached paragraph toward the right.
+            boxes = [_source_prose_frame(box, drawings) or box for box in boxes]
             # The rectangular edge of an illustration is not a prose box.
             # Remove only image-contained candidates with no remaining native
             # text; a genuine surrounding box or a text-bearing box survives.
@@ -1433,6 +1593,12 @@ def extract_native_content(
                 if not any((region & box).get_area() >= region.get_area() * 0.98 for box in boxes):
                     boxes.append(region)
             blocks_by_column = w._flow_column_blocks(page, items, boxes)
+            from .pdf_dialogue_frames import coalesce_dialogue_frames
+            blocks_by_column = [coalesce_dialogue_frames(blocks,page,lines) for blocks in blocks_by_column]
+            from .pdf_illustrated_prose_frames import coalesce_illustrated_prose_frames
+            if re.sub(r'\s+', '', current_source_area) == '영어영역':
+                blocks_by_column = [coalesce_illustrated_prose_frames(blocks, page, lines)
+                                    for blocks in blocks_by_column]
 
             def table_rows(table: dict) -> list[list[str]]:
                 def cell_spans(spans):
@@ -1523,6 +1689,9 @@ def extract_native_content(
                 background = save_background(region)
                 item["layout"].setdefault("native_tables", []).append({
                     "index": index, "bbox_pt": list(region), "cell_bounds": bounds,
+                    "source_pdf_path": str(Path(pdf_path).resolve()),
+                    "source_page_index": page_index,
+                    "source_grid_bbox_pt": list(w._item_bbox(table)),
                     "borderless_columns": table.get("borderless_columns", []),
                     "background_path": background,
                     "images": [{"row": image["row"], "column": image["column"],
@@ -1556,7 +1725,8 @@ def extract_native_content(
                     if pending:
                         ordered_blocks.append({**original, "lines": pending,
                                                "rect": fitz.Rect(region.x0, top, region.x1, region.y1)})
-                for block in _semantic_flow_blocks(ordered_blocks):
+                for block in _semantic_flow_blocks(ordered_blocks, page=page,
+                        area_hint=current_source_area, answer_blanks=page_answer_blanks):
                     kind = block["type"]
                     if kind == "gap":
                         continue
@@ -1624,10 +1794,13 @@ def extract_native_content(
                             and max((len(row) for row in table["cell_bounds"]), default=0) >= 2
                             for frame in frames for table in tables
                         )
+                        from .pdf_wrapped_prose_frames import source_wrapped_groups
+                        wrapped_source = (block.get('source_frame_topology') or {}).get('mode') == 'paragraph_wrap'
+                        semantic_groups = (source_wrapped_groups(typography_lines) if wrapped_source else
+                                           _semantic_line_groups(typography_lines, framed_callout=bool(frames)))
                         text_lines = [
                             join_source_paragraph(group, space_fonts)
-                            for group in _semantic_line_groups(typography_lines,
-                                                               framed_callout=frame_has_grid)
+                            for group in semantic_groups
                         ]
                         if text_lines:
                             item["tables"].append([["\n".join(text_lines)]])
@@ -1655,6 +1828,23 @@ def extract_native_content(
                                 # those measured fragments may use the partial
                                 # paragraph cache in the writer.
                                 item["layout"]["source_frame_has_grid"] = frame_has_grid
+                            elif region is not None and not frames:
+                                source_frame = _source_prose_frame(region, drawings)
+                                if source_frame is not None and source_frame.contains(text_region):
+                                    item["layout"].setdefault("native_tables", []).append({
+                                        "index": 0, "source_prose_frame": True,
+                                        "source_frame_text": "".join(
+                                            w._pdf_output_text(w._line_text(line))
+                                            for line in typography_lines),
+                                        **({'source_pdf_path': str(Path(pdf_path).resolve()),
+                                            'source_page_index': page_index} if wrapped_source else {}),
+                                        "bbox_pt": list(source_frame),
+                                        "cell_bounds": [[list(source_frame)]],
+                                        "images": [{"row": 0, "column": 0,
+                                                    "path": save_figure(w._item_bbox(picture)),
+                                                    "bbox_pt": list(w._item_bbox(picture))}
+                                                   for picture in block.get('source_frame_images', [])],
+                                    })
                         for nested in block.get("lines", []):
                             if nested.get("type") == "native_table":
                                 append_table(item, nested)
@@ -1673,13 +1863,38 @@ def extract_native_content(
                         typography_lines = text_lines
                         item["stem"] = join_source_paragraph(text_lines, space_fonts)
                     if typography_lines:
+                        # Only the actual English subject and source glyph
+                        # fonts may disable math inference. English answer
+                        # labels such as financial(A) are ordinary prose; an
+                        # equation-font block keeps the native equation path.
+                        source_area = re.sub(r"\s+", "", current_source_area)
+                        if source_area == "영어영역" and not any(
+                            w.is_hancom_eq_font(str(span.get("font", "")))
+                            for line in typography_lines for span in line.get("spans", [])
+                        ):
+                            item["layout"]["source_literal_text"] = True
                         item["layout"]["source_typography"] = _source_typography(
                             typography_lines, block
                         )
+                        if item["layout"].get("source_literal_text"):
+                            item["layout"]["source_pdf_path"] = str(Path(pdf_path).resolve())
+                            item["layout"]["source_page_index"] = page_index
+                            if block.get("source_question_instruction"):
+                                item["layout"]["source_question_instruction"] = deepcopy(
+                                    block["source_question_instruction"])
+                            if block.get("source_question_body"):
+                                item["layout"]["source_question_body"] = deepcopy(
+                                    block["source_question_body"])
+                        item["layout"]["source_answer_blanks"] = [blank for blank in page_answer_blanks
+                            if any(max(abs(a - b) for a, b in zip(blank['line_bbox_pt'], record['bbox_pt'])) < .05
+                                   for record in item['layout']['source_typography']['lines'])]
                         labels = associate_inline_labels(
                             item["layout"]["source_typography"]["lines"], page_inline_labels)
                         if labels:
                             item["layout"]["source_inline_labels"] = labels
+                    if block.get('source_dialogue_frame'):
+                        from .pdf_dialogue_frames import attach_dialogue_frame
+                        attach_dialogue_frame(item,block,save_figure,provenance)
                     if item["stem"] or item["tables"] or item["image_paths"]:
                         output.append(item)
                         if kind == 'image' and picture.get('native_graph'):
@@ -1700,6 +1915,8 @@ def extract_native_content(
         output[0]["layout"]["source_masthead_typography"] = source_masthead_typography
     if output and source_running_headings:
         output[0]["layout"]["source_running_headings"] = source_running_headings
+    if output and source_page_mastheads:
+        output[0]["layout"]["source_page_mastheads"] = source_page_mastheads
     annotate_question_groups(output)
     return output, provenance
 
@@ -1720,7 +1937,7 @@ def write_native_content(
 ) -> dict:
     from . import hwpx_writer, hwpx_writer_v2, math_text, pdf_layout_writer as w
 
-    items, provenance = extract_native_content(pdf_path, max_pages=page_limit)
+    items, provenance = extract_native_content(pdf_path, max_pages=page_limit, area_hint=subject_area)
     if not items:
         raise ValueError("no native PDF body content")
     if subject_area and not any((item.get("layout") or {}).get("source_masthead_area") for item in items):
@@ -1742,7 +1959,13 @@ def write_native_content(
         preserve_source_layout=True,
     )
     from .pdf_running_headings import apply_running_heading
-    heading = apply_running_heading(output, items[0]["layout"].get("source_running_headings", []), page_limit)
+    measured_sections = items[0]["layout"].get("source_page_mastheads_restored", 0)
+    if measured_sections:
+        heading = {"applied": True,
+                   "source_pages": len(items[0]["layout"].get("source_page_mastheads", [])),
+                   "measured_masthead_sections": measured_sections}
+    else:
+        heading = apply_running_heading(output, items[0]["layout"].get("source_running_headings", []), page_limit)
     from .pdf_choice_measurement import refresh_choice_tab_widths
     choice_tabs = refresh_choice_tab_widths(output)
     from .pdf_frame_rows import split_background_frame_rows
@@ -1753,10 +1976,11 @@ def write_native_content(
     total = sum(map(len, fragments))
     matched = sum(len(fragment) for fragment in fragments if fragment in plain)
     coverage = matched / total if total else 0.0
-    values = [str(item["stem"]) for item in items]
+    math_items = [item for item in items if not item["layout"].get("source_literal_text")]
+    values = [str(item["stem"]) for item in math_items]
     values.extend(
         str(cell)
-        for item in items
+        for item in math_items
         for table in item["tables"]
         for row in table
         for cell in row
@@ -1770,7 +1994,10 @@ def write_native_content(
         for value in values for segment, is_math in math_text.split_math_text(value) if is_math
     ) if native_math else 0
     unresolved = sum(
-        value.count(marker) for value in values for marker in ("□", "▢", "�")
+        str(value).count(marker)
+        for item in items
+        for value in [item["stem"], *(cell for table in item["tables"] for row in table for cell in row)]
+        for marker in ("□", "▢", "�")
     )
     # 2026-10-03 R2: '□' glyphs present in the source text layer are kept as text, so they are not unresolved placeholders.
     unresolved = max(0, unresolved - w._source_box_glyph_count(pdf_path, page_limit))

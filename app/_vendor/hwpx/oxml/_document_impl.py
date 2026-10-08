@@ -366,7 +366,8 @@ def _append_text_with_tabs(run: ET.Element, value: str) -> None:
     break_tag = _child_tag_like(run, "lineBreak", _HP_NS)
     for segment in segments:
         if segment == "\t":
-            run.append(run.makeelement(tab_tag, {}))
+            # Literal text TABs are ordinary LEFT controls, as in the native serializer.
+            run.append(run.makeelement(tab_tag, {"leader": "0", "type": "1"}))
             continue
         text_element = run.makeelement(text_tag, {})
         if segment in {"\r\n", "\r", "\n"}:
@@ -1550,6 +1551,9 @@ class HwpxOxmlRun:
         # too. Otherwise reading and writing a verse run duplicates breaks,
         # or leaves mixed-content tails from the previous text behind.
         changed = self.text != value
+        if not changed:
+            # Preserve existing control metadata, live nodes and cached layout.
+            return
         for node in list(self.element):
             if tag_local_name(node.tag) in {"t", "tab", "lineBreak"} or _is_tab_control_element(node):
                 self.element.remove(node)
@@ -3492,6 +3496,9 @@ class HwpxOxmlParagraph:
         ``charPrIDRef`` on the surviving run) are preserved.  Empty runs that
         contained only text nodes are removed to keep the XML clean.
         """
+        if self.text == value:
+            # Exact no-op retains mixed runs, controls and cached layout.
+            return
         runs = self._run_elements()
 
         # Identify first run — its charPrIDRef will be kept.
@@ -3613,8 +3620,7 @@ class HwpxOxmlParagraph:
                         run_attrs["charPrIDRef"] = str(default_char)
 
         run_element = _append_child(self.element, f"{_HP}run", run_attrs)
-        text_element = _append_child(run_element, f"{_HP}t", {})
-        text_element.text = text
+        _append_text_with_tabs(run_element, text)
         _clear_paragraph_layout_cache(self.element)
         self.section.mark_dirty()
         return HwpxOxmlRun(run_element, self)

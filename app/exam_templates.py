@@ -197,6 +197,7 @@ TEMPLATES: tuple[ExamTemplate, ...] = (
         include_answers=False,
         include_explanations=False,
         merge_question_number=True,
+        source_number_line=True,
         circled_choices=True,
         inline_short_choices=False,
         compact=True,
@@ -279,6 +280,7 @@ def quick_answer_lines(
 
 
 _PASSAGE_NUMBER_RE = re.compile(r"^\s*\[\s*\d{1,3}\s*[~∼～\-–]\s*\d{1,3}\s*\]")
+_PREPARED_SINGLE_PASSAGE_RE = re.compile(r"^\s*\[\s*(\d{1,3})\s*\]")
 _PASSAGE_LABEL_ONLY_RE = re.compile(r"^\s*\[\s*\d{1,3}\s*[~∼～\-–]\s*\d{1,3}\s*\]\s*$")
 # '3.5는' 같은 소수는 번호로 보지 않는다.
 _STEM_NUMBER_RE = re.compile(r"^\s*(?:문제\s*)?(\d{1,3})\s*[\.\)](?!\d)\s*")
@@ -293,7 +295,7 @@ def numbered_stem_paragraphs(
     numbered: bool = True,
     prepared: bool = False,
 ) -> list[tuple[str, str]]:
-    """원번호를 한 번만 붙인 (문단, 'heading'|'body') 목록. source_number_line 양식 전용.
+    """원번호를 한 번만 붙인 (문단, 'heading'|'body') 목록.
 
     - 앞 몇 줄 안에 같은 번호로 시작하는 줄이 있으면 그 줄을 번호 줄로 쓴다
       (앞에 붙은 문서 제목 등은 본문으로 먼저 둔다).
@@ -324,7 +326,19 @@ def numbered_stem_paragraphs(
                     + [(f"{match.group(1)}. {rest}".rstrip(), "heading")]
                     + [(text, "body") for text in lines[position + 1:]]
                 )
-    if _PASSAGE_NUMBER_RE.match(lines[0]):
+    single = _PREPARED_SINGLE_PASSAGE_RE.match(lines[0]) if prepared else None
+    if _PASSAGE_NUMBER_RE.match(lines[0]) or (single and single[1] == label):
+        # A self-contained imported question includes its shared passage before
+        # the actual numbered prompt. Prefer that explicit marker to a question
+        # mark inside the passage, and do not add the same number twice.
+        for position in range(1, len(lines)):
+            match = _STEM_NUMBER_RE.match(lines[position])
+            if match and match.group(1) == label:
+                return (
+                    [(text, "body") for text in lines[:position]]
+                    + [(lines[position].strip(), "heading")]
+                    + [(text, "body") for text in lines[position + 1:]]
+                )
         for position in range(1, len(lines)):
             if _QUESTION_PROMPT_RE.search(lines[position]):
                 return (

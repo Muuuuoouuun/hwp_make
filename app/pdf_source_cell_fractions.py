@@ -63,13 +63,30 @@ def flatten_source_cell_fractions(
         return widths, heights
 
     widths, heights = axes(table)
+    if any(address(cell)[3] > 1 for cell in targets):
+        # A fraction may occupy an actual vertically merged source cell. Its
+        # local rows must partition that whole cell, not just the first row.
+        # Require a complete, non-overlapping grid before extending this path.
+        occupied = set()
+        for cell in cells:
+            col, row, cs, rs = address(cell)
+            w, h = dimensions(cell)
+            if not (0 <= col < col + cs <= len(widths)
+                    and 0 <= row < row + rs <= len(heights)):
+                raise ValueError("source word-fraction cell has invalid merged boundaries")
+            if w == h == 0:
+                continue
+            if min(w, h) <= 0:
+                raise ValueError("source word-fraction cell has invalid dimensions")
+            positions = {(c, r) for c in range(col, col + cs) for r in range(row, row + rs)}
+            if positions & occupied:
+                raise ValueError("source word-fraction merged cells overlap")
+            occupied.update(positions)
+        if len(occupied) != len(widths) * len(heights):
+            raise ValueError("source word-fraction merged grid has missing cells")
     replacements = {}
     for cell in targets:
         col, row, cs, rs = address(cell)
-        if rs != 1:
-            raise ValueError(
-                "word fraction in a vertically merged source cell is not supported"
-            )
         wrapper = deepcopy(table)
         for tr in list(wrapper.findall(f"{HP}tr")):
             wrapper.remove(tr)
@@ -90,7 +107,9 @@ def flatten_source_cell_fractions(
         local_widths, local_heights = axes(wrapper)
         if wrapper.findall(f".//{HP}tbl"):
             raise ValueError("source cell fraction remained nested after flattening")
-        heights[row] = max(heights[row], sum(local_heights))
+        # Preserve all original source row boundaries. If editable content
+        # genuinely needs more height, the last covered row takes the growth.
+        heights[row + rs - 1] += max(0, sum(local_heights) - sum(heights[row:row + rs]))
         replacements[id(cell)] = wrapper, local_widths, local_heights
 
     def cumulative(values):
@@ -112,14 +131,15 @@ def flatten_source_cell_fractions(
             continue
         wrapper, local_widths, local_heights = replacements[id(cell)]
         local_x, local_y = cumulative(local_widths), cumulative(local_heights)
+        merged_height = ys[row + rs] - ys[row]
         for child in wrapper.findall(f"{HP}tr/{HP}tc"):
             c, r, cspan, rspan = address(child)
             bounds = (
                 xs[col] + round(local_x[c] * (xs[col + cs] - xs[col]) / local_x[-1]),
-                ys[row] + round(local_y[r] * heights[row] / local_y[-1]),
+                ys[row] + round(local_y[r] * merged_height / local_y[-1]),
                 xs[col]
                 + round(local_x[c + cspan] * (xs[col + cs] - xs[col]) / local_x[-1]),
-                ys[row] + round(local_y[r + rspan] * heights[row] / local_y[-1]),
+                ys[row] + round(local_y[r + rspan] * merged_height / local_y[-1]),
             )
             copied = deepcopy(child)
             for paragraph in copied.iter(f"{HP}p"):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import math
 import re
 from lxml import etree
 
@@ -106,6 +107,57 @@ def flatten_question_fraction_tables(paragraphs, header, *, width=None):
                 elif child.tag == f"{HP}equation":
                     total += int(child.find(f"{HP}sz").get("width", "0")) + 112
         return round(total)
+
+    def unbreakable_width(paragraph):
+        """Minimum editable width: native objects and Latin words stay intact.
+
+        Korean prose can wrap between clusters. A long operand is therefore
+        not intrinsically too wide for its source box: its semantic paragraph
+        can occupy several native lines without shrinking text or equations.
+        """
+        from ._vendor.hangul_units import hangul_clusters
+        from ._vendor.hwpx_text_content import iter_text_parts
+
+        maximum = 0.0
+        word = 0.0
+        for run in paragraph.findall(f"{HP}run"):
+            style = char_by_id.get(run.get("charPrIDRef"))
+            size = int(style.get("height", "790")) if style is not None else 790
+            ratio = style.find(HH + "ratio") if style is not None else None
+            spacing = style.find(HH + "spacing") if style is not None else None
+            for child in run:
+                if child.tag == HP + "t":
+                    for value, control in iter_text_parts(child):
+                        if control is not None:
+                            maximum, word = max(maximum, word), 0.0
+                        for cluster in hangul_clusters(value):
+                            language = "hangul" if ord(cluster[0]) > 255 else "latin"
+                            factor = 1 if language == "hangul" else (.9 if cluster in "MW@%" else .6)
+                            if cluster.isspace():
+                                maximum, word = max(maximum, word), 0.0
+                                continue
+                            r = float(ratio.get(language, "100")) if ratio is not None else 100
+                            s = float(spacing.get(language, "0")) if spacing is not None else 0
+                            if not (math.isfinite(r) and math.isfinite(s) and r > 0 and size > 0):
+                                raise ValueError("native word-fraction text has invalid width metrics")
+                            advance = max(1, size * (factor * r + s) / 100)
+                            if language == "latin" and cluster.isalnum():
+                                word += advance
+                            else:
+                                maximum, word = max(maximum, word, advance), 0.0
+                elif child.tag == HP + "equation":
+                    maximum, word = max(maximum, word, int(child.find(HP + "sz").get("width", "0")) + 112), 0.0
+                elif child.tag in {HP + name for name in ("pic", "rect", "tbl", "container")}:
+                    bounds, pos, margins = (child.find(HP + name) for name in ("sz", "pos", "outMargin"))
+                    if bounds is None or pos is None or pos.get("treatAsChar") != "1":
+                        raise ValueError("native word-fraction wrapping requires inline fixed objects")
+                    parts = [float(bounds.get("width", "0"))]
+                    parts.extend(float(margins.get(edge, "0")) if margins is not None else 0
+                                 for edge in ("left", "right"))
+                    if not all(math.isfinite(value) and value >= 0 for value in parts) or parts[0] <= 0:
+                        raise ValueError("native word-fraction object has invalid width metrics")
+                    maximum, word = max(maximum, word, sum(parts)), 0.0
+        return round(max(maximum, word))
 
     def first_sentence(paragraph):
         """Keep the fraction's connective beside it; resume prose at full width."""
@@ -266,9 +318,31 @@ def flatten_question_fraction_tables(paragraphs, header, *, width=None):
                     )
             used = sum(widths[:-1])
             if sum(widths) > width:
-                raise ValueError(
-                    f"native word fractions do not fit their source view width: {sum(widths)} > {width} ({widths})"
-                )
+                minimums = [200] * col_count
+                for record in records:
+                    if record[0] != "fraction":
+                        continue
+                    _, fragments, fractions = record
+                    for i, frac in enumerate(fractions):
+                        minimums[i * 2 + 1] = max(minimums[i * 2 + 1], max(
+                            (unbreakable_width(p) + 200 for cell in frac.findall(HP + "tr/" + HP + "tc")
+                             for p in cell.findall(HP + "subList/" + HP + "p")), default=200))
+                    for i, fragment in enumerate(fragments):
+                        minimums[i * 2] = max(minimums[i * 2], unbreakable_width(fragment) + 200)
+                if sum(minimums) > width:
+                    raise ValueError(
+                        f"native word fractions have indivisible content wider than their source view: {sum(minimums)} > {width}"
+                    )
+                # Allocate the available width above real indivisible content.
+                # Native paragraph caches then measure any required wrapping;
+                # neither the source frame nor glyph sizes are stretched.
+                preferences = [max(desired, minimum) for desired, minimum in zip(widths, minimums)]
+                capacity = sum(preferences) - sum(minimums)
+                extra = width - sum(minimums)
+                widths = [minimum + (extra * (desired - minimum) // capacity if capacity else 0)
+                          for desired, minimum in zip(preferences, minimums)]
+                widths[-1] += width - sum(widths)
+                used = sum(widths[:-1])
             widths[-1] = width - used
             rows = []
             source_fill = base.get("borderFillIDRef")
