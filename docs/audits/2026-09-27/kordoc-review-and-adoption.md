@@ -42,6 +42,21 @@ kordoc을 그대로 호출하지는 않는다. 우리 산출물의 핵심인 2�
 
 늘어난 PASS 3개는 신규 검증 스크립트 3개다. FAIL 9개는 수정 전과 같은 항목이고 실패 메시지도 동일하다. 원인은 개인 샘플 PDF 부재(`data/uploads/25수능 수학.pdf` 등), pytest 미설치, OCR 키 없음 같은 환경 문제다. 기존 기대값 가운데 `\left(x+1\right)` → `(x+1)` 계열 8건과 `verify_importers.py`의 1건은 새 출력(`LEFT ( x+1 RIGHT )` 등)으로 갱신했다.
 
+## 후속 적용 (2026-10-10)
+
+[10월 3일 작업 정리](../2026-10-03/work-summary.md) §4에 남은 항목 가운데 kordoc 검토와 겹치는 것을 이어서 처리했다.
+
+| 항목 | 문제(수정 전) | 수정 | 검증 |
+| --- | --- | --- | --- |
+| HWP 미주 정답·풀이 | 수학 HWP 미주 46개의 정답·풀이가 0/46으로 들어옴. 문항 번호가 미주 표지(`문N）`)뿐인 시험지는 IR 경로에서 문항을 나누지 못함 | rhwp IR의 `furniture.endnotes`(번호·내용·표지 문단)를 읽어 표지 문단 앞에 놓음. 미주 번호가 1..N으로 빠짐없고 정답이 80% 이상일 때만 정답 열쇠로 사용(HWPX와 같은 기준). `[N점]` 마커가 없으면 미주 위치로 문항을 나누고, 있으면 마커 문항에 같은 번호의 미주를 붙임. 미주 안 수식은 `$script$`로 보존 | `verify_hwp_ir_endnote_answers.py`(신규). 수정 전 코드에서는 미주형 0문항, 마커형 정답 빈칸 |
+| HWP 셀 안 그림·중첩 표 | 국어 HWP 셀 안 그림 9개와 중첩 표 2개가 사라짐 | 중첩 표의 글은 셀 글에 넣음. 셀 그림은 표 바로 뒤에 문항 그림으로 냄(표 모델이 문자열 격자라 셀 안에 넣을 수 없음) | `verify_hwp_ir_cell_content.py`(신규) |
+| 결합 문자 화살표·윗줄 | `AB⃗`, `a⃗`, `AB̅`의 U+20D7·U+0305가 결합 문자 그대로 수식에 들어감 | 대문자 점 이름(프라임 포함)이나 소문자·그리스 한 글자를 `vec {…}`·`bar {…}`로 바꿈 | `verify_hwpx_native_math.py` 4건 추가 |
+| `colPr sameSz` | 벤더 python-hwpx 경로가 `sameSz="true"`를 써서 python-hwpx 6.7·HwpForge가 산출물을 거부함 | 한컴 템플릿과 kordoc(한컴 실렌더 검증)처럼 `"1"`/`"0"`으로 씀. 저장소 안의 판독 코드는 원래 두 표기를 모두 받음 | `verify_hwpx_column_attributes.py`(신규) |
+
+손대지 않은 것: 짧은 수식(숫자, 두 글자 이하)을 평문으로 두는 `_wrap_eqn` 규칙은 수식 개체 수와 수식 글꼴 사이의 제품 판단이라 그대로 두었다. 실물 HWP 표본이 이 환경에 없어 위 수치는 합성 표본 기준이다. rhwp가 형식을 내용으로 판별하므로 합성 HWPX 바이트를 HWP 가져오기 경로에 넣어 시험했다. 실물 수학·국어 HWP 재측정은 표본이 있는 PC에서 해야 한다.
+
+전체 회귀(`scripts/run_all_verify.py`, 기준 50cd57c 대비) 실행 중. 결과는 다음 커밋에 기록한다.
+
 ## Windows에서 이어서 할 일
 
 1. `powershell -File scripts/probe_hwp_open.ps1 -Path <생성본.hwpx> -CopyToTemp -ExportHwpxDirectory <폴더>`로 한글 저장본을 받는다. 이어서 `python scripts/inspect_hancom_layout.py <폴더>/<이름>.hancom.hwpx --expect <예상.json>`으로 쪽·단·문항 위치를 판정한다. UI의 예상 쪽·단을 `--expect` 형식으로 내보내면 스크린샷 없이 비교할 수 있다.
