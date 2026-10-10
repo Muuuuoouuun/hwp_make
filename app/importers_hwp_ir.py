@@ -295,8 +295,28 @@ def _cell_blocks_text(blocks: list[Any]) -> str:
             current_formulas.append(
                 (char_start if char_start is not None else len(current_text or ""), getattr(block, "script", "") or "")
             )
+        elif kind == "table":
+            # A nested table's text belongs to this cell (it used to vanish).
+            flush()
+            nested = _table_rows(block)
+            nested_text = " ".join(cell for row in nested for cell in row if str(cell).strip())
+            if nested_text:
+                parts.append(nested_text)
     flush()
     return " ".join(part for part in parts if part).strip()
+
+
+def _cell_pictures(blocks: list[Any]) -> list[Any]:
+    """Picture blocks inside a cell, including cells of nested tables."""
+    found: list[Any] = []
+    for block in blocks or []:
+        kind = str(getattr(block, "kind", "") or "")
+        if kind == "picture":
+            found.append(block)
+        elif kind == "table":
+            for cell in getattr(block, "cells", None) or []:
+                found.extend(_cell_pictures(getattr(cell, "blocks", []) or []))
+    return found
 
 
 def _downscale_image(blob: bytes, *, max_dim: int = 1600, max_bytes: int = 900_000) -> bytes:
@@ -336,10 +356,16 @@ class TableGrid(list):
     """
 
     spans: list[list[int]]
+    pictures: list[Any]
 
-    def __init__(self, rows: list[list[str]], spans: list[list[int]] | None = None) -> None:
+    def __init__(
+        self, rows: list[list[str]], spans: list[list[int]] | None = None, pictures: list[Any] | None = None
+    ) -> None:
         super().__init__(rows)
         self.spans = list(spans or [])
+        # Picture blocks found in cells; the string grid cannot hold them, so the
+        # stream emits them as images right after the table.
+        self.pictures = list(pictures or [])
 
 
 def _table_rows(block: Any) -> list[list[str]]:
@@ -351,7 +377,9 @@ def _table_rows(block: Any) -> list[list[str]]:
         try:
             grid = [["" for _ in range(int(cols))] for _ in range(int(rows))]
             spans: list[list[int]] = []
+            pictures: list[Any] = []
             for c in cells:
+                pictures.extend(_cell_pictures(getattr(c, "blocks", []) or []))
                 r = int(getattr(c, "row", 0) or 0)
                 col = int(getattr(c, "col", 0) or 0)
                 if 0 <= r < len(grid) and 0 <= col < len(grid[0]):
@@ -363,8 +391,8 @@ def _table_rows(block: Any) -> list[list[str]]:
                     col_span = min(int(getattr(c, "col_span", 1) or 1), len(grid[0]) - col)
                     if row_span > 1 or col_span > 1:
                         spans.append([r, col, row_span, col_span])
-            if any(any(cell for cell in row) for row in grid):
-                return TableGrid(grid, spans)
+            if any(any(cell for cell in row) for row in grid) or pictures:
+                return TableGrid(grid, spans, pictures)
         except Exception:
             pass
     text = getattr(block, "text", "") or ""
@@ -545,8 +573,18 @@ def _ordered_stream(payload: bytes, filename: str, save_image: SaveImage):
                     stream.append(("image", rel))
         elif kind == "table":
             rows = _table_rows(block)
-            if rows:
+            if rows and any(any(str(cell).strip() for cell in row) for row in rows):
                 stream.append(("table", rows))
+            for picture in getattr(rows, "pictures", None) or []:
+                try:
+                    blob = doc.bytes_for_image(picture)
+                except Exception:
+                    blob = None
+                if blob:
+                    img_seq += 1
+                    rel = save_image(f"{stem_name}_img{img_seq}.png", _downscale_image(bytes(blob)))
+                    if rel:
+                        stream.append(("image", rel))
     for notes in notes_by_anchor.values():
         stream.extend(("endnote", note) for note in notes)
     return stream
