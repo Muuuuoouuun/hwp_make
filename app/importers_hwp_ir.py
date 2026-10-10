@@ -517,6 +517,11 @@ def _ordered_stream(payload: bytes, filename: str, save_image: SaveImage):
     stream: list[tuple[str, Any]] = []
     seen: set[tuple[int, int]] = set()
     img_seq = 0
+    # Endnotes go just before the paragraph holding their mark: in exam files
+    # that mark (문3）) is the visible question number.
+    notes_by_anchor: dict[tuple[int, int], list[tuple[str, list[str]]]] = defaultdict(list)
+    for anchor, note in _endnote_lines(ir):
+        notes_by_anchor[anchor].append(note)
     for block in body:
         kind = str(getattr(block, "kind", "") or "")
         sec, pidx, _ = _prov(block)
@@ -525,6 +530,7 @@ def _ordered_stream(payload: bytes, filename: str, save_image: SaveImage):
             if key in seen:
                 continue
             seen.add(key)
+            stream.extend(("endnote", note) for note in notes_by_anchor.pop(key, []))
             text = _splice_formulas(para_text.get(key, ""), formulas_by_para.get(key, []))
             stream.append(("text", text))
         elif kind == "picture":
@@ -541,7 +547,50 @@ def _ordered_stream(payload: bytes, filename: str, save_image: SaveImage):
             rows = _table_rows(block)
             if rows:
                 stream.append(("table", rows))
+    for notes in notes_by_anchor.values():
+        stream.extend(("endnote", note) for note in notes)
     return stream
+
+
+def _endnote_lines(ir: Any) -> list[tuple[tuple[int, int], tuple[str, list[str]]]]:
+    """``(anchor paragraph, (number, text lines))`` per endnote.
+
+    Formulas are spliced into the lines as ``$script$``.
+
+    rhwp keeps endnotes in ``furniture.endnotes``. Each note's formula block
+    follows its paragraph and gives a character offset into that paragraph.
+    The note mark itself (``문3）``) is an auto number and is not in the text.
+    """
+    furniture = getattr(ir, "furniture", None)
+    notes = getattr(furniture, "endnotes", None) or []
+    result: list[tuple[tuple[int, int], tuple[str, list[str]]]] = []
+    for note in notes:
+        lines: list[tuple[str, list[tuple[int, str]]]] = []
+        for block in getattr(note, "blocks", None) or []:
+            kind = str(getattr(block, "kind", "") or "")
+            if kind in ("paragraph", "list_item"):
+                lines.append((getattr(block, "text", "") or "", []))
+            elif kind == "formula" and lines:
+                _, _, offset = _prov(block)
+                lines[-1][1].append((offset if offset is not None else len(lines[-1][0]), getattr(block, "script", "") or ""))
+            elif kind == "table":
+                rows = _table_rows(block)
+                if rows:
+                    lines.append((_table_text(rows), []))
+        number = getattr(note, "number", None)
+        marker = getattr(note, "marker_prov", None)
+        anchor = (
+            (int(getattr(marker, "section_idx", 0) or 0), int(getattr(marker, "para_idx", 0) or 0))
+            if marker is not None
+            else _prov(note)[:2]
+        )
+        result.append(
+            (
+                anchor,
+                (str(number) if number is not None else "", [_splice_formulas(text, formulas) for text, formulas in lines]),
+            )
+        )
+    return result
 
 
 def _looks_like_choices(text: str) -> bool:
@@ -717,6 +766,62 @@ def _problems_from_trailing_source_stream(
     return problems or None
 
 
+def _problems_from_answer_endnotes(
+    stream: list[tuple[str, Any]],
+    note_fields: Callable[[list[str]], tuple[str, str]],
+) -> list[dict[str, Any]] | None:
+    """Split questions at answer endnotes (numbered 1..N, >=80% with answers).
+
+    Exam files from education offices draw each question number with the
+    endnote mark and keep the answer/explanation in the note, so the body has
+    no number text to chunk on. Mirrors the HWPX endnote split in importers.
+    """
+    positions = [index for index, (kind, _) in enumerate(stream) if kind == "endnote"]
+    if len(positions) < 2:
+        return None
+    notes = [stream[index][1] for index in positions]
+    if [number for number, _ in notes] != [str(index) for index in range(1, len(notes) + 1)]:
+        return None
+    fields = [note_fields(lines) for _, lines in notes]
+    if sum(bool(answer) for answer, _ in fields) < len(fields) * 0.8:
+        return None
+    problems: list[dict[str, Any]] = []
+    for order, start in enumerate(positions):
+        end = positions[order + 1] if order + 1 < len(positions) else len(stream)
+        segment = stream[start + 1 : end]
+        if order == 0:
+            segment = stream[:start] + segment
+        texts: list[str] = []
+        images: list[str] = []
+        tables: list[list[list[str]]] = []
+        for kind, value in segment:
+            if kind == "text" and str(value).strip():
+                if _looks_like_answer_section_text(str(value)):
+                    break
+                texts.append(str(value))
+            elif kind == "image":
+                images.append(value)
+            elif kind == "table":
+                if _looks_like_answer_section_table(value):
+                    break
+                tables.append(value)
+        if not texts and not images and not tables:
+            return None
+        answer, explanation = fields[order]
+        problems.append(
+            {
+                "number": notes[order][0],
+                "stem": "\n".join(texts).strip(),
+                "choices": [],
+                "image_paths": images,
+                "tables": tables,
+                "answer": answer,
+                "explanation": explanation,
+            }
+        )
+    return problems
+
+
 def hwp_to_problems(
     payload: bytes,
     filename: str,
@@ -724,6 +829,8 @@ def hwp_to_problems(
     split_choices: Callable[[str], tuple[str, list[str]]],
     chunk_paragraphs: Callable[[list[ParaBlock]], list[dict[str, Any]]] | None = None,
     split_stem_choices: Callable[[str], tuple[str, list[str]]] | None = None,
+    endnotes_out: list[tuple[str, list[str]]] | None = None,
+    note_fields: Callable[[list[str]], tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]] | None:
     """원본 HWP → 편집형 문항 dict 리스트. 실패 시 None(→ 레거시).
 
@@ -736,6 +843,12 @@ def hwp_to_problems(
     stream = _ordered_stream(payload, filename, save_image)
     if not stream:
         return None
+    # Endnotes (answer/explanation in exam files) are not body content.
+    notes = [value for kind, value in stream if kind == "endnote"]
+    noted_stream = stream
+    stream = [(kind, value) for kind, value in stream if kind != "endnote"]
+    if endnotes_out is not None:
+        endnotes_out.extend(notes)
 
     has_trailing_source_markers = any(
         kind == "text" and _trailing_source_match(str(val).strip())
@@ -752,6 +865,10 @@ def hwp_to_problems(
             return trailing
 
     has_markers = any(kind == "text" and _MARKER_RE.match(str(val).strip()) for kind, val in stream)
+    if not has_markers and note_fields is not None:
+        noted = _problems_from_answer_endnotes(noted_stream, note_fields)
+        if noted:
+            return noted
     if not has_markers and chunk_paragraphs is not None:
         # 국어/영어 등 트레일러 마커가 없는 포맷 → (text,images,tables) 문단으로 기존 청킹.
         blocks: list[ParaBlock] = []

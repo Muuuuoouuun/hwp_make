@@ -2954,6 +2954,12 @@ def _hwpx_endnote_fields(note: Any) -> tuple[str, str]:
         line = "".join(parts).strip()
         if line:
             lines.append(line)
+    return answer_note_fields(lines)
+
+
+def answer_note_fields(lines: list[str]) -> tuple[str, str]:
+    """Answer/explanation from an exam endnote's text lines (HWPX and HWP IR)."""
+    lines = [line.strip() for line in lines if line and line.strip()]
     answer = ""
     explanation: list[str] = []
     labelled = any(line.startswith("[답]") for line in lines)
@@ -3350,6 +3356,23 @@ def _looks_like_answer_section(text: str) -> bool:
     return bool(_ANSWER_SECTION_RE.match(t)) or t.count("[정답]") >= 3
 
 
+def _numbered_answer_notes(endnotes: list[tuple[str, list[str]]]) -> dict[str, tuple[str, str]]:
+    """Endnote number → (answer, explanation) for a complete exam answer sequence.
+
+    Same evidence bar as the HWPX path: notes numbered 1..N without gaps and
+    at least 80% carrying an answer. Anything weaker is not treated as an
+    answer key, so ordinary footnote-style endnotes are left alone.
+    """
+    if len(endnotes) < 2:
+        return {}
+    if [number for number, _ in endnotes] != [str(index) for index in range(1, len(endnotes) + 1)]:
+        return {}
+    fields = {number: answer_note_fields(lines) for number, lines in endnotes}
+    if sum(bool(answer) for answer, _ in fields.values()) < len(fields) * 0.8:
+        return {}
+    return fields
+
+
 def _import_hwp_via_ir(
     filename: str, payload: bytes, metadata: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -3358,6 +3381,7 @@ def _import_hwp_via_ir(
         from .importers_hwp_ir import hwp_to_problems
     except Exception:
         return None
+    endnotes: list[tuple[str, list[str]]] = []
     try:
         problems = hwp_to_problems(
             payload,
@@ -3366,13 +3390,17 @@ def _import_hwp_via_ir(
             _split_inline_circled_choices,
             chunk_paragraphs=_paragraphs_to_chunks,
             split_stem_choices=_split_stem_and_choices,
+            endnotes_out=endnotes,
+            note_fields=answer_note_fields,
         )
     except Exception:
         return None
+    note_answers = _numbered_answer_notes(endnotes)
     if not problems:
         return None
     stem_name = Path(filename).stem
     sink = _Sink()
+    answered_from_notes = 0
     answer_section = False
     trailing_source_count = 0
     intent_count = 0
@@ -3433,6 +3461,9 @@ def _import_hwp_via_ir(
             trailing_source_count += 1
         if prob.get("intent"):
             intent_count += 1
+        answer, explanation = note_answers.pop(num, ("", "")) if num else ("", "")
+        answer = str(prob.get("answer") or answer)
+        explanation = str(prob.get("explanation") or explanation)
         problem_layout = dict(prob.get("layout") or {})
         if source_metadata:
             problem_layout["source_metadata"] = source_metadata
@@ -3451,12 +3482,18 @@ def _import_hwp_via_ir(
                 "unit": prob.get("unit") or metadata.get("unit", ""),
                 "stem": stem_text,
                 "choices": choices,
+                "answer": answer,
+                "explanation": explanation,
                 "image_paths": prob.get("image_paths", []),
                 "tables": prob.get("tables", []),
                 "layout": problem_layout or None,
             }
         )
+        if answer or explanation:
+            answered_from_notes += 1
     notices = [f"{len(sink.created)}개 문항을 HWP에서 편집 가능하게 가져왔습니다(수식·이미지 포함)."]
+    if answered_from_notes:
+        notices.append(f"미주 {answered_from_notes}개의 정답·풀이를 문항에 연결했습니다.")
     if trailing_source_count:
         notices.append(
             f"후행 출처 마커 {trailing_source_count}개와 출제의도 {intent_count}개를 문항 메타데이터로 보존했습니다."
