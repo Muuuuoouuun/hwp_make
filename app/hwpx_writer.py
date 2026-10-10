@@ -982,12 +982,36 @@ def _hancom_eqn_script_body(source: str) -> str | None:
         _LATEX_SOURCE_CONTEXT.reset(token)
 
 
+# Text-layer math often carries the accent as a combining mark after its
+# base: ``AB⃗`` (segment vector), ``a⃗``, ``AB̅``.  An uppercase run is one
+# point name (vector AB), a lowercase/Greek base is a single letter.
+_COMBINING_ACCENT_RE = re.compile(r"(?P<base>(?:[A-Z]['′]?){1,3}|[a-zα-ωΑ-Ω])(?P<mark>[\u20d7\u0305])")
+
+
+def _combining_accents_to_latex(expr: str) -> str:
+    return _COMBINING_ACCENT_RE.sub(
+        lambda match: ("\\vec{" if match.group("mark") == "\u20d7" else "\\overline{") + match.group("base") + "}",
+        expr,
+    )
+
+
+def _combining_accents_to_hancom(expr: str) -> str:
+    return _COMBINING_ACCENT_RE.sub(
+        lambda match: ("vec {" if match.group("mark") == "\u20d7" else "bar {") + match.group("base") + "}",
+        expr,
+    )
+
+
 def _hancom_eqn_script_impl(source: str) -> str | None:
     expr = normalize_math_token(strip_math_delimiters(source)).strip()
     if not expr:
         return None
     if _is_hancom_eqn_script(expr):
-        return _normalize_hancom_eqn_script(expr)
+        return _normalize_hancom_eqn_script(_combining_accents_to_hancom(expr))
+    if "\u20d7" in expr or "\u0305" in expr:
+        accented = _combining_accents_to_latex(expr)
+        if accented != expr:
+            return _hancom_eqn_script(accented)
     infix = _split_infix_over(expr)
     if infix is not None:
         numerator = _hancom_eqn_script_body(infix[0]) if infix[0].strip() else ""
