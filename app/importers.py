@@ -3022,6 +3022,10 @@ def _hwpx_inline_items(
             return
         if name in skip or name == "hiddenComment":
             return
+        if name in {"tab", "lineBreak"} and not pictures_only:
+            # Writers such as python-hwpx put these directly under hp:run.
+            text_item("\t" if name == "tab" else "\n")
+            return
         if name in images_only:
             pictures_only = True
         if name == "img":

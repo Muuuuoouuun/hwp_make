@@ -162,9 +162,10 @@ def main() -> int:
         + '<hp:ctrl><hp:fieldEnd beginIDRef="12"/></hp:ctrl>'
     )
     tracked = '<hp:t>남은글<hp:deleteBegin Id="1"/>지운글<hp:deleteEnd Id="1"/> 이어짐</hp:t>'
+    run_level_tab = "<hp:t>앞칸</hp:t><hp:tab/><hp:t>뒤칸</hp:t>"
     body = para(
         "<hp:t>1. 다음 값은?<hp:tab/>단위 cm<hp:lineBreak/>둘째 줄<hp:nbSpace/>끝</hp:t>"
-        + switch + hidden + guide + filled + tracked
+        + switch + hidden + guide + filled + tracked + run_level_tab
     )
     problems = imported("inline.hwpx", make_hwpx({"Contents/section0.xml": section(body)}))
     stem = "\n".join(problem["stem"] for problem in problems)
@@ -174,6 +175,7 @@ def main() -> int:
     check("숨은 설명 제외", "출제자 메모" not in stem)
     check("입력 전 누름틀 안내문 제외", "이름을 입력하세요" not in stem)
     check("입력한 누름틀 값 유지", "한빛고" in stem)
+    check("run 바로 아래 탭", "앞칸\t뒤칸" in stem, repr(stem))
     check("변경 추적 삭제 글자 제외", "지운글" not in stem and "남은글 이어짐" in stem, repr(stem))
 
     # 2. 문N） endnotes: answer is the first text after the autoNum mark.
