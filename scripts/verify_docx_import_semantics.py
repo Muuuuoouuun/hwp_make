@@ -103,6 +103,11 @@ def sample() -> bytes:
         "<w:tr>" + cell("", "<w:vMerge/>") + cell("라") + cell("마") + "</w:tr></w:tbl>"
     )
     add(numbered(0, run("일곱째부터 시작하는 문항"), num_id=2))
+    add(
+        f'<w:p {NS}><w:r><w:object><v:shape id="eq1"/>'
+        '<o:OLEObject xmlns:o="urn:schemas-microsoft-com:office:office" Type="Embed" ProgID="Equation.DSMT4" ShapeID="eq1"/>'
+        "</w:object></w:r></w:p>"
+    )
     document.part.numbering_part._element = parse_xml(NUMBERING)
     buffer = io.BytesIO()
     document.save(buffer)
@@ -111,6 +116,7 @@ def sample() -> bytes:
 
 def main() -> int:
     result = importers.import_docx("sample.docx", sample(), {})
+    check("MathType 수식 누락 안내", any("MathType" in notice and "1개" in notice for notice in result.get("notices", [])), str(result.get("notices")))
     problems = [storage.get_problem(problem_id) for problem_id in result.get("ordered_ids", [])]
     first = problems[0] if problems else {"stem": "", "choices": []}
     check("자동 번호로 3문항", [p["number"] for p in problems] == ["1", "2", "7"], str([p["number"] for p in problems]))

@@ -2833,6 +2833,12 @@ def import_docx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
     blocks: list[tuple[str, list[str], list[list[list[str]]]]] = []
     image_count = 0
     numbering = _DocxNumbering(document)
+    # MathType 등 OLE 개체 수식(w:object)은 글자로 읽을 수 없다. 조용히 빠지지 않게 개수를 알린다.
+    ole_equations = sum(
+        1
+        for node in document.element.body.iter(qn("w:object"))
+        if any("Equation" in (child.get("ProgID") or "") for child in node.iter() if _local_name(child) == "OLEObject")
+    )
     # 문단과 표를 문서 순서대로 훑어 표를 해당 문항에 정확히 붙인다.
     for child in document.element.body.iterchildren():
         if child.tag == qn("w:p"):
@@ -2872,6 +2878,11 @@ def import_docx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
     sink = _create_from_chunks(chunks, "docx", filename, metadata)
     if image_count:
         notices.append(f"이미지 {image_count}개를 함께 가져왔습니다.")
+    if ole_equations:
+        notices.append(
+            f"MathType 등 개체로 넣은 수식 {ole_equations}개는 글자로 읽을 수 없어 빠졌습니다. "
+            "Word에서 수식을 Office 수식으로 변환한 뒤 다시 올려 주세요."
+        )
     notices.extend(_dedup_notices(sink))
     return {"created": sink.created, "existing": sink.existing, "ordered_ids": sink.ordered_ids, "notices": notices}
 
@@ -2993,9 +3004,22 @@ def _hwpx_inline_items(
       pictures are kept.
     """
     items: list[tuple[str, Any]] = []
+    # Track-changes deletions (deleteBegin … deleteEnd) are not in the final text.
+    deleted_depth = 0
+
+    def text_item(value: str | None) -> None:
+        if value and deleted_depth == 0:
+            items.append(("text", value))
 
     def walk(element: Any, pictures_only: bool) -> None:
+        nonlocal deleted_depth
         name = _local_name(element)
+        if name == "deleteBegin":
+            deleted_depth += 1
+            return
+        if name == "deleteEnd":
+            deleted_depth = max(0, deleted_depth - 1)
+            return
         if name in skip or name == "hiddenComment":
             return
         if name in images_only:
@@ -3008,21 +3032,24 @@ def _hwpx_inline_items(
                 walk(child, True)
             return
         if name == "equation":
-            items.append(("equation", element))
+            if deleted_depth == 0:
+                items.append(("equation", element))
             return
         if name == "t":
-            if element.text:
-                items.append(("text", element.text))
+            text_item(element.text)
             for child in element:
                 child_name = _local_name(child)
-                if child_name == "tab":
-                    items.append(("text", "\t"))
+                if child_name == "deleteBegin":
+                    deleted_depth += 1
+                elif child_name == "deleteEnd":
+                    deleted_depth = max(0, deleted_depth - 1)
+                elif child_name == "tab":
+                    text_item("\t")
                 elif child_name == "lineBreak":
-                    items.append(("text", "\n"))
+                    text_item("\n")
                 elif child_name in _HWPX_SPACE_ELEMENTS:
-                    items.append(("text", " "))
-                if child.tail:
-                    items.append(("text", child.tail))
+                    text_item(" ")
+                text_item(child.tail)
             return
         if name == "fieldBegin":
             guide = _hwpx_click_here_guide(element)
