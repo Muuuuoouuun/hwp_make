@@ -533,7 +533,8 @@ function syncPaperPreviewMeta() {
 }
 
 function syncExportOptions({ resetNativeMath = false } = {}) {
-  const isHwpx = els.exportFormat.value === "hwpx";
+  // HWP is written as the same HWPX and converted, so it keeps native equations.
+  const isHwpx = ["hwpx", "hwp"].includes(els.exportFormat.value);
   const template = currentExportTemplate();
   if (els.exportNativeMath) {
     els.exportNativeMath.disabled = !isHwpx;
@@ -2978,7 +2979,7 @@ async function exportSelected(idsOverride = null, overrides = null, { signal = n
   const templateKey = overrides?.templateKey ?? (els.exportTemplate.value || "basic");
   const includeAnswerSheet = overrides?.includeAnswerSheet ?? els.exportAnswerSheet.checked;
   const nativeMath =
-    exportFormat === "hwpx" && Boolean(overrides?.nativeMath ?? els.exportNativeMath?.checked);
+    ["hwpx", "hwp"].includes(exportFormat) && Boolean(overrides?.nativeMath ?? els.exportNativeMath?.checked);
   const format = String(exportFormat || "hwpx").toUpperCase();
   state.conversionBusy = true;
   setButtonBusy(els.exportButton, true, `${format} 변환 중...`);
@@ -3183,7 +3184,9 @@ async function previewExport() {
   setWorkflowStep(3);
   if (mobileWorkspaceActive()) setMobilePane("preview", { focus: true });
   const selectedFormat = String(els.exportFormat.value || "hwpx").toLowerCase();
-  const previewBasis = selectedFormat === "docx" ? "DOCX 내보내기 전 HWPX 기준 레이아웃" : "HWPX 렌더";
+  const previewBasis = selectedFormat === "docx"
+    ? "DOCX 내보내기 전 HWPX 기준 레이아웃"
+    : selectedFormat === "hwp" ? "HWP 변환 전 HWPX 렌더" : "HWPX 렌더";
   state.conversionBusy = true;
   setButtonBusy(els.previewButton, true, "페이지 생성 중...");
   setConversionStatus(`${previewBasis} 페이지를 생성하고 있습니다.`, "working");
@@ -4095,7 +4098,7 @@ function renderSimpleHistory() {
   }
   // 간단 화면은 변환 산출물만 보여준다. run 폴더의 원본 PDF 사본 등은 제외.
   const items = (state.exports || [])
-    .filter((item) => ["hwpx", "docx"].includes(String(item.format || "").toLowerCase()))
+    .filter((item) => ["hwpx", "hwp", "docx"].includes(String(item.format || "").toLowerCase()))
     .slice(0, 5);
   if (!items.length) {
     appendEmpty("아직 변환한 파일이 없습니다.");
@@ -4727,6 +4730,17 @@ async function enterPremiumEditor({ resume = false } = {}) {
   }
 }
 
+// The HWP option appears only when the server has the rhwp converter.
+async function loadHwpExportOption() {
+  const health = await api("/api/health");
+  if (!health?.hwp_export_available || !els.exportFormat) return;
+  if (els.exportFormat.querySelector('option[value="hwp"]')) return;
+  const option = document.createElement("option");
+  option.value = "hwp";
+  option.textContent = "HWP";
+  els.exportFormat.append(option);
+}
+
 async function initializePremiumEditor() {
   restoreNumbering();
   restoreWorkspaceLayout();
@@ -4735,6 +4749,7 @@ async function initializePremiumEditor() {
   setSideMode(state.sideMode);
   const [templatesResult, problemsResult] = await Promise.allSettled([
     loadExportTemplates(),
+    loadHwpExportOption(),
     loadProblems(),
     loadExportHistory({ throwOnError: true }),
     loadAIStatus(),

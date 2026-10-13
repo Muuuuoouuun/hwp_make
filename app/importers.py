@@ -3503,9 +3503,40 @@ def _import_hwp_via_ir(
 
 
 def import_hwp(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
+    save_upload(filename, payload)
+    # 배포용(읽기 전용) HWP는 본문이 암호화돼 있다. rhwp 명령줄 도구가 있으면 편집 가능한
+    # HWP로 먼저 풀어 평소 경로로 가져온다(없으면 아래 경로가 미리보기만 읽고 안내한다).
+    unlocked_notice: str | None = None
+    if _hwp_header_flags(payload) & 0x4:
+        from . import rhwp_cli
+
+        unlocked = rhwp_cli.unlock_distribution_hwp(payload)
+        if unlocked:
+            payload = unlocked
+            unlocked_notice = "배포용(읽기 전용) HWP를 편집 가능한 HWP로 풀어 가져왔습니다."
+    result = _import_hwp_payload(filename, payload, metadata)
+    if unlocked_notice:
+        result.setdefault("notices", []).insert(0, unlocked_notice)
+    return result
+
+
+def _hwp_header_flags(payload: bytes) -> int:
+    """HWP 5.0 FileHeader property bits (0x2 password, 0x4 distribution), 0 if unreadable."""
     import olefile
 
-    save_upload(filename, payload)
+    try:
+        with olefile.OleFileIO(io.BytesIO(payload)) as ole:
+            if not ole.exists("FileHeader"):
+                return 0
+            header = ole.openstream("FileHeader").read()
+    except Exception:
+        return 0
+    return struct.unpack_from("<I", header, 36)[0] if len(header) >= 40 else 0
+
+
+def _import_hwp_payload(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
+    import olefile
+
     # 1순위: rhwp to_ir() — 편집 가능한 [텍스트+수식(EQN)+이미지] 직접 추출. 수식은 $EQN$ 로
     #   stem 에 인라인 삽입돼 writer 의 native_math 가 hp:equation 으로 방출한다.
     #   실패/미설치면 아래 기존 경로(rhwp.paragraphs → OLE 레코드 → PrvText)로 폴백.

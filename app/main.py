@@ -27,6 +27,7 @@ from . import (
     ai_api,
     collector,
     docx_writer,
+    rhwp_cli,
     exam_numbering,
     exam_templates,
     hwpx_writer_v2,
@@ -168,7 +169,8 @@ class AttachImagePayload(BaseModel):
 class ExportPayload(BaseModel):
     ids: list[int] = Field(min_length=1, max_length=MAX_EXPORT_PROBLEMS)
     title: str = Field(default=exam_templates.DEFAULT_EXPORT_TITLE, max_length=300)
-    format: Literal["hwpx", "docx"] = "hwpx"
+    # hwp is written as HWPX and converted by the optional rhwp CLI (app/rhwp_cli.py).
+    format: Literal["hwpx", "docx", "hwp"] = "hwpx"
     template_key: str = "basic"
     include_answer_sheet: bool = False
     # None이면 양식 기본값(simple 양식은 정답이 있으면 끝에 정답표를 붙인다).
@@ -292,7 +294,7 @@ def _export_problems(payload: ExportPayload, request: Request | None = None) -> 
 
 
 def _effective_native_math(payload: ExportPayload, template: exam_templates.ExamTemplate) -> bool:
-    if payload.format != "hwpx":
+    if payload.format not in {"hwpx", "hwp"}:
         return False
     if payload.native_math is not None:
         return bool(payload.native_math)
@@ -827,7 +829,12 @@ def premium_capabilities() -> dict[str, Any]:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    return {"ok": True, "data_dir": str(storage.DATA_DIR), "preview_available": preview.available()}
+    return {
+        "ok": True,
+        "data_dir": str(storage.DATA_DIR),
+        "preview_available": preview.available(),
+        "hwp_export_available": rhwp_cli.available(),
+    }
 
 
 @app.get("/api/export-templates")
@@ -1337,11 +1344,14 @@ def preview_export(payload: ExportPayload, request: Request = None) -> dict[str,
 @app.post("/api/export")
 def export(payload: ExportPayload, request: Request = None) -> FileResponse:
     template = _get_template_or_400(payload.template_key)
+    if payload.format == "hwp" and not rhwp_cli.available():
+        raise HTTPException(status_code=503, detail=user_errors.detail("hwp_unavailable"))
     problems = _export_problems(payload, request)
     storage.ensure_dirs()
     title = exam_templates.resolve_export_title(payload.title, template)
     native_math = _effective_native_math(payload, template)
     path: Path | None = None
+    hwpx_stage: Path | None = None
     try:
         # 이름 선정부터 writer 완료까지 직렬화해 같은 초의 동시 변환이 서로의
         # 산출물을 덮어쓰지 않게 한다. 로컬 문서 변환은 원래 CPU-bound라 이 제한이
@@ -1358,8 +1368,11 @@ def export(payload: ExportPayload, request: Request = None) -> FileResponse:
             else:
                 # v2(vendored python-hwpx) 만 실제 한컴에서 열린다. v1(hwpx_writer)은 version.xml
                 # 등 패키지 스켈레톤이 비표준이라 한컴이 "파일 손상"으로 거부한다(실제 뷰어 확인).
+                # HWP는 같은 HWPX를 만든 뒤 rhwp가 HWP 5.0으로 바꾸고, 다시 읽어 IR·쪽 수를 대조한다.
+                hwpx_target = path.with_suffix(".stage.hwpx") if payload.format == "hwp" else path
+                hwpx_stage = hwpx_target if payload.format == "hwp" else None
                 hwpx_writer_v2.write_hwpx(
-                    path,
+                    hwpx_target,
                     title,
                     problems,
                     template.key,
@@ -1368,6 +1381,15 @@ def export(payload: ExportPayload, request: Request = None) -> FileResponse:
                     answer_key_appendix=payload.answer_key_appendix,
                 )
                 media_type = "application/hwp+zip"
+                if payload.format == "hwp":
+                    try:
+                        rhwp_cli.hwpx_to_hwp(hwpx_target, path)
+                    except rhwp_cli.RhwpCliError as exc:
+                        user_errors.log_failure("export_hwp", exc)
+                        raise HTTPException(
+                            status_code=500, detail=user_errors.detail("hwp_convert_failed")
+                        ) from exc
+                    media_type = "application/x-hwp"
     except HTTPException:
         if path is not None:
             path.unlink(missing_ok=True)
@@ -1377,4 +1399,7 @@ def export(payload: ExportPayload, request: Request = None) -> FileResponse:
             path.unlink(missing_ok=True)
         user_errors.log_failure("export", exc)
         raise HTTPException(status_code=500, detail=user_errors.detail("export_failed")) from exc
+    finally:
+        if hwpx_stage is not None:
+            hwpx_stage.unlink(missing_ok=True)
     return FileResponse(path, media_type=media_type, filename=filename)

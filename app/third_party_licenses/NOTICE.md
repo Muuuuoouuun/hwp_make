@@ -18,3 +18,16 @@
   `hulkReplaceMethod.py` by way of kordoc's TypeScript port.
 - Modifications: Python rewrite; extra tokens emitted by this app's own
   writer (`choose`, `atop`, `^3sqrt`, lowercase operator words, `rm`/`it`).
+
+## rhwp command line tool (optional, not committed)
+
+- Source: https://github.com/edwardkim/rhwp, MIT License
+- Used by: `app/rhwp_cli.py` for HWP 5.0 export and distribution-HWP unlocking.
+  `scripts/fetch_rhwp_cli.py` downloads the pinned v0.8.7 release into
+  `packaging/rhwp-cli/` (git-ignored) together with its `LICENSE`.
+
+## Filee
+
+- Source: https://github.com/KnifeLemon/Filee (v1.10.2), MIT License
+- Referenced (no code copied): its use of `rhwp convert` for HWPX → HWP and the
+  pinned rhwp v0.8.7 release hashes.
