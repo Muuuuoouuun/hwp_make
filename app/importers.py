@@ -2289,24 +2289,162 @@ def _omml_text(element: Any) -> str:
     return "".join(_omml_text(child) for child in element)
 
 
-def _docx_paragraph_text(para: Any) -> str:
-    parts: list[str] = []
-    for child in para._p.iterchildren():
+# Containers whose runs are visible text (rules from Filee's DocxReader, MIT).
+_DOCX_TRANSPARENT = {"hyperlink", "sdt", "sdtContent", "ins", "smartTag", "fldSimple", "customXml", "moveTo", "dir", "bdo"}
+# Deleted/moved-away text and field instructions are never shown.
+_DOCX_SKIPPED = {"del", "moveFrom", "instrText", "delText", "pPr", "rPr", "sdtPr", "sdtEndPr", "proofErr", "bookmarkStart", "bookmarkEnd"}
+
+
+def _docx_run_hidden(run: Any) -> bool:
+    for child in run:
+        if _local_name(child) != "rPr":
+            continue
+        for prop in child:
+            if _local_name(prop) in {"vanish", "specVanish"}:
+                value = prop.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val", "true")
+                return value not in {"0", "false", "off"}
+    return False
+
+
+def _docx_inline_text(element: Any, parts: list[str]) -> None:
+    """Append the visible text of paragraph content in document order.
+
+    Keeps tabs and line breaks, reads hyperlinks/content controls/insertions,
+    drops hidden and deleted text, and reads one branch of
+    ``mc:AlternateContent`` so a text box is not imported twice.
+    """
+    for child in element:
         name = _local_name(child)
+        if name in _DOCX_SKIPPED:
+            continue
         if name in {"oMath", "oMathPara"}:
             math = _omml_text(child).strip()
             if math:
                 parts.append(f"${math}$")
-            continue
-        if name == "r":
-            run_text = "".join(
-                node.text or ""
-                for node in child.iter()
-                if _local_name(node) == "t" and node.text
-            )
-            if run_text:
-                parts.append(run_text)
-    return "".join(parts).strip()
+        elif name == "r":
+            if not _docx_run_hidden(child):
+                _docx_inline_text(child, parts)
+        elif name == "t":
+            parts.append(child.text or "")
+        elif name in {"tab", "ptab"}:
+            parts.append("\t")
+        elif name in {"br", "cr"}:
+            parts.append("\n")
+        elif name == "noBreakHyphen":
+            parts.append("-")
+        elif name == "AlternateContent":
+            branches = list(child)
+            branch = next((b for b in branches if _local_name(b) == "Choice"), None)
+            if branch is None:
+                branch = next((b for b in branches if _local_name(b) == "Fallback"), None)
+            if branch is not None:
+                _docx_inline_text(branch, parts)
+        elif name == "p":
+            # Paragraphs inside a text box: keep them on their own lines.
+            parts.append("\n")
+            _docx_inline_text(child, parts)
+        else:
+            _docx_inline_text(child, parts)
+
+
+def _docx_paragraph_text(para: Any) -> str:
+    parts: list[str] = []
+    _docx_inline_text(para._p, parts)
+    text = "".join(parts)
+    text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
+    return re.sub(r"\n{2,}", "\n", text).strip()
+
+
+_DOCX_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+class _DocxNumbering:
+    """Word automatic numbering (``w:numPr``) as visible text.
+
+    Question numbers and ①–⑤ made with Word's list numbering are not in the
+    runs, so such exams imported as a single question. Counters follow Word:
+    one per level of each list, deeper levels restart when a level advances,
+    ``lvlOverride/startOverride`` restarts a level.
+    """
+
+    def __init__(self, document: Any) -> None:
+        self.levels: dict[str, dict[int, tuple[str, str, int]]] = {}
+        self.counters: dict[str, list[int]] = {}
+        try:
+            root = document.part.numbering_part.element
+        except Exception:
+            return
+        abstract: dict[str, dict[int, tuple[str, str, int]]] = {}
+        for node in root:
+            if _local_name(node) == "abstractNum":
+                abstract[node.get(f"{_DOCX_W}abstractNumId", "")] = self._levels(node)
+        for node in root:
+            if _local_name(node) != "num":
+                continue
+            ref = next((c for c in node if _local_name(c) == "abstractNumId"), None)
+            levels = dict(abstract.get(ref.get(f"{_DOCX_W}val", "") if ref is not None else "", {}))
+            for override in node:
+                if _local_name(override) != "lvlOverride":
+                    continue
+                level = int(override.get(f"{_DOCX_W}ilvl", "0") or 0)
+                replacement = self._levels(override).get(level)
+                if replacement:
+                    levels[level] = replacement
+                start = next((c for c in override if _local_name(c) == "startOverride"), None)
+                if start is not None and level in levels:
+                    fmt, text, _ = levels[level]
+                    levels[level] = (fmt, text, int(start.get(f"{_DOCX_W}val", "1") or 1))
+            self.levels[node.get(f"{_DOCX_W}numId", "")] = levels
+
+    @staticmethod
+    def _levels(node: Any) -> dict[int, tuple[str, str, int]]:
+        levels: dict[int, tuple[str, str, int]] = {}
+        for lvl in node.iter(f"{_DOCX_W}lvl"):
+            values = {_local_name(c): c.get(f"{_DOCX_W}val", "") for c in lvl}
+            try:
+                levels[int(lvl.get(f"{_DOCX_W}ilvl", "0"))] = (
+                    values.get("numFmt", "decimal"),
+                    values.get("lvlText", ""),
+                    int(values.get("start", "1") or 1),
+                )
+            except ValueError:
+                continue
+        return levels
+
+    _FORMATS = {
+        "decimal": "DIGIT", "decimalEnclosedCircle": "CIRCLED_DIGIT", "decimalEnclosedCircleChinese": "CIRCLED_DIGIT",
+        "ganada": "HANGUL_SYLLABLE", "chosung": "HANGUL_JAMO", "upperLetter": "LATIN_CAPITAL",
+        "lowerLetter": "LATIN_SMALL", "upperRoman": "ROMAN_CAPITAL", "lowerRoman": "ROMAN_SMALL",
+    }
+
+    def prefix(self, paragraph: Any) -> str:
+        num_pr = None
+        for prop in paragraph:
+            if _local_name(prop) == "pPr":
+                num_pr = next((c for c in prop if _local_name(c) == "numPr"), None)
+                break
+        if num_pr is None:
+            return ""
+        values = {_local_name(c): c.get(f"{_DOCX_W}val", "") for c in num_pr}
+        num_id, level = values.get("numId", ""), int(values.get("ilvl", "0") or 0)
+        levels = self.levels.get(num_id)
+        if not levels or num_id == "0" or level not in levels:
+            return ""
+        fmt, template, start = levels[level]
+        if fmt in {"bullet", "none"}:
+            return ""
+        counters = self.counters.setdefault(num_id, [-1] * 10)
+        counters[level] = start if counters[level] < 0 else counters[level] + 1
+        for deeper in range(level + 1, len(counters)):
+            counters[deeper] = -1
+
+        def expand(match: re.Match[str]) -> str:
+            ref = int(match.group(1)) - 1
+            ref_fmt, _, ref_start = levels.get(ref, ("decimal", "", 1))
+            value = counters[ref] if 0 <= ref < len(counters) and counters[ref] >= 0 else ref_start
+            return _format_head_number(value, self._FORMATS.get(ref_fmt, "DIGIT"))
+
+        return re.sub(r"%([1-9])", expand, template).strip()
 
 
 def _docx_cell_text(cell: Any) -> str:
@@ -2586,9 +2724,16 @@ def _create_from_chunks(
                 "explanation": explanation,
                 "image_paths": chunk["images"],
                 "tables": chunk.get("tables") or [],
+                "layout": _table_span_layout(chunk.get("tables") or []),
             }
         )
     return sink
+
+
+def _table_span_layout(tables: list[Any]) -> dict[str, Any] | None:
+    """layout.table_spans (aligned with tables) when any table has merged cells."""
+    spans = [list(getattr(table, "spans", None) or []) for table in tables]
+    return {"table_spans": spans} if any(spans) else None
 
 
 VISUAL_CUE_RE = re.compile(r"(그림|그래프|도형|좌표평면|자료|표|곡선|직선|삼각형|사각형|원)")
@@ -2624,6 +2769,51 @@ def _attach_unpositioned_images(chunks: list[dict[str, Any]], images: list[str])
     return f"이미지 {len(images)}개는 HWP 내부 위치를 직접 읽지 못해 문항 순서 기준으로 분산 첨부했습니다."
 
 
+def _docx_table_grid(table: Any) -> list[list[str]]:
+    """Word table → string grid with merged cells recorded as spans.
+
+    ``row.cells`` repeats a merged cell's text in every grid slot; here the
+    text sits in the top-left slot only (gridSpan/vMerge, gridBefore kept as
+    empty slots) and ``.spans`` holds [row, col, row_span, col_span].
+    """
+    from .importers_hwp_ir import TableGrid
+
+    grid: list[list[str | None]] = []
+    origins: dict[tuple[int, int], list[int]] = {}
+    open_vertical: dict[int, tuple[int, int]] = {}
+    for row_index, tr in enumerate(table._tbl.tr_lst):
+        row: list[str | None] = []
+        properties = tr.find(f"{_DOCX_W}trPr")
+        before = properties.find(f"{_DOCX_W}gridBefore") if properties is not None else None
+        if before is not None:
+            row.extend([""] * int(before.get(f"{_DOCX_W}val", "0") or 0))
+        for tc in tr.tc_lst:
+            props = tc.tcPr
+            span = int(props.gridSpan.val) if props is not None and props.gridSpan is not None else 1
+            merge = props.find(f"{_DOCX_W}vMerge") if props is not None else None
+            column = len(row)
+            if merge is not None and merge.get(f"{_DOCX_W}val", "continue") != "restart" and column in open_vertical:
+                origin = open_vertical[column]
+                origins[origin][2] += 1
+                row.extend([""] * span)
+                continue
+            from docx.table import _Cell
+
+            text = _docx_cell_text(_Cell(tc, table))
+            row.append(text)
+            row.extend([""] * (span - 1))
+            origins[(row_index, column)] = [row_index, column, 1, span]
+            if merge is not None:
+                open_vertical[column] = (row_index, column)
+            else:
+                open_vertical.pop(column, None)
+        grid.append(row)
+    width = max((len(row) for row in grid), default=0)
+    rows = [[cell or "" for cell in row] + [""] * (width - len(row)) for row in grid]
+    spans = [span for span in origins.values() if span[2] > 1 or span[3] > 1]
+    return TableGrid(rows, spans)
+
+
 def import_docx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
     from docx import Document as DocxDocument
 
@@ -2642,6 +2832,7 @@ def import_docx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
     embed_attr = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
     blocks: list[tuple[str, list[str], list[list[list[str]]]]] = []
     image_count = 0
+    numbering = _DocxNumbering(document)
     # 문단과 표를 문서 순서대로 훑어 표를 해당 문항에 정확히 붙인다.
     for child in document.element.body.iterchildren():
         if child.tag == qn("w:p"):
@@ -2663,10 +2854,13 @@ def import_docx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
                 if rel_path:
                     images.append(rel_path)
                     image_count += 1
-            blocks.append((_docx_paragraph_text(para), images, []))
+            text = _docx_paragraph_text(para)
+            number_prefix = numbering.prefix(child)
+            if number_prefix and text:
+                text = f"{number_prefix} {text}"
+            blocks.append((text, images, []))
         elif child.tag == qn("w:tbl"):
-            table = Table(child, document)
-            rows = [[_docx_cell_text(cell) for cell in row.cells] for row in table.rows]
+            rows = _docx_table_grid(Table(child, document))
             if any(any(cell for cell in row) for row in rows):
                 blocks.append(("", [], [rows]))
 
@@ -2748,7 +2942,17 @@ def _hwpx_table_rows(tbl: Any) -> list[list[str]]:
                 if grid[r][c] is not None:
                     return sequential
                 grid[r][c] = text if (r, c) == (row, col) else ""
-    return [[cell or "" for cell in row] for row in grid if any(cell is not None for cell in row)]
+    from .importers_hwp_ir import TableGrid
+
+    if any(all(cell is None for cell in row) for row in grid):
+        # Empty grid rows would shift span row indices; keep the plain order.
+        return sequential
+    spans = [
+        [row, col, row_span, col_span]
+        for row, col, row_span, col_span, _ in placed
+        if row_span > 1 or col_span > 1
+    ]
+    return TableGrid([[cell or "" for cell in row] for row in grid], spans)
 
 
 _HWPX_SPACE_ELEMENTS = {"nbSpace", "fwSpace", "hwSpace"}
