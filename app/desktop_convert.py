@@ -31,12 +31,26 @@ def validate_source(source: Path) -> str:
     return kind
 
 
+def hwpx_fallback_destination(destination: Path) -> Path:
+    """Where the checked HWPX goes when HWP was asked for but not produced.
+
+    The extension stays honest, and a file the user did not choose is never
+    overwritten.
+    """
+    candidate = destination.with_suffix(".hwpx")
+    index = 1
+    while candidate.exists():
+        candidate = destination.with_name(f"{destination.stem} ({index}).hwpx")
+        index += 1
+    return candidate
+
+
 def convert(source: Path, destination: Path, job: Path) -> dict:
     source, destination, job = source.resolve(), destination.resolve(), job.resolve()
     kind = validate_source(source)
     fmt = destination.suffix.lower().lstrip(".")
-    if fmt not in {"hwpx", "docx"}:
-        raise ValueError("저장 형식은 HWPX 또는 DOCX여야 합니다.")
+    if fmt not in {"hwp", "hwpx", "docx"}:
+        raise ValueError("저장 형식은 HWP, HWPX 또는 DOCX여야 합니다.")
     if source == destination:
         raise ValueError("원본 파일과 다른 이름으로 저장해 주세요.")
     job.mkdir(parents=True, exist_ok=True)
@@ -49,16 +63,26 @@ def convert(source: Path, destination: Path, job: Path) -> dict:
     from . import main, storage
 
     warnings = ["변환한 문서의 수식·그림·배치를 한글 또는 Word에서 확인해 주세요."]
+    if fmt == "hwp":
+        from . import rhwp_cli
+
+        if not rhwp_cli.available():
+            fmt, destination = "hwpx", hwpx_fallback_destination(destination)
+            warnings.append("HWP 변환 도구(rhwp)를 찾지 못해 HWPX로 저장했습니다. 한글에서 열어 HWP로 저장할 수 있습니다.")
     temporary_output = None
     try:
         encoded = base64.b64encode(source.read_bytes()).decode("ascii")
-        if kind == "pdf" and fmt == "hwpx":
+        if kind == "pdf" and fmt in {"hwpx", "hwp"}:
             result = main.export_pdf_layout(main.PdfLayoutExportPayload(
                 filename=source.name, data_base64=encoded, layout_mode="structured",
-                native_math=True, math_ai_recognition=False, variant_policy="all"))
+                native_math=True, math_ai_recognition=False, variant_policy="all", output_format=fmt))
+            hwp = result.get("hwp")
+            if fmt == "hwp" and hwp is not None and not hwp.get("ok"):
+                # The checked HWPX is the result (its notice says why).
+                fmt, destination = "hwpx", hwpx_fallback_destination(destination)
             output = storage.EXPORT_DIR / result["export"]["name"]
             if not output.is_file():
-                candidates = list((storage.EXPORT_DIR / result["run"]["folder"]).glob("*.hwpx"))
+                candidates = list((storage.EXPORT_DIR / result["run"]["folder"]).glob(f"*.{fmt}"))
                 if len(candidates) != 1:
                     raise ValueError("생성 파일을 확인할 수 없습니다.")
                 output = candidates[0]
@@ -79,25 +103,47 @@ def convert(source: Path, destination: Path, job: Path) -> dict:
             if not ids:
                 raise ValueError("변환할 내용을 찾지 못했습니다. 텍스트가 포함된 파일을 확인해 주세요.")
             # 기본 변환 전용 양식: 원번호·원문자 선지 유지, 정답은 끝 정답표로만.
-            response = main.export(main.ExportPayload(
-                ids=ids, title=source.stem, format=fmt, template_key="simple", native_math=True,
-                workspace="basic", numbering_mode="preserve"))
-            output = Path(response.path)
+            def export_as(output_format: str) -> Path:
+                response = main.export(main.ExportPayload(
+                    ids=ids, title=source.stem, format=output_format, template_key="simple", native_math=True,
+                    workspace="basic", numbering_mode="preserve"))
+                return Path(response.path)
+
+            try:
+                output = export_as(fmt)
+            except main.HTTPException as exc:
+                code = exc.detail.get("code") if isinstance(exc.detail, dict) else None
+                if fmt != "hwp" or code not in {"hwp_convert_failed", "hwp_unavailable"}:
+                    raise
+                fmt, destination = "hwpx", hwpx_fallback_destination(destination)
+                warnings.append(exc.detail.get("message", "") + " HWPX로 저장했습니다.")
+                output = export_as(fmt)
             count, pages = len(ids), None
             review = None
             warnings.extend(imported.get("notices", []))
             warnings.append("문항 내용과 원번호를 기준으로 다시 구성한 문서입니다. 원본 페이지 배치와 다를 수 있습니다.")
-        with zipfile.ZipFile(output) as package:
-            expected = "Contents/content.hpf" if fmt == "hwpx" else "word/document.xml"
-            if package.testzip() is not None or expected not in package.namelist():
+        if fmt == "hwp":
+            import olefile
+
+            if not olefile.isOleFile(str(output)):
                 raise ValueError("생성 문서 패키지 검사에 실패했습니다.")
+            with olefile.OleFileIO(str(output)) as package:
+                if (not package.exists("FileHeader")
+                        or not package.openstream("FileHeader").read(17) == b"HWP Document File"
+                        or not package.exists("BodyText/Section0")):
+                    raise ValueError("생성 문서 패키지 검사에 실패했습니다.")
+        else:
+            with zipfile.ZipFile(output) as package:
+                expected = "Contents/content.hpf" if fmt == "hwpx" else "word/document.xml"
+                if package.testzip() is not None or expected not in package.namelist():
+                    raise ValueError("생성 문서 패키지 검사에 실패했습니다.")
         destination.parent.mkdir(parents=True, exist_ok=True)
         fd, name = tempfile.mkstemp(prefix=".hwpmake-", suffix=".tmp", dir=destination.parent)
         os.close(fd)
         temporary_output = Path(name)
         shutil.copyfile(output, temporary_output)
         os.replace(temporary_output, destination)
-        return {"ok": True, "output": str(destination), "source": str(source),
+        return {"ok": True, "output": str(destination), "source": str(source), "format": fmt,
                 "pages": pages, "problems": count,
                 "review": ({"ok": bool(review.get("ok", True)), "flag_count": int(review.get("flag_count") or 0),
                             "questions": [q.get("label") for q in review.get("flagged_questions") or []]}

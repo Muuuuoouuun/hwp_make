@@ -22,6 +22,9 @@ function isPremiumWorkspace() {
 
 const state = {
   workspaceStage: "input",
+  // 서버에 rhwp 변환 도구가 있으면 간단 변환·스튜디오의 기본 결과는 한글(HWP) 파일이다.
+  hwpExportAvailable: false,
+  exportFormatTouched: false,
   session: { authenticated: false, user: null, setup_required: false },
   sessionBusy: false,
   sessionRequestId: 0,
@@ -546,7 +549,8 @@ function syncExportOptions({ resetNativeMath = false } = {}) {
     els.nativeMathLabel.classList.toggle("disabled", !isHwpx);
   }
   if (els.exportButton) {
-    if (!state.conversionBusy) els.exportButton.textContent = `${isHwpx ? "HWPX" : "DOCX"} 만들기`;
+    const formatLabel = { hwp: "HWP", hwpx: "HWPX", docx: "DOCX" }[els.exportFormat.value] || "HWPX";
+    if (!state.conversionBusy) els.exportButton.textContent = `${formatLabel} 만들기`;
   }
   if (els.previewButton && !state.conversionBusy) {
     els.previewButton.textContent = isHwpx ? "HWPX 렌더 보기" : "HWPX 기준 보기";
@@ -2759,11 +2763,13 @@ async function exportPdfLayoutFiles({ layoutMode = "coordinate", mathAi = null, 
   // coordinate는 호환용 요청 이름이며 서버에서 structured와 같은 편집형 경로를 사용한다.
   const useMathAi = mathAi === null ? Boolean(els.layoutMathAi?.checked) : Boolean(mathAi);
 
-  setButtonBusy(els.layoutExportButton, true, "편집형 HWPX 변환 중...");
+  const outputFormat = preferredDocumentFormat();
+  const outputLabel = outputFormat === "hwp" ? "한글(HWP)" : "편집형 HWPX";
+  setButtonBusy(els.layoutExportButton, true, `${outputLabel} 변환 중...`);
   setImportButtonsDisabled([els.importButton, els.quickImportButton, els.layoutExportButton], true);
   try {
     for (const [index, file] of pdfFiles.entries()) {
-      const progressLabel = "편집형 HWPX 변환 중";
+      const progressLabel = `${outputLabel} 변환 중`;
       setImportProgress(`${index + 1}/${pdfFiles.length} · ${file.name} ${progressLabel}`, true);
       const payload = {
         filename: file.name,
@@ -2772,6 +2778,7 @@ async function exportPdfLayoutFiles({ layoutMode = "coordinate", mathAi = null, 
         layout_mode: layoutMode,
         variant_policy: "all",
         native_math: true,
+        output_format: outputFormat,
       };
       if (useMathAi) {
         payload.math_ai_recognition = true;
@@ -2788,7 +2795,7 @@ async function exportPdfLayoutFiles({ layoutMode = "coordinate", mathAi = null, 
       if (result.export?.url) {
         const link = document.createElement("a");
         link.href = result.export.url;
-        link.download = result.export.name || `${file.name}.hwpx`;
+        link.download = result.export.name || `${file.name}.${outputFormat}`;
         document.body.append(link);
         link.click();
         link.remove();
@@ -2796,7 +2803,9 @@ async function exportPdfLayoutFiles({ layoutMode = "coordinate", mathAi = null, 
     }
     await loadExportHistory();
     const reviewNotes = results.map(conversionReview).filter(Boolean).map(reviewHeadline);
-    toast(`${results.length}개 PDF를 편집형 HWPX로 만들었습니다.${reviewNotes.length ? ` ${reviewNotes.join(" · ")}` : ""}`);
+    const hwpFallbacks = results.filter((result) => result.hwp && !result.hwp.ok).length;
+    const madeLabel = outputFormat === "hwp" && !hwpFallbacks ? "한글(HWP) 파일" : outputFormat === "hwp" ? `한글(HWP) 파일(${hwpFallbacks}개는 HWPX)` : "편집형 HWPX";
+    toast(`${results.length}개 PDF를 ${madeLabel}로 만들었습니다.${reviewNotes.length ? ` ${reviewNotes.join(" · ")}` : ""}`);
     return results.length === pdfFiles.length;
   } catch (error) {
     const message = friendlyErrorMessage(error);
@@ -2986,30 +2995,42 @@ async function exportSelected(idsOverride = null, overrides = null, { signal = n
   setConversionStatus(`문항 ${ids.length}개를 ${format} 파일로 변환하고 있습니다.`, "working");
   els.previewButton.disabled = true;
   els.exportButton.disabled = true;
+  let deliveredFormat = exportFormat;
+  let hwpFallbackNote = "";
   try {
-    let response;
-    try {
-      response = await fetch("/api/export", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: signal || undefined,
-        body: JSON.stringify({
-          ids,
-          title: exportTitle,
-          format: exportFormat,
-          template_key: templateKey,
-          include_answer_sheet: includeAnswerSheet,
-          native_math: nativeMath,
-          ...numbering,
-        }),
-      });
-    } catch (error) {
-      throw new Error(friendlyErrorMessage(error));
+    const requestExport = async (requestedFormat) => {
+      try {
+        return await fetch("/api/export", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: signal || undefined,
+          body: JSON.stringify({
+            ids,
+            title: exportTitle,
+            format: requestedFormat,
+            template_key: templateKey,
+            include_answer_sheet: includeAnswerSheet,
+            native_math: nativeMath,
+            ...numbering,
+          }),
+        });
+      } catch (error) {
+        throw new Error(friendlyErrorMessage(error));
+      }
+    };
+    let response = await requestExport(exportFormat);
+    if (!response.ok) {
+      const error = await responseError(response);
+      // HWP가 HWPX와 같은 내용으로 만들어지지 않으면 확인된 HWPX를 대신 내려받는다.
+      if (exportFormat !== "hwp" || !["hwp_convert_failed", "hwp_unavailable"].includes(error.detail?.code)) throw error;
+      hwpFallbackNote = error.detail?.message || "HWP로 저장하지 못했습니다.";
+      deliveredFormat = "hwpx";
+      response = await requestExport("hwpx");
+      if (!response.ok) throw await responseError(response);
     }
-    if (!response.ok) throw await responseError(response);
     const blob = await response.blob();
     const disposition = response.headers.get("content-disposition") || "";
-    const filename = downloadFilename(disposition, `${exportTitle}.${exportFormat}`);
+    const filename = downloadFilename(disposition, `${exportTitle}.${deliveredFormat}`);
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -3022,10 +3043,15 @@ async function exportSelected(idsOverride = null, overrides = null, { signal = n
     if (state.simpleConversionBusy) {
       state.simpleDownloadUrl = url;
       state.simpleLastArtifact = state.exports.find((item) => item.name === filename || item.display_name === filename)
-        || { name: filename, url, format: exportFormat, size: blob.size };
+        || { name: filename, url, format: deliveredFormat, size: blob.size };
     }
-    setConversionStatus(`${format} 변환 완료 · ${filename} 다운로드를 시작했습니다.`, "success");
-    toast(`${ids.length}개 문항을 내보냈습니다.`);
+    if (hwpFallbackNote) {
+      setConversionStatus(`HWPX로 대신 저장 · ${filename} 다운로드를 시작했습니다. ${hwpFallbackNote}`, "success");
+      toast(`${ids.length}개 문항을 HWPX로 내보냈습니다. ${hwpFallbackNote}`);
+    } else {
+      setConversionStatus(`${format} 변환 완료 · ${filename} 다운로드를 시작했습니다.`, "success");
+      toast(`${ids.length}개 문항을 내보냈습니다.`);
+    }
     return true;
   } catch (error) {
     const message = friendlyErrorMessage(error);
@@ -3662,7 +3688,9 @@ function renderWorkspaceStage() {
   els.simpleConvertButton?.classList.toggle("hidden", !convertible);
   if (els.simpleConvertButton) {
     els.simpleConvertButton.disabled = !convertible || state.simpleConversionBusy;
-    if (!state.simpleConversionBusy) els.simpleConvertButton.textContent = "HWPX로 변환";
+    if (!state.simpleConversionBusy) {
+      els.simpleConvertButton.textContent = state.hwpExportAvailable ? "한글(HWP)로 변환" : "HWPX로 변환";
+    }
   }
   // PDF 는 '다시 인식' 대신 변환 버튼과 '문항 편집'(그때 인식)으로 다시 시도한다.
   els.simpleRecognizeRetry?.classList.toggle("hidden", stage !== "error" || !hasFile || pdfConvertible);
@@ -3677,7 +3705,9 @@ function renderWorkspaceStage() {
   if (els.sessionButton) els.sessionButton.textContent = state.session.authenticated ? state.session.user?.name || "내 계정" : "로그인";
   if (els.simpleRecognitionCount) {
     els.simpleRecognitionCount.textContent = recognized ? `${state.recognizedProblems.length}개 문항을 인식했습니다`
-      : pdfConvertible ? "원본 배치를 유지한 편집형 HWPX로 바로 변환합니다" : "";
+      : pdfConvertible
+        ? (state.hwpExportAvailable ? "원본 배치를 유지한 한글(HWP) 파일로 바로 변환합니다" : "원본 배치를 유지한 편집형 HWPX로 바로 변환합니다")
+        : "";
   }
   if (els.simpleRecognitionNote) {
     els.simpleRecognitionNote.textContent = recognized ? "원래 순서와 번호로 변환하거나, 필요한 문항을 골라 편집하세요."
@@ -3925,12 +3955,17 @@ function recognizedProblemsImageOnly(problems) {
   return problems.length > 0 && !problems.some(hasText) && problems.some(hasImage);
 }
 
+// HWP가 원본과 같게 만들어지지 않으면 서버는 HWPX를 대신 준다. 안내는 실제로 받은 형식을 말한다.
+function deliveredDocumentLabel() {
+  return /\.hwp$/i.test(state.simpleLastArtifact?.name || "") ? "한글(HWP)" : "HWPX";
+}
+
 function simpleFallbackNotice(fallback) {
   const box = document.createElement("div");
   box.className = "simple-review-alert simple-fallback-alert";
   box.setAttribute("role", "status");
   const headline = document.createElement("strong");
-  headline.textContent = "원본 배치 복원에 실패해 인식한 문항으로 재구성형 HWPX를 만들었습니다.";
+  headline.textContent = `원본 배치 복원에 실패해 인식한 문항으로 재구성형 ${deliveredDocumentLabel()} 파일을 만들었습니다.`;
   const reason = document.createElement("p");
   reason.textContent = `실패 사유: ${fallback.reason}`;
   const scope = document.createElement("p");
@@ -4066,7 +4101,9 @@ function showSimpleResult(results, fallback = null) {
     els.simpleResultActions.append(details);
   }
   const note = document.createElement("small");
-  note.textContent = "내려받은 HWPX는 한글에서 열어 검수·편집할 수 있습니다.";
+  note.textContent = state.hwpExportAvailable
+    ? "내려받은 한글(HWP) 파일은 한글에서 열어 검수·편집할 수 있습니다. 같은 내용의 HWPX도 변환 기록에 보관됩니다."
+    : "내려받은 HWPX는 한글에서 열어 검수·편집할 수 있습니다.";
   els.simpleResultActions.append(note);
   els.simpleResultActions.classList.remove("hidden");
 }
@@ -4173,7 +4210,7 @@ async function runSimpleConversion() {
   const pdfResults = [];
   const exportRecognized = (signal) => exportSelected(state.recognizedProblems.map((problem) => problem.id), {
     title: file.name.replace(/\.[^.]+$/, "") || DEFAULT_EXPORT_TITLE,
-    format: "hwpx",
+    format: preferredDocumentFormat(),
     templateKey: SIMPLE_EXPORT_TEMPLATE,
     includeAnswerSheet: false,
     nativeMath: true,
@@ -4186,7 +4223,7 @@ async function runSimpleConversion() {
           collect: pdfResults,
         })
       : await exportRecognized((state.importController = new AbortController()).signal);
-    // PDF 원본 배치 복원이 4xx로 거절되면 같은 파일의 문항을 인식해 재구성형 HWPX를 만든다.
+    // PDF 원본 배치 복원이 4xx로 거절되면 같은 파일의 문항을 인식해 재구성형 문서(HWP 또는 HWPX)를 만든다.
     if (isPdfFile(file) && !completed && simpleLayoutFallbackEligible(state.simpleLayoutError)) {
       fallback = { reason: layoutFailureReason(state.simpleLayoutError), imageOnly: false };
       state.simpleFailure = "";
@@ -4216,7 +4253,7 @@ async function runSimpleConversion() {
     } else {
       setSimpleConversionStatus(
         completed
-          ? `${file.name} ${fallback ? "재구성형 HWPX " : ""}생성 완료 · 다운로드를 시작했습니다.`
+          ? `${file.name} ${fallback ? `재구성형 ${deliveredDocumentLabel()} ` : ""}생성 완료 · 다운로드를 시작했습니다.`
           : state.simpleFailure || "문항을 인식하지 못했거나 파일 생성이 완료되지 않았습니다. 파일 내용을 확인한 뒤 다시 시도해 주세요.",
         completed ? "success" : "error",
       );
@@ -4621,7 +4658,10 @@ els.exportTemplate.addEventListener("change", () => {
 els.exportTitle.addEventListener("input", syncPaperPreviewMeta);
 els.numberingMode?.addEventListener("change", changeNumbering);
 els.startNumber?.addEventListener("input", changeNumbering);
-els.exportFormat.addEventListener("change", () => syncExportOptions());
+els.exportFormat.addEventListener("change", () => {
+  state.exportFormatTouched = true;
+  syncExportOptions();
+});
 if (els.exportNativeMath) {
   els.exportNativeMath.addEventListener("change", () => {
     state.nativeMathTouched = true;
@@ -4730,15 +4770,38 @@ async function enterPremiumEditor({ resume = false } = {}) {
   }
 }
 
-// The HWP option appears only when the server has the rhwp converter.
+// 한글(HWP) 파일을 기본 결과로 둔다. 서버에 rhwp 변환 도구가 있을 때만 HWP를 쓰고,
+// 없으면 지금처럼 HWPX를 만든다.
+async function loadHwpExportAvailability() {
+  try {
+    const health = await api("/api/health");
+    state.hwpExportAvailable = Boolean(health?.hwp_export_available);
+  } catch {
+    state.hwpExportAvailable = false;
+  }
+  if (state.hwpExportAvailable) {
+    const layoutButton = els.layoutExportButton;
+    if (layoutButton && !layoutButton.dataset.idleLabel) layoutButton.textContent = "PDF 배치 유지해 HWP 만들기";
+    els.simpleModeButton?.setAttribute("title", "파일 하나를 바로 한글(HWP)로 바꾸는 간단 화면으로 이동");
+  }
+  return state.hwpExportAvailable;
+}
+
+function preferredDocumentFormat() {
+  return state.hwpExportAvailable ? "hwp" : "hwpx";
+}
+
+// The HWP option appears only when the server has the rhwp converter, and is
+// selected unless the user already picked a format.
 async function loadHwpExportOption() {
-  const health = await api("/api/health");
-  if (!health?.hwp_export_available || !els.exportFormat) return;
-  if (els.exportFormat.querySelector('option[value="hwp"]')) return;
-  const option = document.createElement("option");
-  option.value = "hwp";
-  option.textContent = "HWP";
-  els.exportFormat.append(option);
+  if (!(await loadHwpExportAvailability()) || !els.exportFormat) return;
+  if (!els.exportFormat.querySelector('option[value="hwp"]')) {
+    const option = document.createElement("option");
+    option.value = "hwp";
+    option.textContent = "HWP";
+    els.exportFormat.prepend(option);
+  }
+  if (!state.exportFormatTouched) els.exportFormat.value = "hwp";
 }
 
 async function initializePremiumEditor() {
@@ -4783,5 +4846,6 @@ const studioViews = createStudioViews({ state, els, selectProblem, resolveBasket
   // baskets never open the editor or fetch its library on initial load.
   renderWorkspaceStage();
   initSimpleHelp({ openSettings: openAISettings });
+  loadHwpExportAvailability().then(() => renderWorkspaceStage());
   try { await refreshSession(); } catch { /* Basic file conversion remains usable. */ }
 })();

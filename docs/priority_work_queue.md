@@ -1,6 +1,8 @@
 # Priority Work Queue
 
-Updated: 2026-09-23
+Updated: 2026-10-15
+
+Current top priority (2026-10-15): conversion to Hangul `.hwp` files. With the rhwp CLI available, HWP is the default result of the simple converter, studio export, PDF original-layout export and the desktop Basic edition; any round-trip difference falls back to the checked HWPX with a notice. See [HWP output priority](audits/2026-10-15/hwp-output-priority.md): 6/6 sample PDFs (120 pages) convert with identical round-trip structure and character shapes and zero-pixel render differences. Next: open the HWP results in Hancom (letter boxes, two columns, equations, the format limits listed there), build and self-test the Windows installer with rhwp.exe, and decide on HWP output for the web prototype.
 
 Latest strict audit: [grid-frame paragraph editing and reassessment](audits/2026-09-23/grid-frame-paragraphs-progress.md). The 36-page harsh average is 87.06 (85.80 Korean, 88.67 math, 87.17 English), versus 87.04 in the previous same-environment output. English page 4 improves 72.20 to 72.85; the other 35 page scores remain equal. English Q27 framed notice now has five separately editable bullet paragraphs, and a 50-to-60 student edit survives save/reopen with eight pages and unchanged bitmaps. The full gate is 103 PASS, 11 SKIP, 1 existing visual-quality FAIL. Prior math Q27 editable graph-label grouping and the long English paragraph edit remain documented in the [graph audit](audits/2026-09-23/native-graph-annotations-progress.md). The 93-point goal remains unmet; this page score is not a five-field overall score.
 
@@ -10,7 +12,7 @@ Research handoff follow-up: [exam HWP/HWPX semantics](audits/2026-09-21/exam_hwp
 
 Current override: [Native PDF editability](native_pdf_editability.md) supersedes the historical overlay/positioned-equation strategy below. The public PDF export uses native paragraphs, real tables and equations, with independent package/source checks. Regional prose/math overlays and a separate editable companion cannot satisfy the primary output contract. Remaining P0: improve native reflow pagination and source layout without restoring overlays; reject missing source content and disclose failed layout targets.
 
-Goal: produce KICE/school-exam HWPX output that preserves question sync, native math equations, typography, and layout without overlaps. Direct `.hwp` output remains a Hancom/COM conversion concern after HWPX quality is stable.
+Goal: produce KICE/school-exam HWPX output that preserves question sync, native math equations, typography, and layout without overlaps. Direct `.hwp` output is produced from the same HWPX by the rhwp CLI and checked by an independent round trip (2026-10-15); Hancom/COM is not required.
 
 ## 2026-07-13 Priority Execution Result
 

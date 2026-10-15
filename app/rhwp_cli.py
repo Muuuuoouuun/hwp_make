@@ -38,9 +38,14 @@ def locate() -> Path | None:
         path = Path(configured)
         return path if path.is_file() else None
     executable = "rhwp.exe" if sys.platform == "win32" else "rhwp"
-    bundled = BUNDLED_DIR / executable
-    if bundled.is_file():
-        return bundled
+    bundle_roots = [BUNDLED_DIR]
+    if getattr(sys, "_MEIPASS", None):
+        # PyInstaller desktop build (packaging/basic.spec).
+        bundle_roots.insert(0, Path(sys._MEIPASS) / "packaging" / "rhwp-cli")
+    for directory in bundle_roots:
+        bundled = directory / executable
+        if bundled.is_file():
+            return bundled
     found = shutil.which("rhwp")
     return Path(found) if found else None
 
@@ -79,13 +84,63 @@ def _run_convert(source: Path, target: Path, *, verify: bool) -> dict[str, Any]:
     return report
 
 
-def hwpx_to_hwp(source: Path, target: Path) -> dict[str, Any]:
-    """Write HWP 5.0 from HWPX; rhwp re-parses the result and compares pages.
+def _run_export_hwpx(source: Path, target: Path) -> None:
+    exe = locate()
+    if exe is None:
+        raise RhwpCliError("rhwp 명령줄 도구가 없습니다.")
+    try:
+        result = subprocess.run(
+            [str(exe), "export-hwpx", str(source), str(target)],
+            capture_output=True,
+            timeout=TIMEOUT_SECONDS,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RhwpCliError(f"rhwp 실행 실패: {exc}") from exc
+    if result.returncode != 0 or not target.is_file():
+        stderr = result.stderr.decode("utf-8", "replace").strip()[-500:]
+        raise RhwpCliError(f"HWP 재검사용 HWPX 추출 실패(exit {result.returncode}): {stderr}")
 
-    Raises :class:`RhwpCliError` when the tool is missing or its own IR/page
-    verification fails, so a lossy HWP is never handed out silently.
+
+def hwpx_to_hwp(source: Path, target: Path) -> dict[str, Any]:
+    """Write HWP 5.0 from HWPX and prove it kept the document.
+
+    1. Rewrite the HWPX spellings rhwp misreads in a temporary copy
+       (app/hwp_fidelity.py: fit-to-size picture fills, run-less paragraphs).
+    2. ``rhwp convert --verify --verify-pages`` (rhwp IR and page count).
+    3. Export the HWP back to HWPX and compare text, tables, merged cells,
+       text boxes, pictures, equations, placements, paragraph shapes, line
+       layout and fills with the source.
+
+    Raises :class:`RhwpCliError` on any failure or difference and removes the
+    HWP, so a lossy HWP is never handed out.
     """
-    return _run_convert(Path(source), Path(target), verify=True)
+    from . import hwp_fidelity
+
+    source, target = Path(source), Path(target)
+    try:
+        with tempfile.TemporaryDirectory(prefix="hwp_make_rhwp_check_") as tmp:
+            prepared = Path(tmp) / "prepared.hwpx"
+            try:
+                normalized = hwp_fidelity.normalize_for_hwp(source, prepared)
+            except Exception as exc:  # noqa: BLE001 - unreadable HWPX parts
+                raise RhwpCliError(f"HWP 변환 준비 실패: {exc}") from exc
+            report = _run_convert(prepared, target, verify=True)
+            round_trip = Path(tmp) / "round_trip.hwpx"
+            _run_export_hwpx(target, round_trip)
+            try:
+                problems = hwp_fidelity.compare_profiles(
+                    hwp_fidelity.structure_profile(source), hwp_fidelity.structure_profile(round_trip)
+                )
+            except Exception as exc:  # noqa: BLE001 - an unreadable round trip is a failed check
+                raise RhwpCliError(f"HWP 왕복 대조 실패: {exc}") from exc
+        if problems:
+            raise RhwpCliError("HWP 왕복 대조 불일치: " + ", ".join(problems))
+    except RhwpCliError:
+        target.unlink(missing_ok=True)
+        raise
+    return {**report, "prepared": normalized, "round_trip_check": "identical"}
 
 
 def unlock_distribution_hwp(payload: bytes) -> bytes | None:

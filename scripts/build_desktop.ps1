@@ -18,6 +18,9 @@ if (-not $Iscc) {
 }
 if (-not $Iscc) { throw "Inno Setup compiler required. Pass -Iscc with its ISCC.exe path." }
 $env:PYTHONIOENCODING = "utf-8"
+# HWP 저장용 rhwp 명령줄 도구(MIT, 고정 버전·SHA-256 확인)를 설치본에 함께 넣는다.
+& $VenvPython scripts/fetch_rhwp_cli.py --platform windows-x86_64
+if ($LASTEXITCODE -ne 0) { throw "rhwp CLI download failed" }
 & $VenvPython scripts/prepare_desktop_build.py
 if ($LASTEXITCODE -ne 0) { throw "Build assets failed" }
 & $VenvPython -m PyInstaller --noconfirm --distpath dist --workpath tmp/desktop-build/pyinstaller packaging/basic.spec

@@ -11,6 +11,10 @@ datas = [(str(root / "packaging" / "basic-static"), "static"),
          (str(root / "packaging" / "app.ico"), "."),
          (str(root / "packaging" / "BASIC-README.txt"), "."),
          (str(root / "tmp" / "desktop-build" / "licenses"), "licenses")]
+# HWP output: scripts/fetch_rhwp_cli.py puts rhwp.exe and its LICENSE here
+# (app/rhwp_cli.py looks for packaging/rhwp-cli next to the app modules).
+if (root / "packaging" / "rhwp-cli").is_dir():
+    datas.append((str(root / "packaging" / "rhwp-cli"), "packaging/rhwp-cli"))
 for package in ("hwpx", "docx", "rhwp", "pymupdf", "reportlab"):
     datas += collect_data_files(package)
 hidden = collect_submodules("hwpx") + collect_submodules("rhwp")

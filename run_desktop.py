@@ -17,6 +17,14 @@ VERSION = "1.0.0"
 UI_FONT = "Apple SD Gothic Neo" if sys.platform == "darwin" else "맑은 고딕"
 
 
+def _hwp_export_ready() -> bool:
+    try:
+        from app import rhwp_cli
+    except Exception:
+        return False
+    return rhwp_cli.available()
+
+
 def default_data_dir() -> Path:
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "HWP Make Basic"
@@ -75,8 +83,12 @@ class BasicApp:
         row = ttk.Frame(body)
         row.pack(fill="x")
         ttk.Label(row, text="저장 형식").pack(side="left", padx=(0, 12))
-        self.format = tk.StringVar(value="HWPX")
-        self.formats = ttk.Combobox(row, textvariable=self.format, values=("HWPX", "DOCX"), state="readonly", width=12)
+        # 한글(HWP) 저장은 함께 설치되는 rhwp 변환 도구가 있을 때 기본값이다.
+        hwp_ready = _hwp_export_ready()
+        self.format = tk.StringVar(value="HWP" if hwp_ready else "HWPX")
+        self.formats = ttk.Combobox(row, textvariable=self.format,
+                                    values=("HWP", "HWPX", "DOCX") if hwp_ready else ("HWPX", "DOCX"),
+                                    state="readonly", width=12)
         self.formats.pack(side="left")
         self.formats.bind("<<ComboboxSelected>>", lambda _: self.update_hint())
         self.hint = tk.StringVar()
@@ -120,8 +132,10 @@ class BasicApp:
             self.recent.insert("end", f"  {Path(item['output']).name}    ·    {item.get('date', '')}")
 
     def update_hint(self):
-        self.hint.set("PDF → HWPX는 원본 전체 페이지 배치를 유지해 변환합니다."
-                      if self.format.get() == "HWPX" else "DOCX는 문항 내용 중심으로 다시 구성하며, 원본 배치와 다를 수 있습니다.")
+        self.hint.set({
+            "HWP": "한글(HWP)로 저장합니다. PDF는 원본 전체 페이지 배치를 유지하고, 저장 전에 내용이 그대로인지 확인합니다.",
+            "HWPX": "PDF → HWPX는 원본 전체 페이지 배치를 유지해 변환합니다.",
+        }.get(self.format.get(), "DOCX는 문항 내용 중심으로 다시 구성하며, 원본 배치와 다를 수 있습니다."))
 
     def choose(self):
         if self.process:
@@ -252,10 +266,11 @@ class BasicApp:
 
     def help(self):
         messagebox.showinfo("HWP Make Basic " + VERSION,
-            "1. 파일을 선택합니다.\n2. HWPX 또는 DOCX를 고릅니다.\n3. 변환하고 저장을 누릅니다.\n\n"
-            "PDF → HWPX는 전체 원본 배치를 보존하는 경로입니다.\n다른 변환은 내용을 다시 구성해 배치가 달라질 수 있습니다.\n"
+            "1. 파일을 선택합니다.\n2. HWP, HWPX 또는 DOCX를 고릅니다.\n3. 변환하고 저장을 누릅니다.\n\n"
+            "PDF → HWP·HWPX는 전체 원본 배치를 보존하는 경로입니다.\n다른 변환은 내용을 다시 구성해 배치가 달라질 수 있습니다.\n"
+            "HWP는 저장 전에 HWPX와 내용·배치가 같은지 확인하고, 다르면 HWPX로 저장합니다.\n"
             "스캔·이미지는 AI OCR 없이 이미지로 보존될 수 있습니다.\n\n"
-            "HWPX는 한글에서, DOCX는 Word 등에서 열어 확인하세요.\n"
+            "HWP·HWPX는 한글에서, DOCX는 Word 등에서 열어 확인하세요.\n"
             "원본은 수정하지 않으며, 인터넷·로그인·API 키가 필요 없습니다.\n"
             "문항 편집·재배열·자동 번호 설정은 포함하지 않습니다.", parent=self.root)
 

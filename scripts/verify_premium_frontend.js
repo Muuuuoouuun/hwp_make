@@ -36,7 +36,7 @@ const c = vm.createContext({
   setButtonBusy() {}, setConversionStatus() {},
   fetch: async (url, options) => { requested.push({ url, body: JSON.parse(options.body) }); return { ok: false, status: 422, text: async () => JSON.stringify({ detail: { message: "fixture export stopped" } }) }; },
 });
-for (const name of ["isPremiumWorkspace", "restoreBasket", "persistBasket", "restoreNumbering", "resolveBasketProblem", "outputNumber", "numberMapping", "duplicateOriginalNumbers", "syncNumberingControls", "numberingPayload", "changeNumbering", "moveBasketItem", "renderOrderEditor", "moveOrderDraft", "applyOrderEditor", "computeLayoutPlan", "applyUiMode", "basketHasUnavailableProblems", "friendlyErrorMessage", "responseError", "exportSelected", "previewExport", "loadProblems"]) {
+for (const name of ["isPremiumWorkspace", "restoreBasket", "persistBasket", "restoreNumbering", "resolveBasketProblem", "outputNumber", "numberMapping", "duplicateOriginalNumbers", "syncNumberingControls", "numberingPayload", "changeNumbering", "moveBasketItem", "renderOrderEditor", "moveOrderDraft", "applyOrderEditor", "computeLayoutPlan", "applyUiMode", "basketHasUnavailableProblems", "friendlyErrorMessage", "responseError", "exportSelected", "previewExport", "loadProblems", "loadHwpExportAvailability"]) {
   vm.runInContext(implementation(name), c);
 }
 const plain = (value) => JSON.parse(JSON.stringify(value));
@@ -133,11 +133,18 @@ async function main() {
   let premiumReads = 0;
   vm.runInContext("async function loadProblems() { throw new Error('premium library fetched in basic'); }", c);
   Object.assign(c, { initSimpleHelp() {}, openAISettings() {}, isPdfFile: () => false, refreshSession: async () => { state.session = { authenticated: true }; },
-    loadExportHistory: async () => {}, loadAIStatus: async () => {}, api: async () => { premiumReads++; throw new Error("premium capability fetched in basic"); } });
+    loadExportHistory: async () => {}, loadAIStatus: async () => {}, api: async (url) => {
+      // The public health check tells the basic converter whether HWP output is available.
+      if (url === "/api/health") return { hwp_export_available: true };
+      premiumReads++; throw new Error("premium capability fetched in basic");
+    } });
   c.window.location.pathname = "/";
   state.workspaceStage = "input";
+  state.hwpExportAvailable = false;
   await vm.runInContext(init, c);
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(premiumReads, 0, "basic boot must not request premium APIs");
-  console.log("Premium frontend PASS: route isolation, legacy migration, immutable reorder mappings, saved policy, duplicate acknowledgement, 999 bound, export payloads and basic boot");
+  assert.equal(state.hwpExportAvailable, true, "basic boot learns that HWP output is available");
+  console.log("Premium frontend PASS: route isolation, legacy migration, immutable reorder mappings, saved policy, duplicate acknowledgement, 999 bound, export payloads and basic boot (HWP availability)");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

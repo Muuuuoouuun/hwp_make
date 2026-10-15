@@ -1,12 +1,13 @@
 # HWP Make
 
-HWP Make는 PDF, HWP/HWPX, DOCX, 이미지, 텍스트, CSV/SQLite 자료를 문항 단위로 가져오고, 평가원/교육청 시험지 스타일의 편집 가능한 HWPX/DOCX로 내보내는 로컬 앱입니다.
+HWP Make는 PDF, HWP/HWPX, DOCX, 이미지, 텍스트, CSV/SQLite 자료를 문항 단위로 가져오고, 평가원/교육청 시험지 스타일의 편집 가능한 한글(HWP)·HWPX·DOCX로 내보내는 로컬 앱입니다. HWP 저장에는 rhwp 명령줄 도구(`python scripts/fetch_rhwp_cli.py`)가 필요합니다.
 
 현재 개발의 최우선 목표는 수학 시험지 기준입니다. 즉, 문항 번호 싱크, 네이티브 한글 수식, 실제 시험지 타이포그래피, 2단 레이아웃, 겹침 없는 렌더링을 동시에 만족하는 HWPX를 만드는 것입니다. Product B의 세부 기준과 폐기한 옛 기준은 `docs/product_b_bottleneck_specs.md`를 canonical 문서로 봅니다.
 
 ## 문서 역할
 
 - [기본 변환 수정 작업 정리(2026-10-02~03)](docs/audits/2026-10-03/work-summary.md): 전체 감사 결과를 순서대로 수정해 실물 평가원 PDF 결과 수령 10/16→16/16(422 거부 0), 미주형 비PDF 정답·해설 본문 노출 46→0, 40쪽 국어 변환 88.4→47.1초, 게이트 PASS 116·SKIP 11·FAIL 1(기존)을 기록했습니다. 원본 '□' 보존과 HWP 병합 셀·미주 매핑은 후속입니다.
+- [한글(HWP) 파일 변환 우선 적용](docs/audits/2026-10-15/hwp-output-priority.md): rhwp 도구가 있으면 간단 변환·스튜디오·PDF 원본 배치·데스크톱의 기본 결과가 HWP입니다. rhwp가 잘못 읽는 표기(그림 채우기 TOTAL, run 없는 빈 문단)를 변환 전에 고치고, HWP를 HWPX로 되돌려 원래 HWPX와 구조·글자 모양을 대조해 다르면 HWPX를 대신 줍니다. 샘플 PDF 6개(120쪽)가 보정 전 1/6에서 6/6으로 변환되고 같은 렌더러의 쪽 그림 차이는 0입니다. 한글 실물 열기 확인이 남아 있습니다.
 - [Filee 검토와 적용](docs/audits/2026-10-13/filee-review-and-adoption.md): rhwp 명령줄 도구로 한컴 없이 HWP 내보내기(검증 실패 시 거부)와 배포용 HWP 해제를 붙였고, DOCX 가져오기(탭·숨김 글자·글상자·Word 자동 번호·병합 셀)와 DOCX 내보내기 기본값(A4·간격·표 폭·그림 형식)을 고쳤습니다. 한글에서 HWP 결과 열기 확인이 남아 있습니다.
 - [kordoc 검토와 적용](docs/audits/2026-09-27/kordoc-review-and-adoption.md): 수식 괄호·`\text`·호, HWPX 가져오기(탭 뒤 글, `문N）` 미주 정답, 병합 셀, 자동 문단번호), HWP→DOCX 수식 변환, 한글 저장본 조판 판독 도구를 적용했습니다. 전체 회귀 결과는 수정 전과 같은 환경 실패 9건 외에 신규 3건이 모두 통과했습니다. 한글 GUI 확인은 남아 있습니다.
 - [모의고사 HWP/HWPX 웹 조사·실물·앱 동작 연구](docs/audits/2026-09-21/exam_hwp_web_app_research.md): 19개 구조 계측과 공개 4종 가져오기에서 미주·문항 분리 실패를 재현했습니다. 한글 GUI 편집은 창 활성화 오류로 미검증이며, 재개 절차와 개발 우선순위를 정리했습니다.

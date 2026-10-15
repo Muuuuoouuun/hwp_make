@@ -23,8 +23,11 @@ def run(directory: Path, app_class) -> int:
         root = tk.Tk()
         root.withdraw()
         ui = app_class(root, directory / "profile")
+        from app import rhwp_cli
+
+        hwp_ready = rhwp_cli.available()
         assert str(ui.convert_button["state"]) == "disabled"
-        assert ui.format.get() == "HWPX"
+        assert ui.format.get() == ("HWP" if hwp_ready else "HWPX")
         checks.append("Native Tk window and initial control states")
 
         def conversion(source, destination, expected_ok=True):
@@ -45,8 +48,14 @@ def run(directory: Path, app_class) -> int:
             if expected_ok:
                 assert destination.is_file()
                 assert str(ui.open_button["state"]) == "normal"
-                with zipfile.ZipFile(destination) as archive:
-                    assert archive.testzip() is None
+                if destination.suffix.lower() == ".hwp":
+                    import olefile
+
+                    with olefile.OleFileIO(str(destination)) as package:
+                        assert package.openstream("FileHeader").read(17) == b"HWP Document File"
+                else:
+                    with zipfile.ZipFile(destination) as archive:
+                        assert archive.testzip() is None
             return result
 
         text = directory / "원본 문항.txt"
@@ -73,6 +82,22 @@ def run(directory: Path, app_class) -> int:
         Image.new("RGB", (120, 80), "white").save(picture)
         conversion(picture, directory / "그림 결과.hwpx")
         checks.append("Image import without AI credentials or external OCR")
+        hwp_conversions = 0
+        if hwp_ready:
+            result = conversion(text, directory / "텍스트 결과.hwp")
+            assert result["format"] == "hwp", result
+            result = conversion(pdf, directory / "전체 결과.hwp")
+            assert result["format"] == "hwp" and result["pages"] == 2, result
+            hwp_conversions = 2
+            checks.append("TXT and PDF to HWP with the bundled rhwp CLI and round-trip check")
+            from app.desktop_convert import hwpx_fallback_destination
+
+            taken = directory / "선택한 이름.hwpx"
+            taken.write_bytes(b"user file")
+            fallback = hwpx_fallback_destination(directory / "선택한 이름.hwp")
+            assert fallback.name == "선택한 이름 (1).hwpx" and taken.read_bytes() == b"user file", fallback
+            taken.unlink()
+            checks.append("HWPX fallback never overwrites another file")
         invalid = directory / "잘못된 파일.pdf"
         invalid.write_bytes(b"not a PDF")
         protected = directory / "기존 결과.hwpx"
@@ -97,7 +122,7 @@ def run(directory: Path, app_class) -> int:
             pass
         large.unlink()
         checks.append("Empty and over-64MB file validation")
-        assert len(ui.load_history()) == 5
+        assert len(ui.load_history()) == 5 + hwp_conversions
         checks.append("Recent history persists successful conversions only")
         result = {"ok": True, "checks": checks}
     except Exception:

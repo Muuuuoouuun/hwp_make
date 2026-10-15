@@ -59,7 +59,7 @@ function harness(names) {
   vm.runInContext(names.map(fn).join("\n"), context);
   return context;
 }
-const helpers = ["friendlyErrorMessage", "responseError", "isPdfFile", "simpleFileExtension", "formatSimpleFileSize", "assignSingleFile", "setSimpleConversionStatus", "setSimpleQualityNote", "clearSimpleResult", "conversionReview", "reviewHeadline", "simpleReviewNotice", "simpleQualityMessages", "showSimpleQuality", "simpleArtifactLink", "appendSimpleReview", "appendSimpleArtifactActions", "showSimpleResult", "setSimpleFile", "runSimpleConversion", "layoutFailureReason", "simpleLayoutFallbackEligible", "recognizedProblemsImageOnly", "simpleFallbackNotice"];
+const helpers = ["friendlyErrorMessage", "responseError", "isPdfFile", "simpleFileExtension", "formatSimpleFileSize", "assignSingleFile", "setSimpleConversionStatus", "setSimpleQualityNote", "clearSimpleResult", "conversionReview", "reviewHeadline", "simpleReviewNotice", "simpleQualityMessages", "showSimpleQuality", "simpleArtifactLink", "appendSimpleReview", "appendSimpleArtifactActions", "showSimpleResult", "setSimpleFile", "runSimpleConversion", "layoutFailureReason", "simpleLayoutFallbackEligible", "recognizedProblemsImageOnly", "simpleFallbackNotice", "deliveredDocumentLabel", "preferredDocumentFormat"];
 
 (async () => {
   const c = harness(helpers);
@@ -171,7 +171,7 @@ const helpers = ["friendlyErrorMessage", "responseError", "isPdfFile", "simpleFi
   await retry.click();
   assert.equal(retried, 1);
 
-  const request = harness(["friendlyErrorMessage", "layoutFailureReason", "isPdfFile", "exportPdfLayoutFiles"]);
+  const request = harness(["friendlyErrorMessage", "layoutFailureReason", "isPdfFile", "preferredDocumentFormat", "exportPdfLayoutFiles"]);
   request.state.simpleConversionBusy = true;
   request.els.fileInput.files = [{ name: "broken.pdf", size: 4 }];
   request.api = async () => { throw new Error("손상된 PDF입니다"); };
@@ -238,7 +238,7 @@ const helpers = ["friendlyErrorMessage", "responseError", "isPdfFile", "simpleFi
   const fallbackCard = fb.els.simpleResultActions.children[0];
   assert(fallbackCard.className.includes("simple-fallback-alert"), "fallback notice must lead the result card");
   const fallbackLines = fallbackCard.children.map(x => x.textContent);
-  assert.equal(fallbackLines[0], "원본 배치 복원에 실패해 인식한 문항으로 재구성형 HWPX를 만들었습니다.");
+  assert.equal(fallbackLines[0], "원본 배치 복원에 실패해 인식한 문항으로 재구성형 HWPX 파일을 만들었습니다.");
   assert.equal(fallbackLines[1], "실패 사유: PDF 레이아웃 변환 실패 · 원본의 문항 배치를 분석하지 못했습니다.");
   assert.equal(fallbackLines[2], "글자 편집은 가능하지만 원본 배치는 다릅니다.");
   assert(!fallbackLines.join(" ").match(/native|[A-Za-z]:\\/), "teacher-facing reason must not leak internal text or paths");
@@ -305,5 +305,31 @@ const helpers = ["friendlyErrorMessage", "responseError", "isPdfFile", "simpleFi
   assert(bothReasons.includes("인식한 문항으로 다시 만들기도 실패: HWPX 변환 실패 · 삭제된 문항입니다"), bothReasons);
   assert.equal(fb.els.simpleConversionStatus.dataset.tone, "error");
   assert.equal(fb.state.importController, null);
-  console.log("Conversion UI behavior OK: errors, file locking, mode keys, quality, recovery, artifact links, PDF direct conversion + on-demand recognition fallback");
+
+  // 2026-10-14: 서버에 rhwp 도구가 있으면 간단 변환은 한글(HWP)을 기본으로 요청한다.
+  // 원본 배치 변환은 output_format=hwp, 폴백 재구성도 format=hwp. 실제로 받은 형식을 안내한다.
+  fb.state.hwpExportAvailable = true;
+  startPdf(textProblems);
+  const layoutPayloads = [];
+  fb.api = async (url, options) => { layoutPayloads.push(JSON.parse(options.body)); throw await serverError(400, groupingDetail); };
+  fb.exportSelected = async (ids, overrides) => {
+    exportCalls.push({ ids, overrides });
+    fb.state.simpleLastArtifact = { name: "S.hwp", url: "blob:S" };
+    return true;
+  };
+  await fb.runSimpleConversion();
+  assert.equal(layoutPayloads[0].output_format, "hwp", "original-layout conversion asks for HWP when available");
+  assert.equal(exportCalls[0].overrides.format, "hwp", "fallback rebuild asks for HWP too");
+  assert(fb.els.simpleConversionStatusText.textContent.includes("재구성형 한글(HWP) 생성 완료"), fb.els.simpleConversionStatusText.textContent);
+  assert.equal(fb.els.simpleResultActions.children[0].children[0].textContent, "원본 배치 복원에 실패해 인식한 문항으로 재구성형 한글(HWP) 파일을 만들었습니다.");
+  startPdf(textProblems);
+  fb.exportSelected = async (ids, overrides) => {
+    exportCalls.push({ ids, overrides });
+    fb.state.simpleLastArtifact = { name: "S.hwpx", url: "blob:S" };
+    return true;
+  };
+  await fb.runSimpleConversion();
+  assert(fb.els.simpleConversionStatusText.textContent.includes("재구성형 HWPX 생성 완료"), "an HWPX delivered instead of HWP is named HWPX");
+  fb.state.hwpExportAvailable = false;
+  console.log("Conversion UI behavior OK: errors, file locking, mode keys, quality, recovery, artifact links, PDF direct conversion + on-demand recognition fallback, HWP default");
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -19,12 +19,14 @@
 - Modifications: Python rewrite; extra tokens emitted by this app's own
   writer (`choose`, `atop`, `^3sqrt`, lowercase operator words, `rm`/`it`).
 
-## rhwp command line tool (optional, not committed)
+## rhwp command line tool (not committed; bundled in the desktop installer)
 
 - Source: https://github.com/edwardkim/rhwp, MIT License
 - Used by: `app/rhwp_cli.py` for HWP 5.0 export and distribution-HWP unlocking.
   `scripts/fetch_rhwp_cli.py` downloads the pinned v0.8.7 release into
   `packaging/rhwp-cli/` (git-ignored) together with its `LICENSE`.
+  `scripts/build_desktop.ps1` fetches the Windows build and `packaging/basic.spec`
+  ships the executable with that `LICENSE` file unchanged.
 
 ## Filee
 

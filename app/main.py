@@ -147,6 +147,9 @@ class PdfLayoutExportPayload(BaseModel):
     # strict=True keeps the legacy whole-document 422 for any editability or
     # rendering defect (quality gates); default delivers the file with review.
     strict: bool = False
+    # hwp: after every HWPX check, convert the same document to HWP 5.0 with
+    # the rhwp CLI (app/rhwp_cli.py). A round-trip difference keeps the HWPX.
+    output_format: Literal["hwpx", "hwp"] = "hwpx"
 
 
 class TextInputPayload(BaseModel):
@@ -1008,6 +1011,31 @@ def _pdf_export_fidelity(source_path: Path, output_path: Path, render_dir: Path,
     return result
 
 
+def _pdf_layout_hwp_output(
+    payload: PdfLayoutExportPayload, hwpx_path: Path
+) -> tuple[Path, dict[str, Any] | None]:
+    """HWP next to the checked HWPX when requested; the HWPX stays on failure."""
+    if payload.output_format != "hwp":
+        return hwpx_path, None
+    hwp_path = hwpx_path.with_suffix(".hwp")
+    try:
+        conversion = rhwp_cli.hwpx_to_hwp(hwpx_path, hwp_path)
+    except Exception as exc:  # noqa: BLE001 - the checked HWPX is still a valid result
+        hwp_path.unlink(missing_ok=True)
+        user_errors.log_failure("pdf-layout-export hwp", exc)
+        return hwpx_path, {
+            "ok": False,
+            "message": "한글(HWP)로 바꾸는 중 원본과 달라지는 부분이 있어 HWPX로 제공합니다. 한글에서 열어 HWP로 저장할 수 있습니다.",
+        }
+    return hwp_path, {
+        "ok": True,
+        "prepared": conversion.get("prepared") or {},
+        "round_trip_check": conversion.get("round_trip_check"),
+        "pages": (conversion.get("verifyPages") or {}).get("after"),
+        "message": "한글(HWP) 파일로 저장했습니다. 같은 내용의 HWPX도 변환 기록에 함께 보관합니다.",
+    }
+
+
 @app.post("/api/pdf-layout-export")
 def export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
     # Admit before saving files, and retain admission through rendering/reporting.
@@ -1025,6 +1053,8 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=user_errors.detail("invalid_request")) from exc
     if not data.startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail=user_errors.detail("not_pdf"))
+    if payload.output_format == "hwp" and not rhwp_cli.available():
+        raise HTTPException(status_code=503, detail=user_errors.detail("hwp_unavailable"))
     if payload.variant_policy == "first" and payload.layout_mode != "structured":
         raise HTTPException(status_code=400, detail=user_errors.detail(
             "invalid_request", "첫 유형 선택은 문항 구조 변환에서만 사용할 수 있습니다."))
@@ -1212,13 +1242,16 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
             quality["visual_review_flags"] = list(dict.fromkeys([
                 *quality["visual_review_flags"], "native_output_requires_layout_review"
             ]))
+        primary_output, hwp_result = _pdf_layout_hwp_output(payload, output_path)
         report_path = _unique_path_in_dir(run_dir, "layout_report.json")
         report = {
             "mode": "pdf_structured_hwpx",
             "requested_layout_mode": payload.layout_mode,
             "source": {"name": payload.filename, "upload_path": rel_path, "copy": _export_file_item(source_copy)},
             "scope": scope,
-            "export": _export_file_item(output_path),
+            "export": _export_file_item(primary_output),
+            "hwpx_export": _export_file_item(output_path),
+            "hwp": hwp_result,
             "stats": stats,
             "quality": quality,
             "review": review,
@@ -1246,7 +1279,9 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
             "requested_layout_mode": payload.layout_mode,
             "source": {"name": payload.filename, "path": rel_path, "copy": _export_file_item(source_copy)},
             "scope": scope,
-            "export": _export_file_item(output_path),
+            "export": _export_file_item(primary_output),
+            "hwpx_export": _export_file_item(output_path),
+            "hwp": hwp_result,
             "run": {
                 "folder": run_dir.resolve().relative_to(storage.EXPORT_DIR.resolve()).as_posix(),
                 "report": _export_file_item(report_path),
@@ -1257,7 +1292,9 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
             "fidelity": fidelity,
             "style_profile": style_profile,
             "open_safety": open_safety,
-            "notices": ([review["message"]] if review["message"] else []) + ([
+            "notices": ([review["message"]] if review["message"] else []) + (
+                [hwp_result["message"]] if hwp_result else []
+            ) + ([
                 f"원본 {scope['original_page_count']}쪽 중 1–{scope['selected_page_count']}쪽을 선택해 변환했습니다. 제외된 {scope['excluded_page_count']}쪽은 원본 PDF에 보존됩니다."
             ] if not scope["includes_entire_source"] else []) + ([
                 "첫 유형을 확정할 수 없어 전체 선택 범위를 보존했습니다."

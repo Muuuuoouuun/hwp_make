@@ -618,11 +618,13 @@ def get_problems_by_ids(ids: list[int]) -> list[dict[str, Any]]:
 
 def _conversion_metadata(path: Path, export_root: Path) -> dict[str, Any] | None:
     report_path = path.parent / "layout_report.json"
-    if path.suffix.lower() != ".hwpx" or not report_path.is_file():
+    if path.suffix.lower() not in {".hwpx", ".hwp"} or not report_path.is_file():
         return None
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
-        if report.get("export", {}).get("name") != path.relative_to(export_root).as_posix():
+        # The delivered file (HWP when requested) and its checked HWPX share the run.
+        delivered = {(report.get(key) or {}).get("name") for key in ("export", "hwpx_export")}
+        if path.relative_to(export_root).as_posix() not in delivered:
             return None
         report_name = report_path.relative_to(export_root).as_posix()
         source_ref = (report.get("source") or {}).get("copy") or {}
