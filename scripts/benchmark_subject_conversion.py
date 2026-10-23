@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import statistics
 import sys
@@ -145,6 +146,7 @@ def main() -> int:
         pages = 0
         problems = 0
         flow_stats: dict[str, Any] = {}
+        inventories: list[dict[str, Any]] = []
         for run_index in range(1, args.runs + 1):
             if not args.skip_recognition:
                 started = time.perf_counter()
@@ -152,6 +154,15 @@ def main() -> int:
                 recognition_values.append(time.perf_counter() - started)
                 pages = recognized.page_count
                 problems = len(recognized.problems)
+                numbers = [item.number for item in recognized.problems]
+                expected_numbers = set(range(1, spec["problems"] + 1))
+                inventories.append({
+                    "numbers": numbers,
+                    "missing": sorted(expected_numbers - set(numbers)),
+                    "unexpected": sorted(set(numbers) - expected_numbers),
+                    "duplicates": sorted(number for number, count in Counter(numbers).items() if count > 1),
+                    "order_ok": numbers == list(range(1, spec["problems"] + 1)),
+                })
 
             if not args.skip_flow:
                 output_path = args.output_dir / f"{pdf_path.stem}-run{run_index}.hwpx"
@@ -160,7 +171,7 @@ def main() -> int:
                 flow_values.append(time.perf_counter() - started)
                 pages = pages or int(flow_stats.get("pages") or 0)
 
-        quality_ok = args.skip_recognition or problems == spec["problems"]
+        quality_ok = args.skip_recognition or all(item["order_ok"] for item in inventories)
         failed = failed or not quality_ok
         row: dict[str, Any] = {
             "subject": spec["subject"],
@@ -170,6 +181,7 @@ def main() -> int:
             "problems": problems if not args.skip_recognition else None,
             "expected_problems": spec["problems"],
             "quality_ok": quality_ok,
+            "recognition_inventories": inventories,
         }
         if recognition_values:
             row["recognition_s"] = _seconds(recognition_values)

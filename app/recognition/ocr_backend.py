@@ -377,9 +377,21 @@ class TesseractOCRBackend(OCRBackend):
     def ocr_image(self, image: Image.Image) -> OCRResult:
         started_at = time.perf_counter()
         prepped = _prep_crop_for_ocr(image)
+        segmentation_mode = 3
 
         try:
-            data = pytesseract.image_to_data(prepped, lang=self.lang, output_type=pytesseract.Output.DICT)
+            data = pytesseract.image_to_data(
+                prepped, lang=self.lang, output_type=pytesseract.Output.DICT, timeout=30,
+            )
+            # Automatic page segmentation can discard a short, wide paragraph
+            # crop entirely. Preserve its successful page analysis; retry only
+            # empty results as one text block.
+            if not any(str(text).strip() for text in data.get("text", [])):
+                segmentation_mode = 6
+                data = pytesseract.image_to_data(
+                    prepped, lang=self.lang, output_type=pytesseract.Output.DICT,
+                    config="--psm 6", timeout=30,
+                )
         except Exception as exc:
             return OCRResult(
                 text="",
@@ -393,6 +405,7 @@ class TesseractOCRBackend(OCRBackend):
                     confidence=None,
                     lines=[],
                     error=str(exc),
+                    extra={"page_segmentation_mode": segmentation_mode},
                 ),
             )
 
@@ -432,6 +445,7 @@ class TesseractOCRBackend(OCRBackend):
                 text="\n".join(collected),
                 confidence=average_confidence,
                 lines=lines,
+                extra={"page_segmentation_mode": segmentation_mode},
             ),
         )
 

@@ -15,14 +15,15 @@ share one memo.  Documents opened from memory are computed every time.
 Memory: a memoized page costs about 3.7 MB across the four kinds (measured on
 a 40-page Korean exam), so documents longer than ``MAX_MEMO_DOCUMENT_PAGES``
 are not memoized at all (no LRU thrash, no extra memory on the 200-page case),
-entries are bounded by count and, for extractions that carry embedded image
-bytes, by total bytes, an oversized page (scans) is never kept, and a
+entries are bounded by count and retained bytes (text geometry and images),
+an oversized page is never kept, and a
 conversion releases its own entries when it finishes (``forget_file``).
 """
 from __future__ import annotations
 
 import hashlib
 import os
+import sys
 import threading
 from collections import OrderedDict
 from typing import Any, Callable
@@ -106,7 +107,7 @@ def page_memo(page: fitz.Page, kind: str, compute: Callable[[], Any],
     if hit is not None:
         return copy(hit[0])  # copy outside the lock; the stored value is never mutated
     value = compute()
-    size = int(weight(value)) if weight is not None else 0
+    size = int(weight(value)) if weight is not None else _memory_weight(value)
     if size <= MAX_ENTRY_BYTES:
         with _LOCK:
             if key not in _PAGES:
@@ -162,11 +163,27 @@ def copy_text_dict(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _text_dict_weight(data: dict[str, Any]) -> int:
+def _memory_weight(value: Any) -> int:
+    """Account for text/character geometry as well as embedded image bytes.
+
+    Measured once on a cache miss. Counting each object once also handles
+    shared character strings and aliased values without recursive cycles.
+    """
     total = 0
-    for block in data.get("blocks", []):
-        if block.get("type") == 1:
-            total += len(block.get("image") or b"") + len(block.get("mask") or b"")
+    pending = [value]
+    seen: set[int] = set()
+    while pending:
+        item = pending.pop()
+        identity = id(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        total += sys.getsizeof(item)
+        if isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
     return total
 
 
@@ -176,7 +193,7 @@ def source_text_dict(page: fitz.Page, kind: str = "dict") -> dict[str, Any]:
     ``kind`` is "dict" or "rawdict".  Every known caller only reads the blocks,
     but the copy keeps the old fresh-result semantics for free.
     """
-    return page_memo(page, f"text_{kind}", lambda: page.get_text(kind), copy_text_dict, _text_dict_weight)
+    return page_memo(page, f"text_{kind}", lambda: page.get_text(kind), copy_text_dict)
 
 
 def _copy_value(value: Any) -> Any:
@@ -221,4 +238,5 @@ def clear() -> None:
 
 def stats() -> dict[str, int]:
     with _LOCK:
-        return {"pages": len(_PAGES), "documents": len(_DIGESTS), "image_bytes": _TOTAL_WEIGHT}
+        return {"pages": len(_PAGES), "documents": len(_DIGESTS), "weight_bytes": _TOTAL_WEIGHT,
+                "image_bytes": _TOTAL_WEIGHT}  # legacy name retained for diagnostic callers

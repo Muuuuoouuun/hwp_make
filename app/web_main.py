@@ -101,14 +101,13 @@ def validate_upload(path: Path, kind: str):
     if kind in signatures and not prefix.startswith(signatures[kind]):
         raise HTTPException(400, "확장자와 파일 내용이 일치하지 않습니다.")
     if kind in ("hwpx", "docx"):
+        from .document_security import DocumentSecurityError, validate_archive
+
         try:
             with zipfile.ZipFile(path) as archive:
-                entries = archive.infolist()
-                if (
-                    len(entries) > 5000
-                    or sum(x.file_size for x in entries) > 256 * 1024 * 1024
-                ):
-                    raise HTTPException(413, "문서 압축 해제 크기가 너무 큽니다.")
+                validate_archive(archive)
+        except DocumentSecurityError as exc:
+            raise HTTPException(413 if exc.too_large else 400, str(exc)) from exc
         except zipfile.BadZipFile as exc:
             raise HTTPException(400, "손상된 문서입니다.") from exc
     if kind == "pdf":

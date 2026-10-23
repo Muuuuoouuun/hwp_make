@@ -34,9 +34,14 @@ const c = vm.createContext({
   renderBasket() {}, renderList() {}, closeModal() {}, toast() {}, renderWorkspaceStage() {}, visibleModals: () => [],
   flushActiveDraft: async () => true, setWorkflowStep() {}, mobileWorkspaceActive: () => false,
   setButtonBusy() {}, setConversionStatus() {},
+  api: async (url, options) => {
+    assert.equal(url, "/api/export-plan");
+    requested.push({ url, body: JSON.parse(options.body) });
+    return { source_revision: "a".repeat(64) };
+  },
   fetch: async (url, options) => { requested.push({ url, body: JSON.parse(options.body) }); return { ok: false, status: 422, text: async () => JSON.stringify({ detail: { message: "fixture export stopped" } }) }; },
 });
-for (const name of ["isPremiumWorkspace", "restoreBasket", "persistBasket", "restoreNumbering", "resolveBasketProblem", "outputNumber", "numberMapping", "duplicateOriginalNumbers", "syncNumberingControls", "numberingPayload", "changeNumbering", "moveBasketItem", "renderOrderEditor", "moveOrderDraft", "applyOrderEditor", "computeLayoutPlan", "applyUiMode", "basketHasUnavailableProblems", "friendlyErrorMessage", "responseError", "exportSelected", "previewExport", "loadProblems"]) {
+for (const name of ["isPremiumWorkspace", "restoreBasket", "persistBasket", "restoreNumbering", "resolveBasketProblem", "outputNumber", "numberMapping", "duplicateOriginalNumbers", "syncNumberingControls", "numberingPayload", "changeNumbering", "moveBasketItem", "renderOrderEditor", "moveOrderDraft", "applyOrderEditor", "computeLayoutPlan", "applyUiMode", "basketHasUnavailableProblems", "friendlyErrorMessage", "responseError", "reviewedExportPayload", "exportSelected", "previewExport", "loadProblems"]) {
   vm.runInContext(implementation(name), c);
 }
 const plain = (value) => JSON.parse(JSON.stringify(value));
@@ -106,6 +111,8 @@ async function main() {
   state.startNumber = 21;
   els.exportTitle.value = "시험지"; els.exportFormat.value = "hwpx"; els.exportTemplate.value = "basic";
   await c.exportSelected();
+  assert.equal(requested.at(-2).url, "/api/export-plan");
+  assert.equal(requested.at(-1).body.source_revision, "a".repeat(64));
   assert.equal(requested.at(-1).body.workspace, "premium");
   assert.equal(requested.at(-1).body.start_number, 21);
   assert.deepEqual(requested.at(-1).body.ids, state.basket.map((p) => p.id));
@@ -113,6 +120,7 @@ async function main() {
   assert.equal(requested.at(-1).body.workspace, "basic", "simple override wins even on premium route");
   assert.equal(requested.at(-1).body.numbering_mode, "preserve");
   assert.equal(requested.at(-1).body.start_number, 1);
+  assert.equal(requested.at(-1).body.source_revision, undefined, "basic conversion bypasses premium review");
   // A pending save may change original numbers after the user confirmed a
   // different duplicate set. Neither export nor preview may reuse that consent.
   state.numberingMode = "preserve";

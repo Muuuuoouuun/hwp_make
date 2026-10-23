@@ -20,7 +20,7 @@ from lxml import etree
 from PIL import Image
 from pypdf import PdfReader
 
-from . import storage
+from . import document_security, storage
 from .math_text import normalize_recognized_math_layout_text, normalize_recognized_math_text
 from .pdf_math_geometry import (
     glyphs_near_mark,
@@ -610,7 +610,11 @@ def import_image(filename: str, payload: bytes, metadata: dict[str, Any]) -> dic
     if not stem and HAS_OCR:
         try:
             with Image.open(full_path) as image:
-                ocr_text = pytesseract.image_to_string(image, lang="kor+eng")
+                ocr_text = pytesseract.image_to_string(image, lang="kor+eng", timeout=30)
+                if not ocr_text.strip():
+                    ocr_text = pytesseract.image_to_string(
+                        image, lang="kor+eng", config="--psm 6", timeout=30,
+                    )
             stem = _clean_text(ocr_text)
             if stem:
                 has_real_text = True
@@ -2340,6 +2344,8 @@ def _attach_unpositioned_images(chunks: list[dict[str, Any]], images: list[str])
 
 
 def import_docx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        document_security.validate_archive(archive)
     from docx import Document as DocxDocument
 
     save_upload(filename, payload)
@@ -2614,7 +2620,9 @@ def _hwpx_manifest_map(archive: zipfile.ZipFile) -> dict[str, str]:
     mapping: dict[str, str] = {}
     names = set(archive.namelist())
     try:
-        root = etree.fromstring(archive.read("Contents/content.hpf"))
+        root = document_security.parse_document_xml(archive.read("Contents/content.hpf"))
+    except document_security.DocumentSecurityError:
+        raise
     except Exception:
         return mapping
     for item in root.iter():
@@ -2824,9 +2832,9 @@ class _HwpxParagraphNumbering:
         self.numberings: dict[str, dict[int, tuple[str, str, int]]] = {}
         self.counters: dict[str, list[int]] = {}
         try:
-            root = etree.fromstring(
-                archive.read("Contents/header.xml"), etree.XMLParser(resolve_entities=False, no_network=True)
-            )
+            root = document_security.parse_document_xml(archive.read("Contents/header.xml"))
+        except document_security.DocumentSecurityError:
+            raise
         except Exception:
             return
         for node in root.iter():
@@ -2887,9 +2895,9 @@ def _hwpx_section_order(archive: zipfile.ZipFile, names: list[str]) -> list[str]
     sections = [name for name in names if re.fullmatch(r"Contents/section\d+\.xml", name)]
     numeric = sorted(sections, key=lambda name: int(re.search(r"(\d+)\.xml$", name).group(1)))
     try:
-        root = etree.fromstring(
-            archive.read("Contents/content.hpf"), etree.XMLParser(resolve_entities=False, no_network=True)
-        )
+        root = document_security.parse_document_xml(archive.read("Contents/content.hpf"))
+    except document_security.DocumentSecurityError:
+        raise
     except Exception:
         return numeric
     hrefs: dict[str, str] = {}
@@ -2911,6 +2919,8 @@ def _hwpx_section_order(archive: zipfile.ZipFile, names: list[str]) -> list[str]
 
 
 def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
+    with zipfile.ZipFile(io.BytesIO(payload)) as package:
+        document_security.validate_archive(package)
     save_upload(filename, payload)
     notices: list[str] = []
     try:
@@ -2931,7 +2941,9 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
         image_count = 0
         for section_name in sections:
             try:
-                root = etree.fromstring(archive.read(section_name))
+                root = document_security.parse_document_xml(archive.read(section_name))
+            except document_security.DocumentSecurityError:
+                raise
             except Exception as exc:
                 notices.append(f"{section_name} 분석 실패: {exc}")
                 continue

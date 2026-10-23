@@ -118,6 +118,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_problems_subject ON problems(subject)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_problems_tags ON problems(tags)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_problems_hash ON problems(content_hash)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_problems_source_hash ON problems(source_name, content_hash)")
 
 
 def now_iso() -> str:

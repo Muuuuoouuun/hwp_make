@@ -88,15 +88,6 @@ function Stop-NewHwpAutomationProcesses([int[]]$BeforePids) {
     }
 }
 
-function Stop-HwpAutomationProcesses {
-    foreach ($proc in Get-CimInstance Win32_Process -Filter "Name = 'Hwp.exe'" -ErrorAction SilentlyContinue) {
-        if ($proc.CommandLine -notlike "*-Automation*Embedding*") { continue }
-        try {
-            Stop-Process -Id ([int]$proc.ProcessId) -Force -ErrorAction SilentlyContinue
-        } catch {}
-    }
-}
-
 function Get-ElementName($Element) {
     try { return [string]$Element.Current.Name } catch { return "" }
 }
@@ -439,9 +430,12 @@ foreach ($inputPath in $Path) {
         continue
     }
 
-    Stop-HwpAutomationProcesses
-    Start-Sleep -Milliseconds 500
-    $beforePids = Get-HwpAutomationPids
+    $beforePids = @(Get-HwpAutomationPids)
+    if (@($beforePids).Count -gt 0) {
+        Write-Host "SKIP $resolved - another Hancom automation session is active; left untouched"
+        $skipped = $true
+        continue
+    }
     $pdfOutputPath = ""
     if ($resolvedPdfDirectory) {
         $pdfName = ([System.IO.Path]::GetFileNameWithoutExtension($resolved)) + ".pdf"
@@ -486,7 +480,6 @@ foreach ($inputPath in $Path) {
         $failed = $true
     } finally {
         Stop-NewHwpAutomationProcesses $beforePids
-        Stop-HwpAutomationProcesses
     }
 }
 

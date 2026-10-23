@@ -3,7 +3,8 @@
 순수 ASGI 미들웨어다(BaseHTTPMiddleware 는 요청 취소 감지를 깨므로 쓰지 않는다).
 - Host 가 허용 목록(localhost, 127.0.0.1, [::1], HWP_MAKE_ALLOWED_HOSTS)에 없으면 400.
 - POST/PUT/PATCH/DELETE 에 Origin 이 있고 같은 출처가 아니면 403. Origin 이 없는
-  요청(curl, 데스크톱 워커, 테스트 클라이언트)은 그대로 통과한다.
+  요청(curl, 데스크톱 워커, 테스트 클라이언트)은 그대로 통과한다. 브라우저가
+  Sec-Fetch-Site: cross-site 를 알린 변경 요청은 Origin 유무와 관계없이 차단한다.
 """
 from __future__ import annotations
 
@@ -51,7 +52,8 @@ class LocalHostGuardMiddleware:
                 "message": "허용되지 않은 주소로 접속했습니다. 이 컴퓨터의 주소(127.0.0.1 또는 localhost)로 다시 열어 주세요.",
             }})(scope, receive, send)
             return
-        if scope.get("method", "").upper() in STATE_CHANGING_METHODS and b"origin" in headers:
+        if (scope.get("method", "").upper() in STATE_CHANGING_METHODS
+                and (b"origin" in headers or headers.get(b"sec-fetch-site", b"").lower() == b"cross-site")):
             if local_auth.same_origin_problem(Request(scope)):
                 await JSONResponse(status_code=403, content={"detail": {
                     "code": "same_origin_required",

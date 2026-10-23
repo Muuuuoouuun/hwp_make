@@ -12,6 +12,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -87,6 +88,8 @@ def main() -> int:
                 failures.append("memoized text lines differ from the uncached extraction")
             if not first or first is second or first[0]["spans"][0] is second[0]["spans"][0]:
                 failures.append("memo must hand out fresh line/span objects")
+            if memo.stats()["weight_bytes"] <= 0:
+                failures.append("text-only cache entries must contribute to the memory limit")
             # Callers mutate their copy; the memo must not see it.
             second[0]["spans"][0]["text"] = "MUTATED"
             second[0]["spans"][0]["chars"][0]["c"] = "Z"
@@ -203,6 +206,22 @@ def main() -> int:
         if memo.stats()["pages"] != 0 or memo.stats()["documents"] != 0:
             failures.append(f"forget_file must release every path sharing the bytes: {memo.stats()}")
         memo.forget_file(Path(temp) / "missing.pdf")  # must not raise
+
+    # Geometry without image bytes must obey both byte limits.
+    memo.clear()
+    with tempfile.TemporaryDirectory() as temp:
+        path = Path(temp) / "text.pdf"
+        path.write_bytes(_make_pdf())
+        with fitz.open(path) as document:
+            with patch.object(memo, "MAX_ENTRY_BYTES", 1):
+                memo.source_text_dict(document[0], "rawdict")
+                if memo.stats()["pages"]:
+                    failures.append("oversized text geometry entered the cache")
+            with patch.object(memo, "MAX_TOTAL_BYTES", 1):
+                writer._iter_text_lines(document[0])
+                if memo.stats()["pages"] or memo.stats()["weight_bytes"]:
+                    failures.append("text geometry bypassed total-byte eviction")
+    memo.clear()
 
     # _pdf_output_text cache == uncached normalizer, including None/empty inputs.
     # 2026-10-03 R2: a literal '□' in the input is a source text-layer glyph and is kept; only

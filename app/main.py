@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import re
 import shutil
@@ -27,6 +28,7 @@ from . import (
     ai_api,
     collector,
     docx_writer,
+    document_security,
     exam_numbering,
     exam_templates,
     hwpx_writer_v2,
@@ -44,8 +46,8 @@ STATIC_DIR = storage.PROJECT_ROOT / "static"
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 MAX_BASE64_CHARS = ((MAX_UPLOAD_BYTES + 2) // 3) * 4 + 4096
 MAX_EXPORT_PROBLEMS = 500
-MAX_ARCHIVE_ENTRIES = 5000
-MAX_ARCHIVE_EXPANDED_BYTES = 256 * 1024 * 1024
+MAX_ARCHIVE_ENTRIES = document_security.MAX_ARCHIVE_ENTRIES
+MAX_ARCHIVE_EXPANDED_BYTES = document_security.MAX_ARCHIVE_EXPANDED_BYTES
 MAX_REQUEST_BODY_BYTES = MAX_BASE64_CHARS + 1_000_000
 MAX_METADATA_BYTES = 64 * 1024
 _EXPORT_LOCK = threading.Lock()
@@ -61,6 +63,18 @@ class NoCacheStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope: Any) -> Any:
         response = await super().get_response(path, scope)
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return response
+
+
+class UploadedFiles(StaticFiles):
+    async def get_response(self, path: str, scope: Any) -> Any:
+        response = await super().get_response(path, scope)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        # Source names/content are untrusted. An imported HTML/SVG must never
+        # execute with the workspace's origin and authenticated session.
+        if Path(path).suffix.lower() not in storage.IMAGE_EXTENSIONS | {".pdf"}:
+            response.headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+            response.headers["Content-Disposition"] = "attachment"
         return response
 
 
@@ -95,7 +109,7 @@ app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 # 데이터 루트(DATA_DIR) 전체를 마운트하면 problems.sqlite3·user_settings.json까지 HTTP로
 # 노출된다. 실제 서빙이 필요한 uploads/exports 하위만 개별 마운트한다.
 storage.ensure_dirs()
-app.mount("/files/uploads", StaticFiles(directory=storage.UPLOAD_DIR), name="files-uploads")
+app.mount("/files/uploads", UploadedFiles(directory=storage.UPLOAD_DIR), name="files-uploads")
 app.mount("/files/exports", StaticFiles(directory=storage.EXPORT_DIR), name="files-exports")
 
 
@@ -166,7 +180,7 @@ class AttachImagePayload(BaseModel):
 
 
 class ExportPayload(BaseModel):
-    ids: list[int] = Field(min_length=1, max_length=MAX_EXPORT_PROBLEMS)
+    ids: list[Annotated[int, Field(gt=0, strict=True)]] = Field(min_length=1, max_length=MAX_EXPORT_PROBLEMS)
     title: str = Field(default=exam_templates.DEFAULT_EXPORT_TITLE, max_length=300)
     format: Literal["hwpx", "docx"] = "hwpx"
     template_key: str = "basic"
@@ -180,6 +194,11 @@ class ExportPayload(BaseModel):
     numbering_mode: Literal["preserve", "sequential"] = "preserve"
     start_number: int = Field(default=1, ge=1, le=999, strict=True)
     confirm_duplicate_numbers: bool = False
+    source_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class ProblemBatchPayload(BaseModel):
+    ids: list[Annotated[int, Field(gt=0, strict=True)]] = Field(min_length=1, max_length=MAX_EXPORT_PROBLEMS)
 
 
 def _decode_upload(data_base64: str) -> bytes:
@@ -229,14 +248,13 @@ def _validate_import_signature(kind: str, data: bytes) -> None:
     if kind in {"hwpx", "docx"}:
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                entries = archive.infolist()
-                expanded = sum(max(0, item.file_size) for item in entries)
+                document_security.validate_archive(archive)
+        except document_security.DocumentSecurityError as exc:
+            raise HTTPException(status_code=413 if exc.too_large else 400,
+                                detail=user_errors.detail("too_large" if exc.too_large else "damaged", str(exc))) from exc
         except (zipfile.BadZipFile, OSError) as exc:
             raise HTTPException(status_code=400, detail=user_errors.detail(
                 "damaged", f"손상된 {kind.upper()} 패키지입니다.")) from exc
-        if len(entries) > MAX_ARCHIVE_ENTRIES or expanded > MAX_ARCHIVE_EXPANDED_BYTES:
-            raise HTTPException(status_code=413, detail=user_errors.detail(
-                "too_large", f"{kind.upper()} 압축 해제 크기가 허용 범위를 초과합니다."))
 
 
 def _get_template_or_400(template_key: str) -> exam_templates.ExamTemplate:
@@ -264,7 +282,8 @@ def _selected_problems_or_409(ids: list[int]) -> list[dict[str, Any]]:
 
 
 
-def _export_problems(payload: ExportPayload, request: Request | None = None) -> list[dict[str, Any]]:
+def _export_snapshot(payload: ExportPayload, request: Request | None = None
+                     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
     """Resolve the same immutable numbering input for preview and download."""
     if payload.workspace == "basic" and (
         payload.numbering_mode != "preserve"
@@ -278,17 +297,48 @@ def _export_problems(payload: ExportPayload, request: Request | None = None) -> 
     if payload.workspace == "premium":
         _LOCAL_AUTH.require_user(request)
     problems = _selected_problems_or_409(payload.ids)
+    content = [{key: value for key, value in problem.items()
+                if key not in {"created_at", "updated_at", "math_spans", "math_summary", "image_urls"}}
+               for problem in problems]
+    revision = hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True,
+                                         separators=(",", ":")).encode("utf-8")).hexdigest()
+    if payload.source_revision is not None and payload.source_revision != revision:
+        raise HTTPException(status_code=409, detail={
+            "code": "source_changed",
+            "message": "검수 이후 원본 문항이 변경되었습니다. 최신 문항을 확인한 뒤 다시 만들어 주세요.",
+        })
     if payload.workspace == "basic":
-        return problems
+        return problems, problems, revision
     try:
-        return exam_numbering.prepare_export_problems(
+        prepared = exam_numbering.prepare_export_problems(
             problems,
             payload.numbering_mode,
             payload.start_number,
             confirm_duplicate_numbers=payload.confirm_duplicate_numbers,
         )
+        return prepared, problems, revision
     except exam_numbering.NumberingError as exc:
         raise HTTPException(status_code=422, detail=exc.detail) from exc
+
+
+def _export_problems(payload: ExportPayload, request: Request | None = None) -> list[dict[str, Any]]:
+    return _export_snapshot(payload, request)[0]
+
+
+@app.post("/api/export-plan")
+def export_plan(payload: ExportPayload, request: Request = None) -> dict[str, Any]:
+    _get_template_or_400(payload.template_key)
+    prepared, sources, revision = _export_snapshot(payload, request)
+    return {
+        "source_revision": revision,
+        "question_count": len(prepared),
+        "answer_count": sum(bool(str(item.get("answer") or "").strip()) for item in prepared),
+        "items": [{"id": source["id"], "position": position,
+                   "source_name": source.get("source_name", ""),
+                   "original_number": str(source.get("number") or ""),
+                   "output_number": str(output.get("number") or "")}
+                  for position, (source, output) in enumerate(zip(sources, prepared), 1)],
+    }
 
 
 def _effective_native_math(payload: ExportPayload, template: exam_templates.ExamTemplate) -> bool:
@@ -822,7 +872,9 @@ def index() -> FileResponse:
 @app.get("/api/premium-capabilities")
 def premium_capabilities() -> dict[str, Any]:
     """Describe this local development slice without inventing paid access."""
-    return {"available": True, "mode": "local_preview", "billing_enabled": False}
+    return {"available": True, "mode": "local_preview", "billing_enabled": False,
+            "features": {"numbering_review": True, "source_revision_checks": True,
+                         "batch_problem_lookup": True, "max_selection": MAX_EXPORT_PROBLEMS}}
 
 
 @app.get("/api/health")
@@ -871,6 +923,14 @@ def problems(
         "limit": limit,
         "has_more": offset + len(items) < total,
     }
+
+
+@app.post("/api/problems/batch")
+def problem_batch(payload: ProblemBatchPayload) -> dict[str, Any]:
+    ids = list(dict.fromkeys(payload.ids))
+    items = storage.get_problems_by_ids(ids)
+    found = {item["id"] for item in items}
+    return {"items": items, "missing_ids": [item_id for item_id in ids if item_id not in found]}
 
 
 @app.get("/api/problems/{problem_id}")
@@ -1306,7 +1366,8 @@ def collect(payload: CollectPayload) -> dict[str, Any]:
 
 
 @app.post("/api/preview")
-def preview_export(payload: ExportPayload, request: Request = None) -> dict[str, Any]:
+def preview_export(payload: ExportPayload, request: Request = None,
+                   image_format: Literal["svg", "png"] = "svg") -> dict[str, Any]:
     template = _get_template_or_400(payload.template_key)
     problems = _export_problems(payload, request)
     if not preview.available():
@@ -1323,6 +1384,7 @@ def preview_export(payload: ExportPayload, request: Request = None) -> dict[str,
                 include_answer_sheet=payload.include_answer_sheet,
                 native_math=native_math,
                 answer_key_appendix=payload.answer_key_appendix,
+                image_format=image_format,
             )
     except HTTPException:
         raise
@@ -1343,15 +1405,13 @@ def export(payload: ExportPayload, request: Request = None) -> FileResponse:
     native_math = _effective_native_math(payload, template)
     path: Path | None = None
     try:
-        # 이름 선정부터 writer 완료까지 직렬화해 같은 초의 동시 변환이 서로의
-        # 산출물을 덮어쓰지 않게 한다. 로컬 문서 변환은 원래 CPU-bound라 이 제한이
-        # 메모리 급증과 SQLite/파일 경합도 함께 막는다.
-        with _conversion_slot(), _EXPORT_LOCK:
-            path = _unique_export_path(_safe_export_name(title, payload.format))
-            filename = path.name
+        # Write outside the served export tree. Only publication holds the lock;
+        # partial files never appear in history or become downloadable.
+        with _conversion_slot(), tempfile.TemporaryDirectory(prefix="export_", dir=storage.DATA_DIR) as temporary:
+            staged = Path(temporary) / f"document.{payload.format}"
             if payload.format == "docx":
                 docx_writer.write_docx(
-                    path, title, problems, template.key, include_answer_sheet=payload.include_answer_sheet,
+                    staged, title, problems, template.key, include_answer_sheet=payload.include_answer_sheet,
                     answer_key_appendix=payload.answer_key_appendix,
                 )
                 media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -1359,7 +1419,7 @@ def export(payload: ExportPayload, request: Request = None) -> FileResponse:
                 # v2(vendored python-hwpx) 만 실제 한컴에서 열린다. v1(hwpx_writer)은 version.xml
                 # 등 패키지 스켈레톤이 비표준이라 한컴이 "파일 손상"으로 거부한다(실제 뷰어 확인).
                 hwpx_writer_v2.write_hwpx(
-                    path,
+                    staged,
                     title,
                     problems,
                     template.key,
@@ -1368,6 +1428,10 @@ def export(payload: ExportPayload, request: Request = None) -> FileResponse:
                     answer_key_appendix=payload.answer_key_appendix,
                 )
                 media_type = "application/hwp+zip"
+            with _EXPORT_LOCK:
+                path = _unique_export_path(_safe_export_name(title, payload.format))
+                staged.replace(path)
+                filename = path.name
     except HTTPException:
         if path is not None:
             path.unlink(missing_ok=True)

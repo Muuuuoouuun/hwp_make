@@ -17,6 +17,7 @@ storage/importers 에 의존하지 않는다(순환 방지). 산출물은 Recogn
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -87,7 +88,7 @@ _SUBJECT_HINTS: list[tuple[tuple[str, ...], Subject]] = [
 
 
 def infer_subject(filename: str | None) -> Subject:
-    name = str(filename or "")
+    name = re.sub(r"\s+", "", unicodedata.normalize("NFC", str(filename or "")).casefold())
     for keywords, subject in _SUBJECT_HINTS:
         if any(kw in name for kw in keywords):
             return subject

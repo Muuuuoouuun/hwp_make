@@ -1,0 +1,91 @@
+--- a/src/renderer/skia/renderer.rs
++++ b/src/renderer/skia/renderer.rs
+@@ -19,7 +19,7 @@
+ 
+ use super::equation_conv::render_equation;
+ use super::image_conv::{draw_image_bytes, draw_svg_fragment, ImageSampling};
+-use super::text_replay::SkiaTextReplay;
++use super::text_replay::{FontChainCache, SkiaTextReplay};
+ 
+ fn native_skia_can_replay_glyph_run(run: &LayerGlyphRunPaint, resources: &ResourceArena) -> bool {
+     if !native_skia_glyph_run_contract_is_replayable(run, resources) {
+@@ -111,6 +111,7 @@
+     /// key = primary face name (Typeface::family_name), value = Typeface.
+     /// SVG 의 `--font-path` 와 같은 패턴으로 ttfs 디렉토리의 한컴 전용 폰트 (HY견명조 등) 도 사용 가능.
+     custom_typefaces: HashMap<String, Typeface>,
++    font_chains: FontChainCache,
+ }
+ 
+ impl SkiaLayerRenderer {
+@@ -118,12 +119,14 @@
+         Self {
+             font_mgr: FontMgr::default(),
+             custom_typefaces: HashMap::new(),
++            font_chains: FontChainCache::default(),
+         }
+     }
+ 
+     /// 사용자 지정 폰트 디렉토리 (ttfs 등) 의 폰트를 로드하여 Skia 가 직접 사용 가능하게 한다.
+     /// SVG 의 `--font-path` 와 동일한 패턴.
+     pub fn with_font_paths(mut self, font_paths: &[std::path::PathBuf]) -> Self {
++        self.font_chains.lock().unwrap_or_else(|e| e.into_inner()).clear();
+         let mut search_dirs: Vec<std::path::PathBuf> = font_paths.to_vec();
+         for dir in &["ttfs/hwp", "ttfs/windows", "ttfs"] {
+             search_dirs.push(std::path::PathBuf::from(dir));
+@@ -373,6 +376,7 @@
+             canvas,
+             font_mgr: &self.font_mgr,
+             custom_typefaces: &self.custom_typefaces,
++            font_chains: &self.font_chains,
+             output_options,
+         };
+         let open_shape_transform =
+--- a/src/renderer/skia/text_replay.rs
++++ b/src/renderer/skia/text_replay.rs
+@@ -1,4 +1,5 @@
+ use std::collections::HashMap;
++use std::sync::Mutex;
+ 
+ use skia_safe::{
+     font, paint, Canvas, Color, Font, FontMgr, FontStyle, Paint, PathEffect, Rect, Typeface,
+@@ -15,10 +16,14 @@
+ 
+ use super::renderer::colorref_to_skia;
+ 
++pub(super) type FontChainCache = Mutex<HashMap<(String, bool, bool), Vec<Typeface>>>;
++const MAX_FONT_CHAINS: usize = 256;
++
+ pub(super) struct SkiaTextReplay<'a> {
+     pub(super) canvas: &'a Canvas,
+     pub(super) font_mgr: &'a FontMgr,
+     pub(super) custom_typefaces: &'a HashMap<String, Typeface>,
++    pub(super) font_chains: &'a FontChainCache,
+     pub(super) output_options: &'a LayerOutputOptions,
+ }
+ 
+@@ -88,7 +93,10 @@
+                 // 3) 마지막 fallback (legacy_make_typeface)
+                 //
+                 // 모든 후보를 chain 으로 보존 — char 단위 fallback 에 사용.
+-                let typeface_chain: Vec<Typeface> = {
++                let cache_key = (style.font_family.clone(), style.bold, style.italic);
++                let cached = self.font_chains.lock().unwrap_or_else(|e| e.into_inner())
++                    .get(&cache_key).cloned();
++                let typeface_chain: Vec<Typeface> = cached.unwrap_or_else(|| {
+                     let mut chain: Vec<Typeface> = Vec::new();
+                     let mut seen: std::collections::HashSet<String> =
+                         std::collections::HashSet::new();
+@@ -113,8 +121,12 @@
+                     if let Some(tf) = self.font_mgr.legacy_make_typeface(None::<&str>, font_style) {
+                         push(&mut chain, &mut seen, tf);
+                     }
++                    let mut cache = self.font_chains.lock().unwrap_or_else(|e| e.into_inner());
++                    if cache.len() < MAX_FONT_CHAINS {
++                        cache.insert(cache_key, chain.clone());
++                    }
+                     chain
+-                };
++                });
+                 let primary_typeface = typeface_chain.first().cloned();
+                 let font_for_text = |sample: &str, size: f32| -> Option<Font> {
+                     let visible_char = sample.chars().find(|ch| !ch.is_whitespace());

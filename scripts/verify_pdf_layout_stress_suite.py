@@ -231,6 +231,7 @@ def main() -> int:
         "failures": failures,
     }
     report_path = ROOT / "data" / "external_exam_qa" / "layout_stress_suite_report.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
     print(f"Report: {report_path}")

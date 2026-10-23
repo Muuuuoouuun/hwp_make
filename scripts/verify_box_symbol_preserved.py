@@ -52,6 +52,7 @@ def _font() -> str:
     for candidate in (
         r"C:\Windows\Fonts\malgun.ttf",
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     ):
         if Path(candidate).is_file():
             return candidate
@@ -141,7 +142,9 @@ def check_synthetic(tmp: Path) -> None:
     out = tmp / "box_sample.hwpx"
     stats = w.write_pdf_structured_hwpx(pdf, out, native_math=True, source_name="box_sample.pdf")
     texts, scripts = _hwpx_texts(out)
-    joined = "".join(texts)
+    # Noto CJK's PDF ToUnicode maps a space to NBSP; both must preserve the
+    # surrounding literal box characters and word separation.
+    joined = "".join(texts).replace("\u00a0", " ")
     body = joined.count(BOX)
     in_scripts = "".join(scripts).count(BOX)
     _check(f"합성 PDF: 본문 '□' 수 == 원본 '□' 수({source})", body == source, f"body={body} scripts={in_scripts}")

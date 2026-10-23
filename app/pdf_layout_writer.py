@@ -13,6 +13,7 @@ import math
 import os
 import re
 import statistics
+import subprocess
 import sys
 import tempfile
 import time
@@ -632,6 +633,30 @@ _CALIB_FONT_CACHE: dict[str, Any] = {}
 _CALIB_ADVANCE_CACHE: dict[tuple[str, str], float] = {}
 
 
+def _calib_fontconfig_face(face: str) -> Any:
+    """Resolve an installed face without accepting unrelated system fallbacks."""
+
+    try:
+        result = subprocess.run(
+            ["fc-match", "-f", "%{family}\n%{file}\n%{index}\n", "--", face],
+            capture_output=True, text=True, timeout=2, check=True,
+        )
+        family, filename, index, *_ = result.stdout.splitlines()
+        accepted = {face.casefold()}
+        # These families reproduce Times' glyph advances. A generic CJK or
+        # sans fallback cannot calibrate the renderer's Times metrics.
+        if face == "Times New Roman":
+            accepted.update({"liberation serif", "nimbus roman", "tinos"})
+        if not accepted.intersection(name.strip().casefold() for name in family.split(",")):
+            return None
+        candidate = Path(filename)
+        if candidate.is_file():
+            return ImageFont.truetype(str(candidate), _CALIB_REF_PX, index=int(index))
+    except (OSError, ValueError, UnicodeError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 def _calib_font(face: str) -> Any:
     """Return a FreeType handle for ``face``, or ``None`` when unavailable."""
 
@@ -649,6 +674,8 @@ def _calib_font(face: str) -> Any:
             handle = None
             continue
         break
+    if handle is None and sys.platform != "win32":
+        handle = _calib_fontconfig_face(face)
     _CALIB_FONT_CACHE[face] = handle
     return handle
 

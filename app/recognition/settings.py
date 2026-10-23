@@ -16,10 +16,13 @@ from __future__ import annotations
 import json
 import os
 import stat
+import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
 _SETTINGS_FILENAME = "user_settings.json"
+_SETTINGS_LOCK = threading.RLock()
 
 
 def _resolve_runtime_dir(runtime_dir: Path | None) -> Path:
@@ -56,8 +59,19 @@ def save_user_settings(runtime_dir: Path | None, settings: dict[str, Any]) -> Pa
     resolved.mkdir(parents=True, exist_ok=True)
     path = settings_path(resolved)
     payload = json.dumps(settings, ensure_ascii=False, indent=2)
-    path.write_text(payload, encoding="utf-8")
-    _restrict_permissions(path)
+    temporary: Path | None = None
+    try:
+        # NamedTemporaryFile creates a private file before writing any secret.
+        # Readers see either complete version if a save fails or races a read.
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=resolved,
+                                         prefix=".user_settings.", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+        _restrict_permissions(temporary)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return path
 
 
@@ -178,19 +192,22 @@ def update_api_keys(
     Passing ``None`` leaves a provider unchanged; passing an empty string clears
     the stored key for that provider.
     """
-    settings = load_user_settings(runtime_dir)
-    env_overwrites = False
-    if gemini_api_key is not None:
-        _store_key(settings, "gemini_api_key", gemini_api_key)
-        _sync_env_key("GEMINI_API_KEY", gemini_api_key)
-        env_overwrites = True
-    if openai_api_key is not None:
-        _store_key(settings, "openai_api_key", openai_api_key)
-        _sync_env_key("OPENAI_API_KEY", openai_api_key)
-        env_overwrites = True
-    save_user_settings(runtime_dir, settings)
-
-    return summarize_for_response(runtime_dir, env_overwrites=env_overwrites)
+    with _SETTINGS_LOCK:
+        settings = load_user_settings(runtime_dir)
+        env_overwrites = False
+        if gemini_api_key is not None:
+            _store_key(settings, "gemini_api_key", gemini_api_key)
+            env_overwrites = True
+        if openai_api_key is not None:
+            _store_key(settings, "openai_api_key", openai_api_key)
+            env_overwrites = True
+        save_user_settings(runtime_dir, settings)
+        # A failed disk write must not silently change the active credential.
+        if gemini_api_key is not None:
+            _sync_env_key("GEMINI_API_KEY", gemini_api_key)
+        if openai_api_key is not None:
+            _sync_env_key("OPENAI_API_KEY", openai_api_key)
+        return summarize_for_response(runtime_dir, env_overwrites=env_overwrites)
 
 
 def update_openai_api_key(runtime_dir: Path | None, raw_key: str | None) -> dict[str, Any]:

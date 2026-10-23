@@ -33,7 +33,11 @@ const elements = Object.fromEntries([
 let fetchProblem;
 const context = vm.createContext({
   state, els: elements,
-  api: (url) => fetchProblem(Number(url.split("/").pop())),
+  api: (url, options) => {
+    assert.equal(url, "/api/problems/batch");
+    return fetchProblem(JSON.parse(options.body).ids);
+  },
+  asArray: (value) => Array.isArray(value) ? value : [],
   document: { createElement: () => new Element() },
   window: { requestAnimationFrame: () => {} },
   persistBasket() {}, syncPaperPreviewMeta() {}, syncConversionReadyStatus() {},
@@ -49,14 +53,13 @@ for (const name of ["resolveBasketProblem", "basketHasUnavailableProblems", "hyd
   state.basket = Array.from({ length: 205 }, (_, index) => ({ id: index + 1, label: `문항${index + 1}` }));
   state.problemById.set(2, { id: 2, title: "삭제 전 캐시" });
   const calls = [];
-  fetchProblem = async (id) => {
-    calls.push(id);
-    if (id === 2) throw Object.assign(new Error("missing"), { status: 404 });
-    if (id === 3) throw new Error("network down");
-    return { id, title: `문항${id}`, stem: "본문" };
+  fetchProblem = async (ids) => {
+    calls.push(ids);
+    return { items: ids.filter((id) => id !== 2 && id !== 3).map((id) => ({ id, title: `문항${id}`, stem: "본문" })), missing_ids: [2] };
   };
   await context.hydrateBasketProblems();
-  assert.equal(calls.length, 205, "all batches and cached items are revalidated");
+  assert.equal(calls.length, 3, "205 selections use three bounded requests");
+  assert.equal(calls.flat().length, 205, "all batches and cached items are revalidated");
   assert.equal(state.basket.length, 205, "a failure never silently deletes a selection");
   assert.equal(state.basket[1].availability, "missing", "404 is a missing document");
   assert.equal(state.basket[2].availability, "retry", "network failure remains recoverable");
@@ -65,7 +68,10 @@ for (const name of ["resolveBasketProblem", "basketHasUnavailableProblems", "hyd
   assert.equal(elements.previewButton.disabled, true);
   const notice = elements.basketList.children[0];
   assert.match(notice.children[0].textContent, /확인할 수 없는/);
-  fetchProblem = async (id) => ({ id, title: `복구${id}`, stem: "본문" });
+  fetchProblem = async () => { throw new Error("network down"); };
+  await context.hydrateBasketProblems();
+  assert.equal(state.basket.every((entry) => entry.availability === "retry"), true);
+  fetchProblem = async (ids) => ({ items: ids.map((id) => ({ id, title: `복구${id}`, stem: "본문" })), missing_ids: [] });
   await notice.children[1].listeners.click();
   assert.equal(context.basketHasUnavailableProblems(), false);
   assert.equal(elements.exportButton.disabled, false, "retry restores export readiness");
@@ -76,7 +82,7 @@ for (const name of ["resolveBasketProblem", "basketHasUnavailableProblems", "hyd
   fetchProblem = () => new Promise((resolve) => { complete = resolve; });
   const pending = context.hydrateBasketProblems();
   state.basket = [];
-  complete({ id: 900, title: "late response" });
+  complete({ items: [{ id: 900, title: "late response" }], missing_ids: [] });
   await pending;
   assert.equal(state.basket.length, 0);
   assert.equal(state.problemById.has(900), false);

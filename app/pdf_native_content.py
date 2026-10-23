@@ -29,6 +29,20 @@ def _figure_inside_table(figure: fitz.Rect, table: fitz.Rect) -> bool:
     return area > 0 and (figure & table).get_area() >= area * 0.90
 
 
+def _overlapping_source_cells(rows) -> bool:
+    """A grid partitions its area; nested decorative frames are not cells."""
+    cells = [fitz.Rect(cell) for row in rows for cell in row.cells if cell]
+    cells.sort(key=lambda cell: cell.x0)
+    for index, first in enumerate(cells):
+        for following in range(index + 1, len(cells)):
+            second = cells[following]
+            if second.x0 >= first.x1:
+                break
+            if (first & second).get_area() > 0.5:
+                return True
+    return False
+
+
 def source_margin_label_indices(page, lines: list[dict]) -> set[int]:
     """Recognize a duplicate header printed vertically in the outer page margin.
 
@@ -652,6 +666,7 @@ def _native_images_and_frames(page, lines, cell_regions=(), backgrounds=None):
                 if (
                     len(re.findall(r"[가-힣]", w._line_text(line))) >= 12
                     or len(re.findall(r"[a-zA-Z]", w._line_text(line))) >= 24
+                    or re.match(r"^(?:\d{1,2}[.]|[①②③④⑤])\s*\S", w._line_text(line).strip())
                 )
                 and region.contains(w._item_bbox(line))
             ]
@@ -685,7 +700,11 @@ def _native_images_and_frames(page, lines, cell_regions=(), backgrounds=None):
                 # Some frames also contain an actual illustration (e.g. a
                 # teacher below a speech bubble). Retain detailed areas outside
                 # the prose instead of dropping the complete bitmap.
-                native_lines = [line for line in lines if region.contains(w._item_bbox(line))]
+                # Source text boxes can cross a bitmap edge by a few points.
+                # A cap cropped from the PDF must not bake that native title
+                # into an image. The original decoration is retained separately
+                # as a background, without rendering any source text into it.
+                native_lines = [line for line in lines if region.intersects(w._item_bbox(line))]
                 text_bounds = w._union_rect([w._item_bbox(line) for line in native_lines or prose])
                 for remainder in (
                     fitz.Rect(region.x0, region.y0, region.x1, text_bounds.y0 - 2),
@@ -1312,6 +1331,8 @@ def extract_native_content(
                     or region.width > page.rect.width * 0.48
                     or region.height > page.rect.height * 0.4
                 ):
+                    continue
+                if _overlapping_source_cells(found.rows):
                     continue
                 cells = []
                 for row in found.rows:

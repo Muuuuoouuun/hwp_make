@@ -415,6 +415,14 @@ async function api(path, options = {}) {
   return response.json();
 }
 
+async function reviewedExportPayload(payload, signal) {
+  if (payload.workspace !== "premium") return payload;
+  const plan = await api("/api/export-plan", {
+    method: "POST", body: JSON.stringify(payload), signal,
+  });
+  return { ...payload, source_revision: plan.source_revision };
+}
+
 function setButtonBusy(button, busy, busyLabel = "처리 중...") {
   if (!button) return;
   if (busy) {
@@ -2445,21 +2453,27 @@ async function hydrateBasketProblems({ revalidate = true } = {}) {
   if (!missingIds.length) return;
   for (let offset = 0; offset < missingIds.length; offset += 100) {
     const batch = missingIds.slice(offset, offset + 100);
-    const settled = await Promise.allSettled(batch.map((id) => api(`/api/problems/${id}`)));
-    settled.forEach((result, index) => {
-      const id = batch[index];
+    let result;
+    try {
+      result = await api("/api/problems/batch", { method: "POST", body: JSON.stringify({ ids: batch }) });
+    } catch (error) {
+      for (const id of batch) {
+        const entry = state.basket.find((item) => item.id === id);
+        if (entry) entry.availability = "retry";
+      }
+      continue;
+    }
+    const items = new Map(asArray(result?.items).map((problem) => [problem.id, problem]));
+    const absent = new Set(asArray(result?.missing_ids));
+    batch.forEach((id) => {
       const entry = state.basket.find((item) => item.id === id);
       if (!entry) return;
-      if (result.status !== "fulfilled") {
-        entry.availability = result.reason?.status === 404 ? "missing" : "retry";
-        return;
-      }
-      const problem = result.value?.item || result.value;
+      const problem = items.get(id);
       if (problem?.id === id) {
         state.problemById.set(problem.id, problem);
         delete entry.availability;
       } else {
-        entry.availability = "retry";
+        entry.availability = absent.has(id) ? "missing" : "retry";
       }
     });
   }
@@ -2988,21 +3002,18 @@ async function exportSelected(idsOverride = null, overrides = null, { signal = n
   try {
     let response;
     try {
+      const payload = await reviewedExportPayload({
+        ids, title: exportTitle, format: exportFormat, template_key: templateKey,
+        include_answer_sheet: includeAnswerSheet, native_math: nativeMath, ...numbering,
+      }, signal);
       response = await fetch("/api/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: signal || undefined,
-        body: JSON.stringify({
-          ids,
-          title: exportTitle,
-          format: exportFormat,
-          template_key: templateKey,
-          include_answer_sheet: includeAnswerSheet,
-          native_math: nativeMath,
-          ...numbering,
-        }),
+        body: JSON.stringify(payload),
       });
     } catch (error) {
+      if (error.status) throw error;
       throw new Error(friendlyErrorMessage(error));
     }
     if (!response.ok) throw await responseError(response);
@@ -3190,17 +3201,15 @@ async function previewExport() {
   els.previewButton.disabled = true;
   els.exportButton.disabled = true;
   try {
+    const payload = await reviewedExportPayload({
+      ids, title: els.exportTitle.value.trim() || DEFAULT_EXPORT_TITLE, format: "hwpx",
+      template_key: els.exportTemplate.value || "basic",
+      include_answer_sheet: els.exportAnswerSheet.checked,
+      native_math: Boolean(els.exportNativeMath?.checked), ...numbering,
+    });
     const result = await api("/api/preview", {
       method: "POST",
-      body: JSON.stringify({
-        ids,
-        title: els.exportTitle.value.trim() || DEFAULT_EXPORT_TITLE,
-        format: "hwpx",
-        template_key: els.exportTemplate.value || "basic",
-        include_answer_sheet: els.exportAnswerSheet.checked,
-        native_math: Boolean(els.exportNativeMath?.checked),
-        ...numbering,
-      }),
+      body: JSON.stringify(payload),
     });
     resetActualPreview();
     state.actualPreviewPages = asArray(result.pages).filter(Boolean);

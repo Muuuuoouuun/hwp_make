@@ -1,0 +1,56 @@
+{
+  "package": "rhwp-python",
+  "version": "0.7.0+nativecell1.fontcache1",
+  "core_version": "0.7.13",
+  "core_repository": "https://github.com/edwardkim/rhwp",
+  "core_commit": "ce45231c0c88efd5397d8fae9cd7d73de915095d",
+  "binding_repository": "https://github.com/DanMeon/rhwp-python",
+  "binding_commit": "c42f46aee3959c7caa33db771c0addc1a8302e61",
+  "python_abi": "abi3-py310",
+  "rust": "1.98.1",
+  "maturin": "1.15.0",
+  "target": "x86_64-unknown-linux-gnu",
+  "host": "Debian GNU/Linux 13 x86_64",
+  "tested_python": "3.12.14",
+  "patchelf": "0.17.2.4",
+  "wheel_tag": "cp310-abi3-manylinux_2_38_x86_64",
+  "wheel_cached_path": "tmp/renderer-linux-build/font-cache-wheels/rhwp_python-0.7.0+nativecell1.fontcache1-cp310-abi3-manylinux_2_38_x86_64.whl",
+  "wheel_sha256": "4ad029de5514ef5a98f4fb9e186c03d0e3fc64d62b2fa366d23dc1ca254afedb",
+  "distribution": "Local build cache only; not committed or published",
+  "artifacts": {
+    "Cargo.lock": "894f4c96d50cdc42eee783a4f3b67bac4e5003cd98bf89f40fd4257cebc84269",
+    "rhwp-core.patch": "ff95d4d9b435c2636c32b9ec7c522488458419f26193963168b6b9af67b103c1",
+    "rhwp-core-font-cache.patch": "c77723b9384ad5d4a30a9706aba20e0dcf540219ad2fadc8562081e02f3592cf",
+    "rhwp-python.patch": "0e74eefd2f5d30be4c1634c26c762ee42409b921856fff538247083f688dc649",
+    "rhwp-python-font-cache.patch": "6da9c8b42b17fbbc09436e6a55070836ac850b2a4ed5ce5c772fa82600c89e75",
+    "rhwp-core.LICENSE": "d6ea0e91bf1e6136b606e288e7e22dc44e39b4f087d4bdcde2bd0d8aaf5314dd",
+    "rhwp-python.LICENSE": "a2648a14c45481193a27a5d37a5016b23688403c2d1fd0f51844ab8e12cebe77",
+    "rebuild-linux.sh": "2f0abc09e68e354a9cd90a91f3b3b95d4bc10eb1c5467fc8f564bd0db2694e17",
+    "README.md": "60fe3801ba43b21c9acb1b6f6881f1162c7080f4970e0c585c36718664dcb848"
+  },
+  "verification": {
+    "render_gate": "tmp/layout-improve-20261023/font-cache-regression/report.json",
+    "summary": {
+      "PASS": 7,
+      "SKIP": 0,
+      "FAIL": 0
+    },
+    "freetype_preload_required": false,
+    "hancom_native_editing_verified": false,
+    "pixel_comparison": "tmp/layout-improve-20261023/renderer-comparison.json"
+  },
+  "previous_build": {
+    "version": "0.7.0+nativecell1",
+    "wheel_cached_path": "tmp/renderer-linux-build/wheels/rhwp_python-0.7.0+nativecell1-cp310-abi3-manylinux_2_38_x86_64.whl",
+    "wheel_sha256": "bf7099b4e268fe17e6ff43ee92d2ca2e400fb880dbcc7ab031ec7788680c5a6f"
+  },
+  "core_patch_series": [
+    "rhwp-core.patch",
+    "rhwp-core-font-cache.patch"
+  ],
+  "binding_patch_series": [
+    "rhwp-python.patch",
+    "rhwp-python-font-cache.patch"
+  ],
+  "built_Cargo_lock_sha256": "631ca43d2912367d141604fc5dcbb1fe575d119ae8c72db818e7b139a33a50fe"
+}
