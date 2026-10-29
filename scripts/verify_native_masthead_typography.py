@@ -2,12 +2,14 @@
 
 from pathlib import Path
 from copy import deepcopy
+import io
 import sys
 import tempfile
 import zipfile
 from types import SimpleNamespace
 import fitz
 from lxml import etree
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.pdf_masthead_typography import measure_source_masthead
@@ -77,6 +79,20 @@ def main():
             plain.insert_text((150, 145), subject, fontname="korea", fontsize=30)
             measured = measure_source_masthead(plain, 220)
             assert measured and measured["area"]["text"] == subject
+        image_page = doc.new_page(width=842, height=1191)
+        image_page.insert_text((205, 135), "2026학년도 시험 문제지", fontname="korea", fontsize=19)
+        image_page.insert_text((90, 180), "제3 교시", fontname="korea", fontsize=19)
+        image_page.insert_text((735, 135), "1", fontname="helv", fontsize=25)
+        image_data = io.BytesIO()
+        Image.new("RGB", (160, 42), "white").save(image_data, format="PNG")
+        image_page.insert_image(fitz.Rect(340, 154, 502, 195), stream=image_data.getvalue())
+        assert not measure_source_masthead(image_page, 220), "image alone does not establish subject text"
+        image_meta = measure_source_masthead(image_page, 220, subject_area="영어 영역")
+        assert image_meta["area"]["text"] == "영어 영역"
+        image_bounds = image_meta["area"]["bbox_pt"]
+        assert abs((image_bounds[0] + image_bounds[2]) / 2 - 421) < 1
+        assert abs(image_bounds[1] - 154) < 1 and abs(image_bounds[3] - 195) < 1
+        assert image_meta["area"]["spans"][0]["font_size_pt"] > image_meta["title"]["spans"][0]["font_size_pt"]
         items = [
             {
                 "stem": "1. Read the native paragraph and compare the observed values.",
@@ -132,6 +148,16 @@ def main():
         for name in ('title', 'area', 'period_geometry', 'page_number'):
             left, baseline = meta[name]['bbox_pt'][0]*scale/75, meta[name]['baseline_pt']*scale/75
             assert any(abs(x-left) < .1 and abs(y-baseline) < .1 for _, x, y in positions), (name, left, baseline)
+        image_items = deepcopy(items)
+        image_items[0]["layout"]["source_masthead_area"] = "영어 영역"
+        image_items[0]["layout"]["source_masthead_typography"] = image_meta
+        image_output = Path(temp) / "image-area.hwpx"
+        write_hwpx(image_output, image_meta["title"]["text"], image_items,
+                   "kice_english", native_math=True, preserve_source_layout=True)
+        image_section, _ = package(image_output)
+        image_header = image_section.find('.//' + HP + 'header')
+        assert image_header is not None
+        assert "영어 영역" in ''.join(image_header.itertext()), "image area did not become editable header text"
         for row_index, row in enumerate(running.findall('.//' + HP + 'tbl/' + HP + 'tr')):
             cells = row.findall(HP + 'tc')
             assert all(int(c.find(HP + 'cellAddr').get('rowAddr')) == row_index for c in cells)

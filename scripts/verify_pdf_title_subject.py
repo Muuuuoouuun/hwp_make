@@ -47,21 +47,13 @@ def _check(name: str, condition: bool, detail: str = "") -> None:
         print(f"FAIL: {name} {detail}".strip())
 
 
-def _font() -> str:
-    for candidate in (
-        r"C:\Windows\Fonts\malgun.ttf",
-        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-    ):
-        if Path(candidate).is_file():
-            return candidate
-    return ""
-
-
 def _make_pdf(path: Path, head_lines: list[str], body_lines: list[str]) -> None:
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
-    font = _font()
-    kwargs = {"fontfile": font, "fontname": "F0"} if font else {"fontname": "helv"}
+    # MuPDF's bundled Korean font keeps synthetic text extraction independent
+    # of the host OS and its installed fonts.
+    page.insert_font(fontname="F0", fontbuffer=fitz.Font("korea").buffer)
+    kwargs = {"fontname": "F0"}
     y = 40.0
     for text in head_lines:
         page.insert_text((60, y), text, fontsize=12, **kwargs)
@@ -147,9 +139,6 @@ def check_native_output(tmp: Path) -> None:
         stats = w.write_pdf_structured_hwpx(english, out, native_math=True, source_name="eng_sample_a.pdf")
     except ValueError as exc:
         # 예전엔 'SKIP-ish' 출력 뒤 return 해 영어 머리말·제목 핀이 조용히 빠지고 exit 0 이었다.
-        if not _font():
-            print(f"SKIP: 한글 글꼴이 없어 합성 영어 PDF 를 변환할 수 없음 ({exc})")
-            raise SystemExit(2)
         _check("합성 영어 PDF 변환", False, f"ValueError: {exc}")
         return
     texts, scripts = _hwpx_texts(out)
@@ -167,9 +156,6 @@ def check_native_output(tmp: Path) -> None:
         stats2 = w.write_pdf_structured_hwpx(plain, out2, native_math=True, source_name="my_exam_v2.pdf")
     except ValueError as exc:
         # 예전엔 'SKIP-ish' 출력 뒤 return 해 제목·영역 핀 4개가 조용히 빠지고 exit 0 이었다.
-        if not _font():
-            print(f"SKIP: 한글 글꼴이 없어 합성 무제 PDF 를 변환할 수 없음 ({exc})")
-            raise SystemExit(2)
         _check("합성 무제 PDF 변환", False, f"ValueError: {exc}")
         return
     texts2, scripts2 = _hwpx_texts(out2)

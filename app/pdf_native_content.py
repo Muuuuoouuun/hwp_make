@@ -1262,7 +1262,7 @@ def recover_native_sum_limits(lines: list[dict]) -> list[dict]:
 
 
 def extract_native_content(
-    pdf_path: Path, *, max_pages: int | None = None
+    pdf_path: Path, *, max_pages: int | None = None, subject_area: str = ""
 ) -> tuple[list[dict], list[dict]]:
     from . import importers, pdf_layout_writer as w
     from .pdf_math_geometry import recover_native_radicals
@@ -1280,7 +1280,9 @@ def extract_native_content(
             body_top = w._page_body_top(page)
             if page_index == 0:
                 from .pdf_masthead_typography import measure_source_masthead
-                source_masthead_typography = measure_source_masthead(page, body_top)
+                source_masthead_typography = measure_source_masthead(
+                    page, body_top, subject_area=subject_area,
+                )
                 areas = [w._pdf_output_text(w._line_text(line)).strip()
                          for line in w._iter_text_lines(page)
                          if w._item_bbox(line).y1 < body_top
@@ -1741,7 +1743,9 @@ def write_native_content(
 ) -> dict:
     from . import hwpx_writer, hwpx_writer_v2, math_text, pdf_layout_writer as w
 
-    items, provenance = extract_native_content(pdf_path, max_pages=page_limit)
+    items, provenance = extract_native_content(
+        pdf_path, max_pages=page_limit, subject_area=subject_area,
+    )
     if not items:
         raise ValueError("no native PDF body content")
     if subject_area and not any((item.get("layout") or {}).get("source_masthead_area") for item in items):
