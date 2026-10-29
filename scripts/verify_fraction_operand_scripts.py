@@ -48,8 +48,11 @@ def synthetic():
     check(len(recover_native_scripts(separated)[0]["spans"]) == 2, "baseline n+1 is not invented as a subscript")
 
 
-def actual():
+def actual() -> bool:
     source = ROOT / "data/uploads/25수능 수학.pdf"
+    if not source.is_file():
+        print(f"SKIP: 실물 수학 PDF가 없습니다 ({source})")
+        return False
     with fitz.open(source) as document:
         for page_index, required in (
             (13, [r"\frac{(a_{n}+2)^{2}}{na_{n}+5n^{2}-2}"]),
@@ -65,9 +68,11 @@ def actual():
           "the original lossy ellipse equations remain rejected by the independent attachment gate")
     check(inspect_script_attachments(expected, ["{x^{2}} over {a^{2}}", "{y^{2}} over {a^{2}}"])["ok"],
           "correct native ellipse numerator attachments pass the unchanged semantic gate")
+    return True
 
 
 if __name__ == "__main__":
     synthetic()
-    actual()
+    if not actual():
+        raise SystemExit(2)
     print("FRACTION_OPERAND_SCRIPTS_OK")

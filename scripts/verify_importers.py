@@ -20,7 +20,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-os.environ["HWP_MAKE_DATA_DIR"] = str(ROOT / "data" / "verify_tmp2")
+os.environ.setdefault("HWP_MAKE_DATA_DIR", str(ROOT / "data" / "verify_tmp2"))
 
 from PIL import Image  # noqa: E402
 

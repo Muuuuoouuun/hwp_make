@@ -9,7 +9,7 @@ HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
 
 
-def measure_source_masthead(page, body_top):
+def measure_source_masthead(page, body_top, *, subject_area=""):
     from .pdf_layout_writer import _recover_pdf_font_name
 
     lines = [
@@ -24,10 +24,12 @@ def measure_source_masthead(page, body_top):
     areas = [
         line for line in lines if re.fullmatch(r".{1,16}영역(?:\s*\([^\n]+\))?", text(line))
     ]
-    if not titles or not areas:
+    if not titles:
         return {}
-    area = max(areas, key=lambda line: max(s.get("size", 0) for s in line["spans"]))
-    title = min(titles, key=lambda line: abs(line["bbox"][1] - area["bbox"][1]))
+    area = max(areas, key=lambda line: max(s.get("size", 0) for s in line["spans"])) if areas else None
+    title = (min(titles, key=lambda line: abs(line["bbox"][1] - area["bbox"][1]))
+             if area is not None else titles[0])
+    period = next((line for line in lines if re.fullmatch(r"제\s*\d+\s*교시", text(line))), None)
     raw_spans = {tuple(s.get("bbox", ())): s for b in page.get_text("rawdict")["blocks"]
                  for l in b.get("lines", []) for s in l.get("spans", [])}
 
@@ -70,7 +72,38 @@ def measure_source_masthead(page, body_top):
             "spans": measured_spans,
         }
 
-    period = next((line for line in lines if re.fullmatch(r"제\s*\d+\s*교시", text(line))), None)
+    area_record = record(area) if area is not None else None
+    if (area_record is None and period is not None
+        and re.fullmatch(r"[가-힣]{1,8}\s*영역", subject_area.strip())):
+        # Some KICE PDFs store the large subject label as an image. Recreate
+        # just that label as editable text at the image's source geometry.
+        title_bottom = float(title["bbox"][3])
+        candidates = []
+        for image in page.get_images(full=True):
+            for rect in page.get_image_rects(image[0]):
+                center = (rect.x0 + rect.x1) / 2
+                if (title_bottom <= rect.y0 < rect.y1 < body_top
+                    and 70 <= rect.width <= page.rect.width * .4
+                    and 20 <= rect.height <= 80
+                    and 2.5 <= rect.width / rect.height <= 6
+                    and abs(center - page.rect.width / 2) <= page.rect.width * .08):
+                    candidates.append(rect)
+        if len(candidates) == 1:
+            rect = candidates[0]
+            size = max(16.0, min(36.0, rect.height * .72))
+            glyphs = len(re.sub(r"\s", "", subject_area))
+            width = max(85, min(145, round(rect.width / (size * glyphs) * 100)))
+            area_record = {
+                "text": subject_area.strip(),
+                "bbox_pt": [rect.x0, rect.y0, rect.x1, rect.y1],
+                "baseline_pt": rect.y0 + rect.height * .84,
+                "spans": [{"text": subject_area.strip(), "font_name": "돋움",
+                           "font_size_pt": size, "bold": True,
+                           "font_width_percent": width, "letter_spacing_percent": 0}],
+            }
+    if area_record is None:
+        return {}
+
     numbers = [s for line in lines for s in line["spans"]
                if re.fullmatch(r"\d{1,3}", str(s.get("text", "")).strip())
                and s["bbox"][0] > page.rect.width * .75]
@@ -78,7 +111,7 @@ def measure_source_masthead(page, body_top):
     for drawing in page.get_drawings() if hasattr(page, "get_drawings") else []:
         for item in drawing["items"]:
             if (item[0] == "l" and abs(item[1].y - item[2].y) < .5
-                and area["bbox"][3] < item[1].y < body_top
+                and area_record["bbox_pt"][3] < item[1].y < body_top
                 and abs(item[2].x - item[1].x) > page.rect.width * .65):
                 rules.append({"y_pt": item[1].y, "left_pt": min(item[1].x, item[2].x),
                               "right_pt": max(item[1].x, item[2].x),
@@ -86,7 +119,7 @@ def measure_source_masthead(page, body_top):
     result = {
         "source_page_width_pt": page.rect.width,
         "title": record(title, is_title=True),
-        "area": record(area),
+        "area": area_record,
         "period": text(period) if period is not None else "",
     }
     if period is not None:

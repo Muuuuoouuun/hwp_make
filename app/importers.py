@@ -2287,6 +2287,11 @@ def _create_from_chunks(
         answer = str(chunk.get("answer") or answer)
         explanation = str(chunk.get("explanation") or explanation)
         text, choices = _split_stem_and_choices(text)
+        tables = chunk.get("tables") or []
+        if source_type == "hwpx" and not choices:
+            choices, tables = _hwpx_choice_table(tables)
+            if choices:
+                chunk["tables"] = tables
         number = (
             str(chunk.get("number_hint") or "")
             or (_extract_number(text, sequence) if QUESTION_LINE_RE.match(text) else "")
@@ -2304,10 +2309,45 @@ def _create_from_chunks(
                 "answer": answer,
                 "explanation": explanation,
                 "image_paths": chunk["images"],
-                "tables": chunk.get("tables") or [],
+                "tables": tables,
             }
         )
     return sink
+
+
+def _hwpx_choice_table(tables: list[list[list[str]]]) -> tuple[list[str], list[list[list[str]]]]:
+    """Move a table made entirely of ①–⑤ choices into editable choice fields.
+
+    Keep mixed tables untouched: their cells may contain a diagram, stem, or
+    other content that cannot be safely represented as five choices.
+    """
+    for index, table in enumerate(tables):
+        rows = [[str(cell).strip() for cell in row if str(cell).strip()] for row in table]
+        rows = [row for row in rows if row]
+        markers = list("①②③④⑤")
+        structured: list[str] = []
+        if len(rows) == 5 and all(
+            len(row) == 2 and row[0] == marker and row[1]
+            for row, marker in zip(rows, markers)
+        ):
+            structured = [row[1] for row in rows]
+        elif (len(rows) == 2 and rows[0] == markers
+              and len(rows[1]) == 5 and all(rows[1])):
+            structured = rows[1]
+        if structured:
+            return [_normalize_pdf_choice_body(value) for value in structured], [
+                *tables[:index], *tables[index + 1:]
+            ]
+        cells = [cell for row in rows for cell in row]
+        if not cells:
+            continue
+        raw = "\n".join(cells)
+        if re.findall(r"[①②③④⑤]", raw) != list("①②③④⑤"):
+            continue
+        stem, choices = _split_stem_and_choices(raw)
+        if not stem.strip() and len(choices) == 5 and all(choices):
+            return choices, [*tables[:index], *tables[index + 1:]]
+    return [], tables
 
 
 VISUAL_CUE_RE = re.compile(r"(그림|그래프|도형|좌표평면|자료|표|곡선|직선|삼각형|사각형|원)")
@@ -2964,9 +3004,10 @@ def import_hwpx(filename: str, payload: bytes, metadata: dict[str, Any]) -> dict
                 tables = [rows for rows in tables if rows]
                 texts: list[str] = []
                 images: list[str] = []
-                # 미주 안 그림은 해당 문항에 붙이고, 미주 글은 정답·풀이로만 쓴다.
+                # 표·미주 안 그림도 해당 문항에 붙인다. 두 영역의 글은 각각
+                # 표 셀·정답/풀이에서 따로 읽어 본문 중복을 피한다.
                 for kind, node in _hwpx_inline_items(
-                    para, skip=frozenset({"tbl"}), images_only=frozenset({"endNote"})
+                    para, images_only=frozenset({"tbl", "endNote"})
                 ):
                     if kind == "text":
                         texts.append(node)

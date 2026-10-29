@@ -190,12 +190,24 @@ def main() -> int:
     hard_fail = any(s["has_error"] or not s.get("reopen_ok") for s in current)
 
     if args.update or not BASELINE_PATH.exists():
+        if args.update and BASELINE_PATH.exists():
+            previous = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+            missing = {item["name"] for item in previous} - {item["name"] for item in current}
+            if missing:
+                print("baseline 갱신 중단: 기준선 표본이 없습니다: " + ", ".join(sorted(missing)))
+                return 1
         BASELINE_PATH.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"baseline 저장: {BASELINE_PATH}")
         return 1 if hard_fail else 0
 
     baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
-    if baseline == current:
+    by_name = {item["name"]: item for item in baseline}
+    mismatched = [item for item in current if by_name.get(item["name"]) != item]
+    if not mismatched:
+        missing = sorted(set(by_name) - {item["name"] for item in current})
+        if missing and not args.samples:
+            print("SKIP: 기준선 표본이 없어 일부 E2E를 실행하지 못했습니다: " + ", ".join(missing))
+            return 1 if hard_fail else 2
         print("baseline과 일치 (무회귀).")
         return 1 if hard_fail else 0
 
