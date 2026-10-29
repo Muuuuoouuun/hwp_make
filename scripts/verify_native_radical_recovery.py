@@ -50,7 +50,11 @@ def main():
         check(any(s["text"] == "z" for line in after for s in line["spans"]),
               "a following symbol outside the source vinculum stays outside the root")
         check(literal(after) == literal(lines), "synthetic recovery conserves every operand and suffix glyph")
-    with fitz.open(ROOT/'data/uploads/25수능 수학.pdf') as doc:
+    sample = ROOT/'data/uploads/25수능 수학.pdf'
+    if not sample.is_file():
+        print(f"SKIP: real-source radical checks require {sample}")
+        raise SystemExit(2)
+    with fitz.open(sample) as doc:
         for index in (12,13,32,33):
             before = w._iter_text_lines(doc[index])
             after = recover_native_radicals(before,source_page=doc[index])
