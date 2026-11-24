@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>공통 상태</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm" style="min-height: 1740px; padding: 40px 0 64px">
+  <div class="wrap stack" style="gap: 28px">
+    <header class="stack" style="gap: 6px">
+      <h1 class="t-h1">공통 상태 · 오류 · 오프라인 · 권한</h1>
+      <p class="soft">모든 상태는 무엇이 일어났는지, 내 자료가 어떻게 됐는지, 지금 할 수 있는 일을 함께 알려 줍니다. 기본 변환 결과로 돌아가는 길은 어떤 상태에서도 막지 않습니다.</p>
+    </header>
+
+    <section class="stack" style="gap: 14px" aria-labelledby="g1">
+      <h2 id="g1" class="t-h2">연결·서버</h2>
+      <div class="grid-3" style="gap: 20px">
+        <div class="card card-pad stack" style="gap: 12px" role="alert">
+          <span class="row" style="gap: 10px"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" style="color: #b42f3f"><path d="M3 3l18 18M8.5 16.5a5 5 0 0 1 7 0M5 12.5a10 10 0 0 1 4-2.4M19 12.5a10 10 0 0 0-2.2-1.6M2 8.8A15 15 0 0 1 7 6M22 8.8A15 15 0 0 0 12 5M12 20h.01"></path></svg><strong>서버에 연결하지 못했습니다</strong></span>
+          <p class="t-small soft">연결 상태를 확인한 뒤 다시 시도해 주세요. 선택한 파일은 그대로 유지됩니다.</p>
+          <button class="btn" type="button" style="align-self: flex-start">다시 시도</button>
+        </div>
+        <div class="card card-pad stack" style="gap: 12px">
+          <span class="row" style="gap: 10px"><span class="chip chip-warn">혼잡</span><strong>변환 요청이 많습니다</strong></span>
+          <p class="t-small soft">잠시 후 다시 시도해 주세요. 선택한 파일은 그대로 유지됩니다.</p>
+          <button class="btn" type="button" style="align-self: flex-start">다시 시도</button>
+        </div>
+        <div class="card card-pad stack" style="gap: 12px">
+          <div class="notice notice-warn t-small" role="status" style="padding: 10px 12px"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M8.5 16.5a5 5 0 0 1 7 0M12 20h.01"></path></svg><span><strong>연결 끊김</strong> · 변경 내용이 아직 저장되지 않았습니다. 다시 연결되면 저장을 재시도하며, 그 전에는 시험지를 만들 수 없습니다.</span></div>
+          <span class="label">프리미엄 저장 표시</span>
+          <div class="wrap-row" style="gap: 6px"><span class="chip chip-info">저장 중…</span><span class="chip chip-ok">저장됨 · 14:32</span><span class="chip chip-warn">연결 끊김</span><span class="chip chip-err">저장 실패</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="stack" style="gap: 14px" aria-labelledby="g2">
+      <h2 id="g2" class="t-h2">로그인·권한</h2>
+      <div class="grid-4">
+        <div class="card card-pad stack" style="gap: 12px">
+          <span class="row" style="gap: 10px"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="9" width="12" height="8" rx="2"></rect><path d="M7 9V6.5a3 3 0 0 1 6 0V9"></path></svg><strong>로그인이 필요합니다</strong></span>
+          <p class="t-small soft" style="flex: 1">문항 편집은 로그인한 뒤 사용할 수 있습니다. 기본 변환은 로그인 없이 이용할 수 있습니다.</p>
+          <button class="btn btn-primary" type="button">로그인</button>
+          <a class="btn btn-ghost" href="#">기본 변환으로</a>
+        </div>
+        <div class="card card-pad stack" style="gap: 12px">
+          <span class="row" style="gap: 8px"><span class="badge badge-premium">Premium</span><strong>이용권이 필요합니다</strong></span>
+          <p class="t-small soft" style="flex: 1">시험지 편집·복제·새 생성은 이용권이 있어야 합니다. 기본 변환 결과와 다운로드는 그대로 이용할 수 있습니다.</p>
+          <a class="btn btn-premium" href="#">Premium 소개 보기</a>
+          <a class="btn btn-ghost" href="#">기본 변환으로</a>
+        </div>
+        <div class="card card-pad stack" style="gap: 12px">
+          <span class="row" style="gap: 8px"><span class="chip">읽기 전용</span><strong>이용 기간이 끝났습니다</strong></span>
+          <p class="t-small soft" style="flex: 1">보관 기간 동안 시험지를 열어 보고 완료된 결과를 받을 수 있습니다. 편집과 새 생성은 다시 이용할 때 열립니다.</p>
+          <a class="btn" href="#">완료된 결과 보기</a>
+        </div>
+        <div class="card card-pad stack" style="gap: 12px">
+          <span class="row" style="gap: 10px"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="9" cy="9" r="5.5"></circle><path d="m13 13 4 4"></path></svg><strong>찾을 수 없습니다</strong></span>
+          <p class="t-small soft" style="flex: 1">삭제되었거나 이 계정에서 볼 수 없는 항목입니다.</p>
+          <a class="btn" href="#">내 시험지로</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="stack" style="gap: 14px" aria-labelledby="g3">
+      <h2 id="g3" class="t-h2">프리미엄 저장·생성</h2>
+      <div class="grid-2" style="gap: 20px">
+        <div class="card card-pad stack" style="gap: 12px; border-color: #e7c77f" role="alert">
+          <span class="row" style="gap: 8px"><span class="chip chip-warn">저장 충돌</span><strong>다른 탭에서 이 시험지가 먼저 저장되었습니다</strong></span>
+          <p class="t-small soft">자동으로 덮어쓰지 않았습니다. 최신본을 다시 열거나, 지금 화면의 변경을 별도 초안으로 남길 수 있습니다.</p>
+          <div class="wrap-row" style="gap: 8px"><button class="btn btn-primary" type="button">최신본 다시 열기</button><button class="btn" type="button">내 변경을 별도 초안으로 보존</button></div>
+        </div>
+        <div class="card card-pad stack" style="gap: 12px; border-color: #e7b3bb" role="alert">
+          <span class="row" style="gap: 8px"><span class="chip chip-err">생성 실패</span><strong>시험지를 만들지 못했습니다</strong></span>
+          <p class="t-small soft">서버 내부 오류입니다. 예약된 사용량은 반환했고, 초안은 그대로 남아 있습니다.</p>
+          <div class="wrap-row" style="gap: 8px"><button class="btn btn-primary" type="button">다시 시도</button><button class="btn btn-ghost" type="button" aria-haspopup="dialog">버그 신고</button></div>
+        </div>
+        <div class="card card-pad stack" style="gap: 12px">
+          <span class="row" style="gap: 8px"><span class="chip chip-warn">미지원 문항</span><strong>자동 번호를 적용할 수 없는 문항이 있습니다</strong></span>
+          <div class="qcard is-warn" style="grid-template-columns: 56px minmax(0, 1fr)"><span class="qnum">7</span><span class="stack" style="min-width: 0; gap: 2px"><span class="qsrc">원본 30~32번 · 2025 3월 모의고사 · 6쪽</span><span class="t-small">공유 지문이 있어 자동 번호를 지원하지 않습니다.</span></span></div>
+          <p class="help">결과에서 조용히 빼지 않습니다. 제거하거나 기본 변환으로 원본 그대로 받으세요.</p>
+          <div class="wrap-row" style="gap: 8px"><button class="btn" type="button">시험지에서 제거</button><a class="btn btn-ghost" href="#">기본 변환으로 받기</a></div>
+        </div>
+        <div class="card card-pad stack" style="gap: 12px">
+          <span class="row" style="gap: 8px"><span class="chip chip-info">생성 중</span><strong>시험지 v4를 만들고 있습니다</strong></span>
+          <p class="t-small soft">접수한 v4는 14:50 저장본으로 고정되었습니다. 지금 하는 편집은 다음 버전 초안에 저장됩니다.</p>
+          <div class="progress" aria-hidden="true"><i style="width: 30%; margin-left: 35%"></i></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="stack" style="gap: 14px" aria-labelledby="g4">
+      <h2 id="g4" class="t-h2">빈 상태</h2>
+      <div class="grid-4">
+        <div class="card card-pad stack" style="gap: 10px; align-items: center; text-align: center">
+          <svg class="icon icon-lg muted" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h12v17H6z"></path><path d="M9 8h6M9 11h6M9 14h3"></path></svg>
+          <strong>아직 만든 시험지가 없습니다</strong>
+          <p class="t-small muted">자료를 추가해 첫 시험지를 만들어 보세요.</p>
+          <button class="btn btn-primary" type="button">새 시험지 만들기</button>
+        </div>
+        <div class="card card-pad stack" style="gap: 10px; align-items: center; text-align: center">
+          <svg class="icon icon-lg muted" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"></path></svg>
+          <strong>시험지에 담은 문항이 없습니다.</strong>
+          <p class="t-small muted">자료를 추가해 첫 문항을 담아보세요.</p>
+          <button class="btn" type="button">자료 추가</button>
+          <button class="btn is-disabled" type="button" disabled>검수 후 만들기</button>
+        </div>
+        <div class="card card-pad stack" style="gap: 10px; align-items: center; text-align: center">
+          <svg class="icon icon-lg muted" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3.5h6.5L18 8v12.5H7z"></path><path d="M13.5 3.5V8H18"></path></svg>
+          <strong>아직 변환한 파일이 없어요</strong>
+          <p class="t-small muted">첫 파일을 올려 시작해 보세요.</p>
+          <button class="btn btn-accent-outline" type="button">파일 선택</button>
+        </div>
+        <div class="card card-pad stack" style="gap: 10px; align-items: center; text-align: center">
+          <svg class="icon icon-lg muted" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16l-6 7v6l-4 2v-8L4 5Z"></path></svg>
+          <strong>해당 상태의 작업이 없어요</strong>
+          <p class="t-small muted">다른 필터에서 내 작업을 확인해 보세요.</p>
+          <button class="btn" type="button">전체 보기</button>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1740}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

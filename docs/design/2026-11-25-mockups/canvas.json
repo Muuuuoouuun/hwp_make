@@ -1,0 +1,478 @@
+{
+  "v": 3,
+  "createdOnFiles": {
+    "v": 1,
+    "at": "2026-11-25T09:00:00Z"
+  },
+  "title": "HWP Make 화면 시안",
+  "launch": {
+    "view": "canvas"
+  },
+  "pages": [],
+  "boards": {
+    "DesignSystem.dc.html": {
+      "x": 0,
+      "y": -940,
+      "w": 1440,
+      "h": 2440,
+      "title": "디자인 시스템 · 토큰과 컴포넌트",
+      "expand": "fill"
+    },
+    "Main.dc.html": {
+      "x": 0,
+      "y": 2100,
+      "w": 1440,
+      "h": 900,
+      "title": "홈 A · 첫 진입 (입력만)",
+      "expand": "fill"
+    },
+    "HomeA-Recognized.dc.html": {
+      "x": 1520,
+      "y": 2100,
+      "w": 1440,
+      "h": 900,
+      "title": "홈 A · 파일 인식 후 분기",
+      "expand": "fill"
+    },
+    "HomeB.dc.html": {
+      "x": 3040,
+      "y": 2100,
+      "w": 1440,
+      "h": 900,
+      "title": "홈 B · 첫 진입 (전면 종이)",
+      "expand": "fill"
+    },
+    "HomeB-Recognized.dc.html": {
+      "x": 4560,
+      "y": 2100,
+      "w": 1440,
+      "h": 900,
+      "title": "홈 B · 파일 인식 후 분기",
+      "expand": "fill"
+    },
+    "M-Home.dc.html": {
+      "x": 6080,
+      "y": 2100,
+      "w": 390,
+      "h": 844,
+      "title": "모바일 · 홈 첫 진입"
+    },
+    "M-Home-Recognized.dc.html": {
+      "x": 6550,
+      "y": 2100,
+      "w": 390,
+      "h": 844,
+      "title": "모바일 · 인식 후 분기"
+    },
+    "Basic-Ready.dc.html": {
+      "x": 0,
+      "y": 3600,
+      "w": 1440,
+      "h": 900,
+      "title": "기본 · PDF 선택됨 (변환 준비)",
+      "expand": "fill"
+    },
+    "Basic-Progress.dc.html": {
+      "x": 1520,
+      "y": 3600,
+      "w": 1440,
+      "h": 900,
+      "title": "기본 · 업로드/변환 중 (취소)",
+      "expand": "fill"
+    },
+    "Basic-Done.dc.html": {
+      "x": 3040,
+      "y": 3600,
+      "w": 1440,
+      "h": 960,
+      "title": "기본 · 완료 (점검·주의·다운로드·최근 변환)",
+      "expand": "fill"
+    },
+    "Basic-Failed.dc.html": {
+      "x": 4560,
+      "y": 3600,
+      "w": 1440,
+      "h": 900,
+      "title": "기본 · 실패와 재시도",
+      "expand": "fill"
+    },
+    "Basic-States.dc.html": {
+      "x": 6080,
+      "y": 3600,
+      "w": 1440,
+      "h": 1240,
+      "title": "기본 · 빈 상태와 입력 오류",
+      "expand": "fill"
+    },
+    "M-Progress.dc.html": {
+      "x": 7600,
+      "y": 3600,
+      "w": 390,
+      "h": 844,
+      "title": "모바일 · 변환 중"
+    },
+    "M-Done.dc.html": {
+      "x": 8070,
+      "y": 3600,
+      "w": 390,
+      "h": 1200,
+      "title": "모바일 · 변환 완료"
+    },
+    "P-Intro.dc.html": {
+      "x": 0,
+      "y": 5500,
+      "w": 1440,
+      "h": 1700,
+      "title": "프리미엄 · 소개와 구매 전 체험",
+      "expand": "fill"
+    },
+    "P-Login.dc.html": {
+      "x": 1520,
+      "y": 5500,
+      "w": 1440,
+      "h": 900,
+      "title": "프리미엄 · 로그인 (자료 유지)",
+      "expand": "fill"
+    },
+    "P-Exams.dc.html": {
+      "x": 3040,
+      "y": 5500,
+      "w": 1440,
+      "h": 900,
+      "title": "프리미엄 · 내 시험지",
+      "expand": "fill"
+    },
+    "P-Editor.dc.html": {
+      "x": 4560,
+      "y": 5500,
+      "w": 1440,
+      "h": 1300,
+      "title": "프리미엄 · 시험지 편집",
+      "expand": "fill"
+    },
+    "P-Review.dc.html": {
+      "x": 6080,
+      "y": 5500,
+      "w": 1440,
+      "h": 1240,
+      "title": "프리미엄 · 검수",
+      "expand": "fill"
+    },
+    "P-Result.dc.html": {
+      "x": 7600,
+      "y": 5500,
+      "w": 1440,
+      "h": 1000,
+      "title": "프리미엄 · 결과 (버전·내보내기)",
+      "expand": "fill"
+    },
+    "M-P-Editor.dc.html": {
+      "x": 9120,
+      "y": 5500,
+      "w": 390,
+      "h": 1000,
+      "title": "모바일 · 시험지 구성"
+    },
+    "Jobs.dc.html": {
+      "x": 0,
+      "y": 7800,
+      "w": 1440,
+      "h": 1000,
+      "title": "기타 · 내 작업 / 작업 상세",
+      "expand": "fill"
+    },
+    "BugReport.dc.html": {
+      "x": 1520,
+      "y": 7800,
+      "w": 1440,
+      "h": 1000,
+      "title": "기타 · 버그 신고",
+      "expand": "fill"
+    },
+    "AISettings.dc.html": {
+      "x": 3040,
+      "y": 7800,
+      "w": 1440,
+      "h": 900,
+      "title": "기타 · AI 연결 설정 (Gemini)",
+      "expand": "fill"
+    },
+    "States.dc.html": {
+      "x": 4560,
+      "y": 7800,
+      "w": 1440,
+      "h": 1740,
+      "title": "기타 · 공통 상태 (오류·오프라인·권한)",
+      "expand": "fill"
+    },
+    "Auth-Login.dc.html": {
+      "x": 0,
+      "y": 10140,
+      "w": 1440,
+      "h": 900,
+      "title": "계정 · 로그인",
+      "expand": "fill"
+    },
+    "Auth-Login-Error.dc.html": {
+      "x": 1520,
+      "y": 10140,
+      "w": 1440,
+      "h": 900,
+      "title": "계정 · 로그인 실패",
+      "expand": "fill"
+    },
+    "Auth-Signup.dc.html": {
+      "x": 3040,
+      "y": 10140,
+      "w": 1440,
+      "h": 900,
+      "title": "계정 · 회원가입 (초대 링크)",
+      "expand": "fill"
+    },
+    "Auth-Signup-Expired.dc.html": {
+      "x": 4560,
+      "y": 10140,
+      "w": 1440,
+      "h": 900,
+      "title": "계정 · 설정 링크 만료",
+      "expand": "fill"
+    },
+    "Auth-Session.dc.html": {
+      "x": 6080,
+      "y": 10140,
+      "w": 1440,
+      "h": 900,
+      "title": "계정 · 로그인 만료 (다시 로그인)",
+      "expand": "fill"
+    },
+    "M-Login.dc.html": {
+      "x": 7600,
+      "y": 10140,
+      "w": 390,
+      "h": 844,
+      "title": "모바일 · 로그인"
+    },
+    "Err-404.dc.html": {
+      "x": 0,
+      "y": 11640,
+      "w": 1440,
+      "h": 900,
+      "title": "오류 · 404 페이지 없음",
+      "expand": "fill"
+    },
+    "Err-500.dc.html": {
+      "x": 1520,
+      "y": 11640,
+      "w": 1440,
+      "h": 900,
+      "title": "오류 · 일시적 오류 (500)",
+      "expand": "fill"
+    },
+    "Bug-Done.dc.html": {
+      "x": 3040,
+      "y": 11640,
+      "w": 1440,
+      "h": 900,
+      "title": "버그 · 신고 접수 완료",
+      "expand": "fill"
+    },
+    "Bug-History.dc.html": {
+      "x": 4560,
+      "y": 11640,
+      "w": 1440,
+      "h": 1000,
+      "title": "버그 · 내 신고 (처리 상태·답변)",
+      "expand": "fill"
+    },
+    "Dl-Start.dc.html": {
+      "x": 6080,
+      "y": 11640,
+      "w": 1440,
+      "h": 900,
+      "title": "다운로드 · 시작됨 / 다시 받기",
+      "expand": "fill"
+    },
+    "Dl-Unavailable.dc.html": {
+      "x": 7600,
+      "y": 11640,
+      "w": 1440,
+      "h": 900,
+      "title": "다운로드 · 받을 수 없음 (만료·진행 중·원본 없음·중단)",
+      "expand": "fill"
+    },
+    "Maint.dc.html": {
+      "x": 9120,
+      "y": 11640,
+      "w": 1440,
+      "h": 900,
+      "title": "점검 · 서비스 점검 중",
+      "expand": "fill"
+    },
+    "Maint-Banner.dc.html": {
+      "x": 10640,
+      "y": 11640,
+      "w": 1440,
+      "h": 900,
+      "title": "점검 · 예고 배너 (홈)",
+      "expand": "fill"
+    },
+    "M-404.dc.html": {
+      "x": 12160,
+      "y": 11640,
+      "w": 390,
+      "h": 844,
+      "title": "모바일 · 404"
+    },
+    "M-Maint.dc.html": {
+      "x": 12630,
+      "y": 11640,
+      "w": 390,
+      "h": 844,
+      "title": "모바일 · 서비스 점검"
+    }
+  },
+  "order": [
+    "Main.dc.html",
+    "DesignSystem.dc.html",
+    "HomeA-Recognized.dc.html",
+    "HomeB.dc.html",
+    "HomeB-Recognized.dc.html",
+    "M-Home.dc.html",
+    "M-Home-Recognized.dc.html",
+    "Basic-Ready.dc.html",
+    "Basic-Progress.dc.html",
+    "Basic-Done.dc.html",
+    "Basic-Failed.dc.html",
+    "Basic-States.dc.html",
+    "M-Progress.dc.html",
+    "M-Done.dc.html",
+    "P-Intro.dc.html",
+    "P-Login.dc.html",
+    "P-Exams.dc.html",
+    "P-Editor.dc.html",
+    "P-Review.dc.html",
+    "P-Result.dc.html",
+    "M-P-Editor.dc.html",
+    "Jobs.dc.html",
+    "BugReport.dc.html",
+    "AISettings.dc.html",
+    "States.dc.html",
+    "Auth-Login.dc.html",
+    "Auth-Login-Error.dc.html",
+    "Auth-Signup.dc.html",
+    "Auth-Signup-Expired.dc.html",
+    "Auth-Session.dc.html",
+    "M-Login.dc.html",
+    "Err-404.dc.html",
+    "Err-500.dc.html",
+    "Bug-Done.dc.html",
+    "Bug-History.dc.html",
+    "Dl-Start.dc.html",
+    "Dl-Unavailable.dc.html",
+    "Maint.dc.html",
+    "Maint-Banner.dc.html",
+    "M-404.dc.html",
+    "M-Maint.dc.html"
+  ],
+  "notes": {
+    "t-ds": {
+      "x": 0,
+      "y": -1240,
+      "text": "디자인 시스템",
+      "kind": "title1",
+      "maxW": 1440
+    },
+    "t-home": {
+      "x": 0,
+      "y": 1800,
+      "text": "홈 — A: 현재 톤 정제 / B: 전면 종이 대안",
+      "kind": "title1",
+      "maxW": 6000
+    },
+    "t-basic": {
+      "x": 0,
+      "y": 3300,
+      "text": "기본 변환 · 작동",
+      "kind": "title1",
+      "maxW": 4000
+    },
+    "t-premium": {
+      "x": 0,
+      "y": 5200,
+      "text": "프리미엄 스튜디오",
+      "kind": "title1",
+      "maxW": 4000
+    },
+    "t-etc": {
+      "x": 0,
+      "y": 7500,
+      "text": "기타 · 공통 상태",
+      "kind": "title1",
+      "maxW": 4000
+    },
+    "s-ds": {
+      "x": 1520,
+      "y": -940,
+      "w": 360,
+      "text": "기존 static/styles.css 토큰(#2f56c7, #172033, Pretendard)을 기준으로 정리. 웹 프로토타입의 녹색 톤(#184e3b)은 홈 B 대안으로만 사용. 입력·버튼 테두리는 3:1 이상(#8a94a6), 모든 조작 요소 44px.",
+      "fill": "blue"
+    },
+    "s-home": {
+      "x": 7020,
+      "y": 2100,
+      "w": 360,
+      "text": "첫 화면은 로고·로그인·파일 입력만. 인식 후에만 기본 변환(주 동작)과 문항 편집(Premium, 보조 동작)을 나란히 보여준다. 기본 다운로드는 어떤 단계에서도 결제로 가리지 않는다.",
+      "fill": "orange"
+    },
+    "s-basic": {
+      "x": 8540,
+      "y": 3600,
+      "w": 360,
+      "text": "진행률 숫자는 엔진이 실제 쪽 진행량을 줄 때만 표시. 지금은 단계 + 불확정 막대. 취소는 '대기 중단'이며 서버 생성이 계속될 수 있음을 그대로 알린다.",
+      "fill": "orange"
+    },
+    "s-premium": {
+      "x": 9590,
+      "y": 5500,
+      "w": 360,
+      "text": "내 시험지 목록·버전 결과·이용권 상태는 기획(premium_studio_product_plan 4~8장) 기준의 계획 화면. 현재 로컬 구현은 단일 작업 재개 + 로컬 로그인까지이며 요금은 '안내 예정'.",
+      "fill": "orange"
+    },
+    "s-etc": {
+      "x": 6080,
+      "y": 7800,
+      "w": 360,
+      "text": "내 작업·버그 신고는 웹 프로토타입(static/web) 문구 기준. 녹색 톤을 공통 시스템으로 통일하는 안.",
+      "fill": "orange"
+    },
+    "t-auth": {
+      "x": 0,
+      "y": 9840,
+      "text": "계정 · 로그인 · 회원가입",
+      "kind": "title1",
+      "maxW": 4000
+    },
+    "t-sys": {
+      "x": 0,
+      "y": 11340,
+      "text": "오류 · 버그 · 다운로드 · 점검",
+      "kind": "title1",
+      "maxW": 5000
+    },
+    "s-auth": {
+      "x": 8070,
+      "y": 10140,
+      "w": 360,
+      "text": "회원가입은 공개 가입이 아니라 초대/설정 링크로만 계정을 만드는 현재 웹 프로토타입 방식(/api/setup). 로그인 실패·링크 만료 문구는 서버 실제 메시지. 로컬 앱은 '이 컴퓨터의 작업 계정'(이름+비밀번호) 대화상자 사용.",
+      "fill": "orange"
+    },
+    "s-sys": {
+      "x": 13100,
+      "y": 11640,
+      "w": 360,
+      "text": "[오류 번호]·[점검 시각]은 자리표시. 다른 계정의 자료는 존재를 드러내지 않도록 404와 같은 화면. 버그 상태(접수됨·확인 중·처리 완료)와 다운로드 오류 문구는 static/web·web_main.py 실제 값.",
+      "fill": "orange"
+    }
+  },
+  "designSystems": []
+}

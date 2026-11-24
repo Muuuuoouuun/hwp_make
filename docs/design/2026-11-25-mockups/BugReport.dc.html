@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>버그 신고</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm" style="position: relative; min-height: 1000px; overflow: hidden">
+  <div aria-hidden="true">
+    <div class="topbar"><span class="brand"><span class="brand-mark">H</span>HWP Make</span><span class="row" style="gap: 8px"><span class="btn btn-ghost">내 작업</span><span class="btn btn-ghost">버그 신고</span></span></div>
+    <div class="wrap stack" style="gap: 20px; padding-top: 32px">
+      <div class="card" style="height: 80px"></div>
+      <div class="split"><div class="card" style="height: 420px"></div><div class="card" style="height: 420px"></div></div>
+    </div>
+  </div>
+  <div class="scrim"></div>
+  <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 32px 24px">
+    <form class="dialog" role="dialog" aria-modal="true" aria-labelledby="bugTitle" style="width: 100%; max-width: 560px">
+      <div class="dialog-head">
+        <h2 id="bugTitle" class="t-h2">버그 신고</h2>
+        <button class="ibtn" type="button" aria-label="버그 신고 닫기"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8m0-8-8 8"></path></svg></button>
+      </div>
+      <div class="dialog-body stack" style="gap: 14px">
+        <div class="seg" role="group" aria-label="버그 신고 메뉴" style="align-self: flex-start"><button type="button" aria-pressed="true">신고 작성</button><button type="button" aria-pressed="false">내 신고</button></div>
+        <p class="notice notice-neutral t-small">연결된 작업: 수학 수행평가.docx · DOCX · 실패 · 작업 ID 8f3a2c</p>
+        <div class="field"><label class="label" for="bugCat">문제 유형</label><select id="bugCat" class="select"><option>변환 결과</option><option>파일 업로드</option><option>다운로드</option><option>화면·사용성</option><option>기타</option></select></div>
+        <div class="field"><label class="label" for="bugSubj">제목 <span class="opt">(필수)</span></label><input id="bugSubj" class="input" type="text" required maxlength="160" placeholder="예: 변환 후 수식이 잘려 보여요"></div>
+        <div class="field"><label class="label" for="bugDesc">어떤 문제가 생겼나요? <span class="opt">(필수)</span></label><textarea id="bugDesc" class="textarea" rows="4" required placeholder="문제가 생긴 위치와 증상을 알려주세요. (5자 이상)"></textarea></div>
+        <div class="grid-2" style="gap: 12px">
+          <div class="field"><label class="label" for="bugSteps">재현 방법 <span class="opt">(선택)</span></label><textarea id="bugSteps" class="textarea" rows="3" placeholder="예: PDF 선택 → 변환 → 한글에서 3번 문항 확인"></textarea></div>
+          <div class="field"><label class="label" for="bugExp">기대한 결과 <span class="opt">(선택)</span></label><textarea id="bugExp" class="textarea" rows="3" placeholder="어떻게 동작해야 하는지 알려주세요."></textarea></div>
+        </div>
+        <p class="help" style="line-height: 1.7">제출 시 앱 버전·브라우저·화면 크기를 포함합니다. 작업에서 신고하면 작업 ID·형식·상태·오류도 연결됩니다. 원본 파일·문서 본문·비밀번호는 자동 첨부하지 않습니다.</p>
+      </div>
+      <div class="dialog-foot">
+        <button class="btn btn-ghost" type="button">취소</button>
+        <button class="btn btn-primary" type="submit">신고 접수</button>
+      </div>
+    </form>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1000}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

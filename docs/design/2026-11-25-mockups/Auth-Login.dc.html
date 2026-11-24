@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>로그인</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm" style="min-height: 900px; display: flex; flex-direction: column">
+  <header class="topbar clean" style="background: transparent">
+    <a class="brand" href="#"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</a>
+  </header>
+  <main style="flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px 16px 80px">
+    <form class="card card-raise stack" style="width: 100%; max-width: 440px; gap: 20px; padding: 36px 32px" aria-labelledby="loginTitle">
+      <div class="stack" style="gap: 8px">
+        <h1 id="loginTitle" class="t-h1" style="font-size: 26px">내 문서 작업을 이어가세요</h1>
+        <p class="t-small soft">초대받은 계정으로 로그인하세요. 자료와 변환 결과는 내 계정에서만 볼 수 있어요.</p>
+      </div>
+      <div class="field"><label class="label" for="lgEmail">이메일</label><input id="lgEmail" class="input" type="email" autocomplete="username" required placeholder="teacher@example.com"></div>
+      <div class="field"><label class="label" for="lgPw">비밀번호</label><input id="lgPw" class="input" type="password" autocomplete="current-password" minlength="10" required placeholder="10자 이상"></div>
+      <button class="btn btn-primary btn-lg btn-block" type="submit">로그인</button>
+      <hr class="divider">
+      <p class="t-small muted" style="text-align: center">계정은 초대 링크로 만들 수 있어요. 받은 링크를 열면 계정 만들기 화면이 나타납니다.</p>
+    </form>
+  </main>
+  <p class="t-small muted" style="text-align: center; padding: 0 16px 28px">PDF와 한글 문서, 이제 한곳에서.</p>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

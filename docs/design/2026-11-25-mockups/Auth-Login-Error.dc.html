@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>로그인 실패</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm" style="min-height: 900px; display: flex; flex-direction: column">
+  <header class="topbar clean" style="background: transparent">
+    <a class="brand" href="#"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</a>
+  </header>
+  <main style="flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px 16px 80px">
+    <form class="card card-raise stack" style="width: 100%; max-width: 440px; gap: 20px; padding: 36px 32px" aria-labelledby="leTitle">
+      <div class="stack" style="gap: 8px">
+        <h1 id="leTitle" class="t-h1" style="font-size: 26px">내 문서 작업을 이어가세요</h1>
+        <p class="t-small soft">초대받은 계정으로 로그인하세요. 자료와 변환 결과는 내 계정에서만 볼 수 있어요.</p>
+      </div>
+      <div class="notice notice-err" role="alert">
+        <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"></circle><path d="M10 6v5m0 3v.01"></path></svg>
+        <span>이메일 또는 비밀번호가 맞지 않습니다.</span>
+      </div>
+      <div class="field"><label class="label" for="leEmail">이메일</label><input id="leEmail" class="input" type="email" autocomplete="username" value="teacher@example.com"></div>
+      <div class="field"><label class="label" for="lePw">비밀번호</label><input id="lePw" class="input is-error is-focus" type="password" autocomplete="current-password" aria-invalid="true" aria-describedby="lePwHelp"><span id="lePwHelp" class="help">입력한 비밀번호를 지웠습니다. 다시 입력해 주세요.</span></div>
+      <button class="btn btn-primary btn-lg btn-block" type="submit">로그인</button>
+      <div class="notice notice-neutral t-small" style="padding: 10px 12px">
+        <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"></circle><path d="M10 6v4l3 2"></path></svg>
+        <span>여러 번 틀리면 잠시 막힙니다: “로그인 시도가 많습니다. 1분 후 다시 시도해 주세요.”</span>
+      </div>
+    </form>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

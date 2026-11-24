@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>모바일 시험지 구성</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm" style="width: 390px; min-height: 1000px; display: flex; flex-direction: column">
+  <header class="pbar" style="padding: 0 12px 0 16px; height: 56px">
+    <div class="row" style="gap: 8px"><a class="brand" href="#" aria-label="HWP Make"><span class="brand-mark" aria-hidden="true">H</span></a><span class="badge badge-premium on-dark">Premium</span></div>
+    <button class="btn-on-dark" type="button" aria-haspopup="menu">내 계정</button>
+  </header>
+  <div class="stack bg-white" style="gap: 12px; padding: 12px 16px; border-bottom: 1px solid #d9deea">
+    <div class="row" style="gap: 8px; justify-content: space-between"><strong class="t-h3" style="overflow: hidden; white-space: nowrap; text-overflow: ellipsis">고2 수학 3단원 복습</strong><span class="chip chip-ok" role="status">저장됨</span></div>
+    <div class="seg" role="tablist" aria-label="편집 패널" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr))">
+      <button type="button" role="tab" aria-selected="false">자료</button>
+      <button type="button" role="tab" aria-selected="true">구성 12</button>
+      <button type="button" role="tab" aria-selected="false">설정</button>
+    </div>
+  </div>
+  <main class="stack" style="flex: 1; gap: 10px; padding: 12px 16px 16px">
+    <div class="notice notice-neutral t-small" style="padding: 10px 12px"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="10" rx="1.5"></rect><path d="M7 17h6"></path></svg><span>페이지 확인과 상세 문항 편집은 PC에서 더 편리합니다.</span></div>
+    <p class="notice notice-info t-small" role="status" style="padding: 10px 12px">원본 27번을 첫 번째로 이동, 출력 1번</p>
+    <ol class="stack" style="gap: 8px" aria-label="시험지 문항 순서">
+      <li class="card stack" style="gap: 8px; padding: 12px; border-color: #2f56c7; box-shadow: 0 0 0 1px #2f56c7">
+        <div class="row" style="gap: 12px"><span class="qnum" style="width: 44px; height: 44px; font-size: 20px; background: #2f56c7; color: #fff">1</span><span class="stack" style="min-width: 0; flex: 1; gap: 2px"><span class="qsrc">원본 27번 · 2025 3월 · 5쪽</span><span class="qstem">미분계수의 정의를 이용하여 극한값을…</span></span></div>
+        <div class="row" style="gap: 4px; justify-content: flex-end"><button class="ibtn outline" type="button" aria-label="위로 이동" disabled><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15V5m0 0-4 4m4-4 4 4"></path></svg></button><button class="ibtn outline" type="button" aria-label="아래로 이동"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 5v10m0 0-4-4m4 4 4-4"></path></svg></button><button class="btn" type="button" style="padding: 0 12px; font-size: 14px">위치 지정</button><button class="ibtn" type="button" aria-label="원본 27번 제거"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8m0-8-8 8"></path></svg></button></div>
+      </li>
+      <li class="card stack" style="gap: 8px; padding: 12px">
+        <div class="row" style="gap: 12px"><span class="qnum" style="width: 44px; height: 44px; font-size: 20px">2</span><span class="stack" style="min-width: 0; flex: 1; gap: 2px"><span class="qsrc">원본 5번 · 2024 기출 · 1쪽</span><span class="qstem">두 집합 A, B에 대하여 A∩B의…</span></span></div>
+        <div class="row" style="gap: 4px; justify-content: flex-end"><button class="ibtn outline" type="button" aria-label="위로 이동"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15V5m0 0-4 4m4-4 4 4"></path></svg></button><button class="ibtn outline" type="button" aria-label="아래로 이동"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 5v10m0 0-4-4m4 4 4-4"></path></svg></button><button class="btn" type="button" style="padding: 0 12px; font-size: 14px">위치 지정</button><button class="ibtn" type="button" aria-label="원본 5번 제거"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8m0-8-8 8"></path></svg></button></div>
+      </li>
+      <li class="card stack" style="gap: 8px; padding: 12px">
+        <div class="row" style="gap: 12px"><span class="qnum" style="width: 44px; height: 44px; font-size: 20px">3</span><span class="stack" style="min-width: 0; flex: 1; gap: 2px"><span class="qsrc">원본 12번 · 2025 3월 · 2쪽</span><span class="qstem">이차함수 y = x² − 4x + k의 최솟값이…</span></span></div>
+        <div class="row" style="gap: 4px; justify-content: flex-end"><button class="ibtn outline" type="button" aria-label="위로 이동"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15V5m0 0-4 4m4-4 4 4"></path></svg></button><button class="ibtn outline" type="button" aria-label="아래로 이동"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 5v10m0 0-4-4m4 4 4-4"></path></svg></button><button class="btn" type="button" style="padding: 0 12px; font-size: 14px">위치 지정</button><button class="ibtn" type="button" aria-label="원본 12번 제거"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8m0-8-8 8"></path></svg></button></div>
+      </li>
+      <li class="card stack" style="gap: 8px; padding: 12px; border-color: #e7c77f">
+        <div class="row" style="gap: 12px"><span class="qnum" style="width: 44px; height: 44px; font-size: 20px">4</span><span class="stack" style="min-width: 0; flex: 1; gap: 2px"><span class="qsrc">원본 8번 · 2024 기출 · 2쪽</span><span class="qstem">수열 {aₙ}이 a₁ = 2, aₙ₊₁ = 2aₙ − 1을…</span><span class="chip chip-warn" style="align-self: flex-start; margin-top: 2px">정답 미입력</span></span></div>
+        <div class="row" style="gap: 4px; justify-content: flex-end"><button class="ibtn outline" type="button" aria-label="위로 이동"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15V5m0 0-4 4m4-4 4 4"></path></svg></button><button class="ibtn outline" type="button" aria-label="아래로 이동"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 5v10m0 0-4-4m4 4 4-4"></path></svg></button><button class="btn" type="button" style="padding: 0 12px; font-size: 14px">위치 지정</button><button class="ibtn" type="button" aria-label="원본 8번 제거"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8m0-8-8 8"></path></svg></button></div>
+      </li>
+    </ol>
+  </main>
+  <footer class="row bg-white" style="gap: 12px; padding: 12px 16px; border-top: 1px solid #d9deea; box-shadow: 0 -6px 16px rgba(23, 32, 51, .06)">
+    <span class="t-small strong t-num" style="flex: 1">12문항 · 1~12번</span>
+    <button class="btn btn-primary" type="button">검수 후 만들기</button>
+  </footer>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":1000}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

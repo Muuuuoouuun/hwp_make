@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>시험지 검수</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm" style="min-height: 1240px">
+  <header class="pbar">
+    <div class="row" style="gap: 12px"><a class="brand" href="#"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</a><span class="badge badge-premium on-dark">Premium</span><span class="badge badge-local hide-sm">로컬 미리보기</span></div>
+    <nav class="pnav hide-sm" aria-label="프리미엄"><a href="#">소개</a><a href="#" aria-current="page">내 시험지</a></nav>
+    <div class="row" style="gap: 8px"><button class="btn-on-dark" type="button" aria-haspopup="menu">내 계정</button></div>
+  </header>
+  <div class="row bg-white" style="gap: 16px; padding: 10px 24px; border-bottom: 1px solid #d9deea; flex-wrap: wrap">
+    <strong class="t-h3">고2 수학 3단원 복습</strong>
+    <span class="chip chip-ok">저장됨 · 14:32</span>
+    <div style="flex: 1"></div>
+    <ol class="steps" aria-label="만들기 단계">
+      <li class="step done"><span class="n" aria-hidden="true">✓</span>구성</li>
+      <li class="step-line" aria-hidden="true" style="width: 32px"></li>
+      <li class="step now" aria-current="step"><span class="n">2</span>검수</li>
+      <li class="step-line" aria-hidden="true" style="width: 32px"></li>
+      <li class="step"><span class="n">3</span>결과</li>
+    </ol>
+  </div>
+
+  <main class="wrap split" style="padding-top: 32px; padding-bottom: 64px; max-width: 1240px">
+    <div class="stack" style="gap: 20px; min-width: 0">
+      <section class="card card-pad stack" style="gap: 14px" aria-labelledby="revTitle">
+        <h1 id="revTitle" class="t-h1" style="font-size: 24px">생성 전 확인</h1>
+        <p class="t-num" style="font-size: 20px; font-weight: 800">12문항 · 1~12번 · 정답표 포함 · 해설 9개</p>
+        <dl class="dl">
+          <dt>번호 방식</dt><dd>순서대로 번호 매기기 · 1부터</dd>
+          <dt>양식 · 형식</dt><dd>기본 문항 모음 · HWPX</dd>
+          <dt>기준 초안</dt><dd>오늘 14:32 저장본</dd>
+        </dl>
+      </section>
+
+      <section class="card" aria-labelledby="chkTitle">
+        <h2 id="chkTitle" class="t-h3" style="padding: 18px 24px 6px">확인 항목</h2>
+        <ul class="list">
+          <li class="row" style="gap: 14px; padding: 14px 24px; align-items: flex-start"><span class="chip chip-ok" style="flex: none">통과</span><span class="t-small">출력 번호 1~12 · 빠진 번호나 중복 없음</span></li>
+          <li class="row" style="gap: 14px; padding: 14px 24px; align-items: flex-start"><span class="chip chip-ok" style="flex: none">통과</span><span class="t-small">모든 문항이 자동 번호 지원 범위 안에 있음</span></li>
+          <li class="row" style="gap: 14px; padding: 14px 24px; align-items: flex-start; flex-wrap: wrap"><span class="chip chip-warn" style="flex: none">확인</span><span class="stack" style="flex: 1 1 300px; gap: 2px"><strong class="t-small">정답 미입력 1개 · 4번 (원본 8번)</strong><span class="help">정답표에서 4번은 빈칸으로 출력됩니다.</span></span><button class="btn" type="button" style="padding: 0 12px; font-size: 14px">4번으로 이동</button></li>
+          <li class="row" style="gap: 14px; padding: 14px 24px; align-items: flex-start"><span class="chip chip-warn" style="flex: none">확인</span><span class="stack" style="gap: 2px"><strong class="t-small">해설 없는 문항 3개 · 4, 5, 9번</strong><span class="help">없는 해설은 만들지 않습니다. 해당 문항은 해설 없이 출력됩니다.</span></span></li>
+          <li class="row" style="gap: 14px; padding: 14px 24px; align-items: flex-start"><span class="chip chip-info" style="flex: none">안내</span><span class="t-small soft">예상 배치는 추정치입니다. HWPX 렌더 미리보기는 다단 시험지를 1단으로 보여줄 수 있습니다.</span></li>
+        </ul>
+      </section>
+
+      <section class="card" style="overflow-x: auto" aria-labelledby="mapTitle">
+        <div class="row" style="justify-content: space-between; padding: 18px 24px 6px"><h2 id="mapTitle" class="t-h3">번호 대응 목록</h2><span class="t-small muted">본문·정답표·해설이 같은 목록을 씁니다</span></div>
+        <table class="tbl t-num" style="min-width: 600px">
+          <thead><tr><th scope="col" style="padding-left: 24px">출력</th><th scope="col">원번호</th><th scope="col">자료</th><th scope="col">쪽</th><th scope="col">정답</th><th scope="col">해설</th></tr></thead>
+          <tbody>
+            <tr><td style="padding-left: 24px"><strong>1</strong></td><td>27</td><td>2025 3월 모의고사 수학</td><td>5</td><td>③</td><td>있음</td></tr>
+            <tr><td style="padding-left: 24px"><strong>2</strong></td><td>5</td><td>2024 기출 모음</td><td>1</td><td>①</td><td>있음</td></tr>
+            <tr><td style="padding-left: 24px"><strong>3</strong></td><td>12</td><td>2025 3월 모의고사 수학</td><td>2</td><td>⑤</td><td>있음</td></tr>
+            <tr><td style="padding-left: 24px"><strong>4</strong></td><td>8</td><td>2024 기출 모음</td><td>2</td><td><span class="chip chip-warn">없음</span></td><td class="muted">없음</td></tr>
+            <tr><td style="padding-left: 24px"><strong>5</strong></td><td>14</td><td>2025 3월 모의고사 수학</td><td>3</td><td>②</td><td class="muted">없음</td></tr>
+          </tbody>
+        </table>
+        <div style="padding: 10px 24px 14px"><button class="btn btn-ghost" type="button">7개 더 보기</button></div>
+      </section>
+    </div>
+
+    <aside class="stack" style="gap: 16px">
+      <section class="card card-pad stack" style="gap: 14px" aria-labelledby="renderTitle">
+        <div class="row" style="justify-content: space-between"><h2 id="renderTitle" class="t-h3">HWPX 렌더 미리보기</h2><span class="t-small muted t-num">1 / 3</span></div>
+        <div class="paper" role="img" aria-label="1쪽 렌더 미리보기" style="aspect-ratio: 1 / 1.41; padding: 20px">
+          <div class="row" style="justify-content: space-between; padding-bottom: 8px; border-bottom: 1.5px solid #172033"><strong style="font-size: 12px">고2 수학 3단원 복습</strong><span class="t-cap muted">성명 ______</span></div>
+          <div style="margin-top: 12px"><span class="pn">1.</span><div class="pl" style="width: 94%"></div><div class="pl" style="width: 72%"></div><div class="pl" style="width: 40%; margin-top: 10px; background: #dfe4ee"></div></div>
+          <div style="margin-top: 16px"><span class="pn">2.</span><div class="pl" style="width: 88%"></div><div class="pl" style="width: 64%"></div></div>
+          <div style="margin-top: 16px"><span class="pn">3.</span><div class="pl" style="width: 92%"></div><div class="pl" style="width: 80%"></div><div class="pl" style="width: 55%"></div></div>
+          <div style="margin-top: 16px"><span class="pn">4.</span><div class="pl" style="width: 86%"></div><div class="pl" style="width: 50%"></div></div>
+        </div>
+        <div class="row" style="justify-content: center; gap: 8px"><button class="ibtn outline" type="button" aria-label="이전 페이지" disabled><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m12 5-5 5 5 5"></path></svg></button><button class="ibtn outline" type="button" aria-label="다음 페이지"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m8 5 5 5-5 5"></path></svg></button></div>
+      </section>
+      <button class="btn btn-primary btn-lg btn-block" type="button">시험지 만들기</button>
+      <a class="btn btn-block" href="#">구성으로 돌아가기</a>
+      <p class="help" style="font-size: 13px">만들기를 누르면 오늘 14:32 저장본으로 고정됩니다. 이후 편집은 다음 버전에 반영됩니다.</p>
+    </aside>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1240}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

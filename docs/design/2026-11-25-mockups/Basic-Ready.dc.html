@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>기본 PDF 변환 준비</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm bg-white" style="min-height: 900px; display: flex; flex-direction: column">
+  <header class="topbar clean">
+    <a class="brand" href="#"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</a>
+    <div class="row" style="gap: 8px">
+      <button class="btn btn-ghost" type="button" aria-haspopup="dialog">도움말</button>
+      <button class="btn" type="button">로그인</button>
+    </div>
+  </header>
+  <main style="flex: 1; display: flex; justify-content: center; padding: 56px 24px 96px">
+    <div class="stack" style="width: 100%; max-width: 640px; gap: 24px">
+      <div class="file-row">
+        <span class="file-ico" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M7 3.5h6.5L18 8v12.5H7z"></path><path d="M13.5 3.5V8H18"></path></svg></span>
+        <span class="stack" style="flex: 1; min-width: 0; gap: 2px">
+          <strong style="overflow: hidden; white-space: nowrap; text-overflow: ellipsis">2026 수능 대비 모의평가 수학.pdf</strong>
+          <span class="t-small muted"><span class="ext">PDF</span> 4.2MB</span>
+        </span>
+        <label class="btn btn-ghost" for="swapPdf">다른 파일</label>
+        <input id="swapPdf" class="sr" type="file">
+        <button class="ibtn" type="button" aria-label="선택한 파일 제거"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8m0-8-8 8"></path></svg></button>
+      </div>
+
+      <div class="stack" style="gap: 8px">
+        <h1 class="t-h1" style="font-size: 24px">원본 배치를 유지한 편집형 HWPX로 바로 변환합니다</h1>
+        <p class="soft">전체 페이지와 모든 문항을 원래 순서·번호 그대로 옮깁니다.</p>
+      </div>
+
+      <div class="card" style="padding: 4px 16px 12px">
+        <label class="check is-disabled"><input type="checkbox" disabled aria-describedby="aiHelp"> PDF 수식을 Gemini AI로 인식</label>
+        <p id="aiHelp" class="help" style="padding-left: 28px">선택 사항입니다. AI 없이도 변환할 수 있어요. 수식 인식이 필요할 때만 <a href="#">AI 연결 설정</a>에서 Gemini 키를 연결하세요.</p>
+      </div>
+
+      <button class="btn btn-primary btn-lg btn-block" type="button" aria-describedby="readyStatus">HWPX로 변환</button>
+      <p id="readyStatus" class="status status-ready" role="status"><span class="dot"></span>2026 수능 대비 모의평가 수학.pdf · 바로 변환할 수 있습니다</p>
+
+      <hr class="divider">
+      <div class="row" style="gap: 16px; justify-content: space-between; flex-wrap: wrap">
+        <div class="stack" style="gap: 4px; min-width: 0; flex: 1 1 260px">
+          <span class="row" style="gap: 8px"><strong class="t-h3">필요한 문항만 골라 새 시험지 만들기</strong><span class="badge badge-premium">Premium</span></span>
+          <span class="t-small muted">'문항 편집'을 누르면 그때 문항을 먼저 인식합니다.</span>
+        </div>
+        <button class="btn" type="button">로그인하고 문항 편집</button>
+      </div>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

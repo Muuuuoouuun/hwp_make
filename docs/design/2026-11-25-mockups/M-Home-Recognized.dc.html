@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>모바일 인식 후 분기</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm bg-white" style="width: 390px; height: 844px; display: flex; flex-direction: column; overflow: hidden">
+  <header class="topbar clean" style="padding: 0 16px; height: 60px">
+    <a class="brand" href="#"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</a>
+    <div class="row" style="gap: 4px">
+      <button class="btn btn-ghost" type="button" style="padding: 0 10px">도움말</button>
+      <button class="btn" type="button" style="padding: 0 14px">로그인</button>
+    </div>
+  </header>
+  <main class="stack" style="flex: 1; gap: 20px; padding: 16px 16px 24px">
+    <div class="file-row">
+      <span class="file-ico" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M7 3.5h6.5L18 8v12.5H7z"></path><path d="M13.5 3.5V8H18"></path></svg></span>
+      <span class="stack" style="flex: 1; min-width: 0; gap: 2px">
+        <strong style="overflow: hidden; white-space: nowrap; text-overflow: ellipsis">2025 3월 모의고사 수학.hwp</strong>
+        <span class="t-small muted"><span class="ext">HWP</span> 1.8MB</span>
+      </span>
+      <button class="ibtn" type="button" aria-label="선택한 파일 제거"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8m0-8-8 8"></path></svg></button>
+    </div>
+    <div class="stack" style="gap: 6px">
+      <h1 class="t-h2" style="font-size: 22px">20개 문항을 인식했습니다</h1>
+      <p class="t-small soft">원래 순서와 번호로 변환하거나, 필요한 문항을 골라 편집하세요.</p>
+    </div>
+    <section class="card card-pad stack" style="gap: 12px; padding: 18px; border-color: #2f56c7; box-shadow: 0 0 0 1px #2f56c7" aria-labelledby="mBasic">
+      <div class="row" style="justify-content: space-between"><h2 id="mBasic" class="t-h3">원래 순서·번호 그대로</h2><span class="badge badge-free">기본 제공</span></div>
+      <button class="btn btn-primary btn-lg btn-block" type="button">HWPX로 변환</button>
+    </section>
+    <section class="card card-pad stack" style="gap: 12px; padding: 18px" aria-labelledby="mPremium">
+      <div class="row" style="justify-content: space-between"><h2 id="mPremium" class="t-h3">문항을 골라 새 시험지로</h2><span class="badge badge-premium">Premium</span></div>
+      <p class="t-small soft">순서 이동·번호 맞춤은 휴대폰에서도 되지만, 페이지 확인과 상세 편집은 PC에서 더 편리합니다.</p>
+      <button class="btn btn-block" type="button">로그인하고 문항 편집</button>
+    </section>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

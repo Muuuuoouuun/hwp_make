@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>내 작업과 작업 상세</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm" style="min-height: 1000px">
+  <header class="topbar">
+    <a class="brand" href="#"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</a>
+    <nav class="row" style="gap: 4px" aria-label="주 메뉴">
+      <a class="btn btn-ghost" href="#" aria-current="page" style="color: #172033; background: #edf0f6">내 작업</a>
+      <button class="btn btn-ghost" type="button" aria-haspopup="dialog">버그 신고</button>
+      <button class="btn btn-ghost" type="button">로그아웃</button>
+    </nav>
+  </header>
+  <main class="wrap stack" style="gap: 20px; padding-top: 32px; padding-bottom: 48px">
+    <label class="card row" for="jobFile" style="gap: 16px; padding: 16px 20px; border: 2px dashed #8a94a6; background: #f8faff; cursor: pointer; flex-wrap: wrap">
+      <span class="dz-icon" aria-hidden="true" style="width: 44px; height: 44px; border-radius: 12px"><svg class="icon" viewBox="0 0 24 24"><path d="M12 16V5m0 0L7.5 9.5M12 5l4.5 4.5M5 15.5v2.25A2.25 2.25 0 0 0 7.25 20h9.5A2.25 2.25 0 0 0 19 17.75V15.5"></path></svg></span>
+      <span class="stack" style="flex: 1 1 240px; gap: 2px"><strong>변환할 파일을 놓아주세요</strong><span class="t-small muted">PDF · HWP · HWPX · DOCX · TXT / 최대 20MB · 접수 후에는 창을 닫아도 변환이 계속됩니다</span></span>
+      <span class="btn btn-accent-outline" aria-hidden="true">파일 선택</span>
+    </label>
+    <input id="jobFile" class="sr" type="file">
+
+    <div class="split">
+      <section class="card" aria-labelledby="jobsTitle">
+        <div class="row" style="justify-content: space-between; gap: 12px; padding: 18px 20px 12px; flex-wrap: wrap">
+          <h1 id="jobsTitle" class="t-h2">내 작업</h1>
+          <div class="row" style="gap: 8px">
+            <div class="seg" role="group" aria-label="작업 상태 필터"><button type="button" aria-pressed="true">전체</button><button type="button" aria-pressed="false">진행 중</button><button type="button" aria-pressed="false">완료</button></div>
+            <button class="btn btn-ghost" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7a9 9 0 0 0-15-2L2 8m0-6v6h6M4 17a9 9 0 0 0 15 2l3-3m0 6v-6h-6"></path></svg>새로고침</button>
+          </div>
+        </div>
+        <div style="overflow-x: auto">
+          <table class="tbl" style="min-width: 620px">
+            <thead><tr><th scope="col" style="padding-left: 20px">파일</th><th scope="col">상태</th><th scope="col">결과</th></tr></thead>
+            <tbody>
+              <tr><td style="padding-left: 20px"><a href="#" class="strong" style="color: #172033; text-decoration: none">중3 과학 단원평가.pdf</a><div class="t-cap muted t-num">11. 25. 14:02 · 3.1MB → HWPX</div></td><td><span class="chip chip-info">변환 중</span></td><td><button class="btn btn-danger" type="button" style="padding: 0 12px; font-size: 14px">변환 취소</button></td></tr>
+              <tr><td style="padding-left: 20px"><a href="#" class="strong" style="color: #172033; text-decoration: none">2025 9월 모의고사 영어.pdf</a><div class="t-cap muted t-num">11. 25. 13:58 · 5.4MB → HWPX</div></td><td><span class="chip">대기 중</span></td><td><button class="btn" type="button" style="padding: 0 12px; font-size: 14px">변환 취소</button></td></tr>
+              <tr class="is-selected"><td style="padding-left: 20px"><a href="#" class="strong" style="color: #172033; text-decoration: none" aria-current="true">고1 국어 기말 대비.hwp</a><div class="t-cap muted t-num">11. 25. 11:20 · 1.2MB → HWPX</div></td><td><span class="chip chip-ok">완료</span></td><td><a class="btn btn-primary" href="#" download style="padding: 0 12px; font-size: 14px">결과 다운로드</a></td></tr>
+              <tr><td style="padding-left: 20px"><a href="#" class="strong" style="color: #172033; text-decoration: none">수학 수행평가.docx</a><div class="t-cap muted t-num">11. 24. 16:40 · 0.8MB → DOCX</div></td><td><span class="chip chip-err">실패</span></td><td><button class="btn" type="button" style="padding: 0 12px; font-size: 14px">다시 시도</button></td></tr>
+              <tr><td style="padding-left: 20px"><a href="#" class="strong" style="color: #172033; text-decoration: none">기출 묶음.pdf</a><div class="t-cap muted t-num">11. 22. 09:15 · 12.0MB → HWPX</div></td><td><span class="chip">취소됨</span></td><td class="muted">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <aside class="card card-pad stack" style="gap: 16px" aria-labelledby="detailTitle">
+        <div class="row" style="justify-content: space-between"><h2 id="detailTitle" class="t-h3">작업 상세</h2><button class="ibtn" type="button" aria-label="상세 닫기"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8m0-8-8 8"></path></svg></button></div>
+        <div class="stack" style="gap: 6px"><strong>고1 국어 기말 대비.hwp</strong><span class="chip chip-ok" style="align-self: flex-start">완료</span></div>
+        <dl class="dl t-num">
+          <dt>접수</dt><dd>2026. 11. 25. 11:20</dd>
+          <dt>출력 형식</dt><dd>HWPX</dd>
+          <dt>보관 기한</dt><dd>2026. 12. 25.</dd>
+          <dt>포함 페이지</dt><dd>12쪽</dd>
+          <dt>문항 수</dt><dd>24개</dd>
+          <dt>확인 필요</dt><dd>다운로드 후 확인해 주세요</dd>
+        </dl>
+        <div class="stack" style="gap: 8px">
+          <a class="btn btn-primary btn-block" href="#" download>결과 다운로드</a>
+          <a class="btn btn-block" href="#" download>원본 받기</a>
+          <button class="btn btn-ghost btn-block" type="button" aria-haspopup="dialog">이 작업 신고</button>
+        </div>
+        <hr class="divider">
+        <div class="stack" style="gap: 6px">
+          <button class="btn btn-danger btn-block" type="button" aria-describedby="delHelp">작업 삭제</button>
+          <p id="delHelp" class="help">삭제하면 이 작업의 원본과 결과를 다시 받을 수 없습니다. 한 번 더 누르면 삭제합니다.</p>
+        </div>
+      </aside>
+    </div>
+    <p class="help t-small" style="text-align: center; font-size: 13px">원본 배치와 수식은 다운로드 후 한글에서 확인해 주세요. PDF 최대 50쪽 · 하루 10회 · 파일은 30일 보관되며 언제든 삭제할 수 있어요.</p>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1000}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

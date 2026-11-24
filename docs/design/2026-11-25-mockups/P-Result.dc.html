@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>시험지 결과</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm" style="min-height: 1000px">
+  <header class="pbar">
+    <div class="row" style="gap: 12px"><a class="brand" href="#"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</a><span class="badge badge-premium on-dark">Premium</span><span class="badge badge-local hide-sm">로컬 미리보기</span></div>
+    <nav class="pnav hide-sm" aria-label="프리미엄"><a href="#">소개</a><a href="#" aria-current="page">내 시험지</a></nav>
+    <div class="row" style="gap: 8px"><button class="btn-on-dark" type="button" aria-haspopup="menu">내 계정</button></div>
+  </header>
+  <div class="row bg-white" style="gap: 16px; padding: 10px 24px; border-bottom: 1px solid #d9deea; flex-wrap: wrap">
+    <strong class="t-h3">고2 수학 3단원 복습</strong>
+    <div style="flex: 1"></div>
+    <ol class="steps" aria-label="만들기 단계">
+      <li class="step done"><span class="n" aria-hidden="true">✓</span>구성</li>
+      <li class="step-line" aria-hidden="true" style="width: 32px"></li>
+      <li class="step done"><span class="n" aria-hidden="true">✓</span>검수</li>
+      <li class="step-line" aria-hidden="true" style="width: 32px"></li>
+      <li class="step now" aria-current="step"><span class="n">3</span>결과</li>
+    </ol>
+  </div>
+
+  <main class="wrap split" style="padding-top: 32px; padding-bottom: 64px; max-width: 1240px">
+    <div class="stack" style="gap: 20px; min-width: 0">
+      <section class="card card-raise" aria-labelledby="outTitle">
+        <div class="stack" style="gap: 10px; padding: 24px">
+          <span class="chip chip-ok" style="align-self: flex-start">생성 완료</span>
+          <h1 id="outTitle" class="t-h1">시험지 v3</h1>
+          <p class="soft t-num">오늘 14:40 생성 · 14:32 저장본 기준</p>
+          <p class="t-num" style="font-size: 18px; font-weight: 800">12문항 · 1~12번 · HWPX · 정답·해설지 포함</p>
+        </div>
+        <div class="wrap-row" style="gap: 10px; padding: 0 24px 24px">
+          <a class="btn btn-primary btn-lg" href="#" download><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19h14"></path></svg>HWPX 받기</a>
+          <button class="btn btn-lg" type="button" aria-haspopup="dialog">렌더 미리보기</button>
+        </div>
+        <hr class="divider">
+        <div class="stack" style="gap: 12px; padding: 20px 24px 24px">
+          <div class="notice notice-neutral t-small"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="9" width="12" height="8" rx="2"></rect><path d="M7 9V6.5a3 3 0 0 1 6 0V9"></path></svg><span>초안을 수정해도 v3 결과는 바뀌지 않습니다. 다운로드한 시험지와 같은 번호 대응을 이 화면에서 다시 볼 수 있습니다.</span></div>
+          <div class="notice notice-warn t-small" role="status"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 2 17h16L10 3Zm0 5v4m0 3v.01"></path></svg><span class="stack" style="gap: 2px"><strong>검수 주의사항 2개</strong><span>정답 미입력 1개 · 4번 / 해설 없는 문항 3개 · 4, 5, 9번</span></span></div>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="snapTitle">
+        <div class="row" style="justify-content: space-between; padding: 18px 24px 10px"><h2 id="snapTitle" class="t-h3">생성 시점 번호 대응</h2><a class="t-small" href="#">전체 12개 보기</a></div>
+        <ul class="wrap-row t-num" style="gap: 8px; padding: 0 24px 22px">
+          <li class="chip nodot" style="min-height: 32px; font-size: 13px">1 ← 원본 27</li>
+          <li class="chip nodot" style="min-height: 32px; font-size: 13px">2 ← 원본 5</li>
+          <li class="chip nodot" style="min-height: 32px; font-size: 13px">3 ← 원본 12</li>
+          <li class="chip nodot" style="min-height: 32px; font-size: 13px">4 ← 원본 8</li>
+          <li class="chip nodot" style="min-height: 32px; font-size: 13px">5 ← 원본 14</li>
+          <li class="chip nodot" style="min-height: 32px; font-size: 13px">6 ← 원본 16</li>
+          <li class="chip nodot" style="min-height: 32px; font-size: 13px">…</li>
+        </ul>
+      </section>
+    </div>
+
+    <aside class="stack" style="gap: 16px">
+      <section class="card" aria-labelledby="verTitle">
+        <h2 id="verTitle" class="t-h3" style="padding: 18px 20px 6px">버전</h2>
+        <ul class="list" style="padding: 0 8px">
+          <li class="row" style="gap: 10px; padding: 12px; background: #f8faff; border-radius: 10px"><span class="stack" style="flex: 1; gap: 2px"><strong class="t-small">v3 <span class="badge badge-free" style="margin-left: 4px">현재</span></strong><span class="t-cap muted t-num">오늘 14:40 · 12문항</span></span><a class="btn" href="#" download style="padding: 0 12px; font-size: 14px">받기</a></li>
+          <li class="row" style="gap: 10px; padding: 12px"><span class="stack" style="flex: 1; gap: 2px"><strong class="t-small">v2</strong><span class="t-cap muted t-num">11월 20일 · 10문항</span></span><a class="btn" href="#" download style="padding: 0 12px; font-size: 14px">받기</a></li>
+          <li class="row" style="gap: 10px; padding: 12px"><span class="stack" style="flex: 1; gap: 2px"><strong class="t-small">v1</strong><span class="t-cap muted t-num">11월 18일 · 8문항</span></span><a class="btn" href="#" download style="padding: 0 12px; font-size: 14px">받기</a></li>
+        </ul>
+        <p class="help" style="padding: 10px 20px 16px">이용 기간이 끝나도 보관 기간 동안은 완료된 결과를 받을 수 있습니다.</p>
+      </section>
+      <a class="btn btn-block" href="#">초안 계속 편집</a>
+      <button class="btn btn-ghost btn-block" type="button">복제해서 새 시험지</button>
+    </aside>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1000}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>모바일 홈 첫 진입</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm bg-white" style="width: 390px; height: 844px; display: flex; flex-direction: column; overflow: hidden">
+  <header class="topbar clean" style="padding: 0 16px; height: 60px">
+    <a class="brand" href="#"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</a>
+    <button class="btn" type="button" style="padding: 0 14px">로그인</button>
+  </header>
+  <main class="stack" style="flex: 1; justify-content: center; gap: 24px; padding: 0 16px 72px">
+    <h1 class="t-h1" style="text-align: center">파일을 넣어주세요</h1>
+    <label class="dropzone" for="mFile" style="min-height: 300px; padding: 32px 20px">
+      <span class="dz-icon" aria-hidden="true"><svg class="icon icon-lg" viewBox="0 0 24 24"><path d="M12 16V5m0 0L7.5 9.5M12 5l4.5 4.5M5 15.5v2.25A2.25 2.25 0 0 0 7.25 20h9.5A2.25 2.25 0 0 0 19 17.75V15.5"></path></svg></span>
+      <strong style="margin-top: 6px; font-size: 17px">눌러서 파일 선택</strong>
+      <span class="t-small muted">PDF, HWP, HWPX, DOCX, 이미지, TXT<br>최대 64MB</span>
+    </label>
+    <input id="mFile" class="sr" type="file">
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

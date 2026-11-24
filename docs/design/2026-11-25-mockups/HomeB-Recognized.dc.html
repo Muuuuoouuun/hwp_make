@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>홈 B 인식 후 분기</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;family=Noto+Serif+KR:wght@600;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#184e3b}a:hover{color:#0f3326}
+</style>
+</helmet>
+<div class="hm" style="min-height: 900px; display: flex; flex-direction: column; background: #f4f1e8; color: #1c2420">
+  <header class="topbar clean" style="background: transparent">
+    <a class="brand" href="#" style="color: #1c2420"><span class="brand-mark" aria-hidden="true" style="background: #184e3b; font-family: 'Noto Serif KR', serif">H</span>HWP Make</a>
+    <div class="row" style="gap: 8px">
+      <button class="btn btn-ghost" type="button" style="color: #1c2420">도움말</button>
+      <button class="btn" type="button" style="border-color: #7d8579; background: transparent; color: #1c2420">로그인</button>
+    </div>
+  </header>
+  <main style="flex: 1; display: flex; align-items: center; padding: 24px 0 64px">
+    <div class="wrap grid-2" style="max-width: 1120px; gap: 64px; align-items: center">
+      <figure class="stack" style="gap: 16px; align-items: center">
+        <div style="width: 100%; max-width: 400px; aspect-ratio: 1 / 1.3; padding: 28px 30px; background: #fffdf8; border: 1px solid #e2dccb; border-radius: 6px; box-shadow: 0 24px 48px rgba(60, 50, 20, .12), 0 2px 6px rgba(60, 50, 20, .08); display: flex; flex-direction: column; gap: 12px">
+          <div class="row" style="justify-content: space-between; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid #e2dccb">
+            <strong style="font-size: 14px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis">2025 3월 모의고사 수학.hwp</strong>
+            <span class="chip nodot" style="background: #e3ede6; color: #184e3b">20문항</span>
+          </div>
+          <div class="row" style="gap: 10px"><span style="font-weight: 800; font-size: 13px; width: 22px">1.</span><span style="flex: 1; height: 7px; border-radius: 4px; background: #e8e3d5"></span></div>
+          <div class="row" style="gap: 10px"><span style="width: 22px"></span><span style="width: 70%; height: 7px; border-radius: 4px; background: #e8e3d5"></span></div>
+          <div class="row" style="gap: 10px"><span style="font-weight: 800; font-size: 13px; width: 22px">2.</span><span style="flex: 1; height: 7px; border-radius: 4px; background: #e8e3d5"></span></div>
+          <div class="row" style="gap: 10px"><span style="width: 22px"></span><span style="width: 55%; height: 7px; border-radius: 4px; background: #e8e3d5"></span></div>
+          <div class="row" style="gap: 10px"><span style="font-weight: 800; font-size: 13px; width: 22px">3.</span><span style="flex: 1; height: 7px; border-radius: 4px; background: #e8e3d5"></span></div>
+          <div class="row" style="gap: 10px"><span style="width: 22px"></span><span style="width: 80%; height: 7px; border-radius: 4px; background: #e8e3d5"></span></div>
+          <div class="row" style="gap: 10px"><span style="font-weight: 800; font-size: 13px; width: 22px">4.</span><span style="flex: 1; height: 7px; border-radius: 4px; background: #e8e3d5"></span></div>
+          <div class="row" style="gap: 10px"><span style="font-weight: 800; font-size: 13px; width: 22px">5.</span><span style="width: 62%; height: 7px; border-radius: 4px; background: #e8e3d5"></span></div>
+          <span style="margin-top: auto; text-align: center; font-size: 12px; color: #575e57">… 20번까지 원래 순서로 인식</span>
+        </div>
+        <figcaption class="row" style="gap: 8px">
+          <label class="btn btn-ghost" for="swapB" style="color: #184e3b">다른 파일</label>
+          <input id="swapB" class="sr" type="file">
+          <button class="btn btn-ghost" type="button" style="color: #575e57">제거</button>
+        </figcaption>
+      </figure>
+
+      <div class="stack" style="gap: 28px">
+        <div class="stack" style="gap: 10px">
+          <h1 style="font-family: 'Noto Serif KR', serif; font-size: 36px; line-height: 1.3; font-weight: 700; color: #184e3b">20개 문항을 인식했습니다</h1>
+          <p style="font-size: 16px; color: #3f463f">원래 순서와 번호로 변환하거나, 필요한 문항을 골라 편집하세요.</p>
+        </div>
+        <ol class="stack" style="gap: 0; border-top: 1px solid #d6d0c0">
+          <li class="stack" style="gap: 12px; padding: 22px 0; border-bottom: 1px solid #d6d0c0">
+            <div class="row" style="gap: 12px"><span style="display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: #184e3b; color: #fff; font-size: 13px; font-weight: 800">1</span><h2 class="t-h2">원래 순서·번호 그대로 받기</h2></div>
+            <p class="t-small" style="color: #575e57; padding-left: 40px">편집 가능한 HWPX로 바꾸고 바로 다운로드합니다.</p>
+            <div style="padding-left: 40px"><button class="btn btn-lg" type="button" style="border-color: #184e3b; background: #184e3b; color: #fff">HWPX로 변환</button></div>
+          </li>
+          <li class="stack" style="gap: 12px; padding: 22px 0; border-bottom: 1px solid #d6d0c0">
+            <div class="row" style="gap: 12px"><span style="display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; border: 1.5px solid #7d8579; font-size: 13px; font-weight: 800">2</span><h2 class="t-h2">문항 골라 새 시험지 만들기</h2><span class="badge badge-premium" style="background: #1c2420">Premium</span></div>
+            <p class="t-small" style="color: #575e57; padding-left: 40px">순서 이동 · 자동 번호 · 정답/해설 번호 맞춤</p>
+            <div style="padding-left: 40px"><button class="btn" type="button" style="border-color: #7d8579; background: transparent; color: #1c2420">로그인하고 문항 편집</button></div>
+          </li>
+        </ol>
+      </div>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

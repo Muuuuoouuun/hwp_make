@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>페이지를 찾을 수 없음</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm bg-white" style="min-height: 900px; display: flex; flex-direction: column">
+  <header class="topbar clean">
+    <a class="brand" href="#"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</a>
+    <a class="btn" href="#">내 작업</a>
+  </header>
+  <main style="flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px 16px 96px">
+    <section class="stack" style="width: 100%; max-width: 520px; gap: 16px; align-items: center; text-align: center" aria-labelledby="nfTitle">
+      <p class="t-num" aria-hidden="true" style="font-size: 96px; line-height: 1; font-weight: 800; letter-spacing: -.04em; color: #d9deea">404</p>
+      <h1 id="nfTitle" class="t-h1">페이지를 찾을 수 없습니다</h1>
+      <p class="soft">주소가 바뀌었거나 삭제된 페이지입니다. 이 계정에서 볼 수 없는 작업도 같은 화면으로 안내합니다.</p>
+      <div class="wrap-row" style="gap: 10px; justify-content: center; margin-top: 8px">
+        <a class="btn btn-primary btn-lg" href="#">새 파일 변환</a>
+        <a class="btn btn-lg" href="#">내 작업</a>
+      </div>
+      <p class="help" style="margin-top: 8px">링크를 받아 들어왔다면 로그인한 계정이 맞는지 확인해 주세요.</p>
+    </section>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

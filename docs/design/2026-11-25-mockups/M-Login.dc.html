@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>모바일 로그인</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm bg-white" style="width: 390px; height: 844px; display: flex; flex-direction: column; overflow: hidden">
+  <header class="topbar clean" style="padding: 0 16px; height: 60px">
+    <a class="brand" href="#"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</a>
+  </header>
+  <form class="stack" style="flex: 1; gap: 18px; padding: 24px 20px 32px" aria-labelledby="mlTitle">
+    <div class="stack" style="gap: 8px">
+      <h1 id="mlTitle" class="t-h1" style="font-size: 24px">내 문서 작업을 이어가세요</h1>
+      <p class="t-small soft">초대받은 계정으로 로그인하세요. 자료와 변환 결과는 내 계정에서만 볼 수 있어요.</p>
+    </div>
+    <div class="field"><label class="label" for="mlEmail">이메일</label><input id="mlEmail" class="input" type="email" inputmode="email" autocomplete="username" placeholder="teacher@example.com"></div>
+    <div class="field"><label class="label" for="mlPw">비밀번호</label><input id="mlPw" class="input" type="password" autocomplete="current-password" placeholder="10자 이상"></div>
+    <div style="flex: 1"></div>
+    <button class="btn btn-primary btn-lg btn-block" type="submit">로그인</button>
+    <p class="t-cap muted" style="text-align: center">계정은 초대 링크로 만들 수 있어요.</p>
+  </form>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

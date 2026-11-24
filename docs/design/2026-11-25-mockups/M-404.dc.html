@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>모바일 404</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm bg-white" style="width: 390px; height: 844px; display: flex; flex-direction: column; overflow: hidden">
+  <header class="topbar clean" style="padding: 0 16px; height: 60px">
+    <a class="brand" href="#"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</a>
+  </header>
+  <main class="stack" style="flex: 1; gap: 14px; justify-content: center; align-items: center; text-align: center; padding: 0 24px 40px">
+    <p class="t-num" aria-hidden="true" style="font-size: 72px; line-height: 1; font-weight: 800; color: #d9deea">404</p>
+    <h1 class="t-h2" style="font-size: 22px">페이지를 찾을 수 없습니다</h1>
+    <p class="t-small soft">주소가 바뀌었거나 삭제된 페이지입니다.</p>
+  </main>
+  <div class="stack" style="gap: 8px; padding: 0 16px 24px">
+    <a class="btn btn-primary btn-lg btn-block" href="#">새 파일 변환</a>
+    <a class="btn btn-block" href="#">내 작업</a>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

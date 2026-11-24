@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>AI 연결 설정</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm bg-white" style="position: relative; min-height: 900px; overflow: hidden">
+  <div aria-hidden="true">
+    <div class="topbar clean"><span class="brand"><span class="brand-mark">H</span>HWP Make</span><span class="row" style="gap: 8px"><span class="btn btn-ghost">도움말</span><span class="btn">로그인</span></span></div>
+    <div class="stack" style="width: 100%; max-width: 640px; margin: 56px auto 0; gap: 24px; padding: 0 24px">
+      <div class="file-row"><span class="file-ico"></span><span class="ghost-block" style="width: 260px; height: 14px"></span></div>
+      <p class="t-h1" style="font-size: 24px">원본 배치를 유지한 편집형 HWPX로 바로 변환합니다</p>
+      <div class="card" style="height: 72px"></div>
+      <div class="btn btn-primary btn-lg btn-block">HWPX로 변환</div>
+    </div>
+  </div>
+  <div class="scrim"></div>
+  <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px">
+    <form class="dialog" role="dialog" aria-modal="true" aria-labelledby="aiTitle" aria-describedby="aiDesc" style="width: 100%; max-width: 520px">
+      <div class="dialog-head">
+        <div class="stack" style="gap: 4px"><h2 id="aiTitle" class="t-h2">AI 연결 설정</h2><p id="aiDesc" class="t-small muted">키는 이 컴퓨터의 로컬 설정에 저장되며 화면에 다시 표시되지 않습니다.</p></div>
+        <button class="ibtn" type="button" aria-label="닫기"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8m0-8-8 8"></path></svg></button>
+      </div>
+      <div class="dialog-body stack" style="gap: 18px">
+        <div class="notice notice-info t-small"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"></circle><path d="M10 9v5m0-8v.01"></path></svg><span><strong>AI는 필요할 때만.</strong> AI 없이도 변환할 수 있어요. PDF 수식 인식이 필요할 때만 Gemini 키를 연결하세요.</span></div>
+        <div class="field">
+          <div class="row" style="justify-content: space-between; gap: 8px"><label class="label" for="gemKey">Gemini API 키</label><span class="chip chip-ok" id="gemState">연결됨 · 키 저장됨</span></div>
+          <input id="gemKey" class="input" type="password" autocomplete="off" placeholder="변경할 때만 입력" aria-describedby="gemState gemHelp">
+          <span id="gemHelp" class="help">PDF 수식을 Gemini AI로 인식할 때 사용합니다.</span>
+        </div>
+        <div class="field">
+          <div class="row" style="justify-content: space-between; gap: 8px"><label class="label" for="oaKey">OpenAI API 키</label><span class="chip" id="oaState">연결 안 됨</span></div>
+          <input id="oaKey" class="input" type="password" autocomplete="off" placeholder="변경할 때만 입력" aria-describedby="oaState">
+        </div>
+        <p class="t-small soft">원격 OCR·그림 복원은 실행 직전에 전송 동의를 다시 확인합니다. 로컬 문항 점검과 수식 분석은 키 없이 작동합니다.</p>
+      </div>
+      <div class="dialog-foot">
+        <button class="btn btn-ghost" type="button">취소</button>
+        <button class="btn btn-primary" type="submit">설정 저장</button>
+      </div>
+    </form>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

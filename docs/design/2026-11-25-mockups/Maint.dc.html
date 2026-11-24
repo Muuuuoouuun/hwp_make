@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>서비스 점검</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm bg-white" style="min-height: 900px; display: flex; flex-direction: column">
+  <header class="topbar clean">
+    <span class="brand"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</span>
+  </header>
+  <main style="flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px 16px 96px">
+    <section class="stack" style="width: 100%; max-width: 560px; gap: 18px; align-items: center; text-align: center" aria-labelledby="mtTitle">
+      <span aria-hidden="true" style="display: grid; place-items: center; width: 64px; height: 64px; border-radius: 18px; background: #edf2ff; color: #2f56c7"><svg class="icon icon-lg" viewBox="0 0 24 24"><path d="M14.5 6.5a4 4 0 0 0-5.3 5.3L3.5 17.5a1.4 1.4 0 0 0 2 2l5.7-5.7a4 4 0 0 0 5.3-5.3l-2.4 2.4-2-2 2.4-2.4Z"></path></svg></span>
+      <h1 id="mtTitle" class="t-h1">서비스 점검 중입니다</h1>
+      <p class="soft">점검 시간 동안 업로드·변환·다운로드를 사용할 수 없습니다.</p>
+      <dl class="dl" style="width: 100%; padding: 16px 20px; border: 1px solid #d9deea; border-radius: 14px; text-align: left">
+        <dt>점검 시간</dt><dd>[시작 시각] ~ [종료 예정 시각]</dd>
+        <dt>영향</dt><dd>새 변환 접수, 결과 다운로드, 로그인</dd>
+      </dl>
+      <div class="notice notice-ok t-small" style="width: 100%; text-align: left"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7"></path></svg><span>점검 전에 접수한 작업과 보관 중인 결과는 점검이 끝난 뒤 내 작업에서 확인할 수 있습니다.</span></div>
+      <button class="btn btn-lg" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7a9 9 0 0 0-15-2L2 8m0-6v6h6M4 17a9 9 0 0 0 15 2l3-3m0 6v-6h-6"></path></svg>다시 확인</button>
+      <p class="help">이 컴퓨터에서 실행하는 로컬 앱은 점검과 관계없이 사용할 수 있습니다.</p>
+    </section>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

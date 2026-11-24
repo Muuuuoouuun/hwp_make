@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>홈 A 인식 후 분기</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm bg-white" style="min-height: 900px; display: flex; flex-direction: column">
+  <header class="topbar clean">
+    <a class="brand" href="#"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</a>
+    <div class="row" style="gap: 8px">
+      <button class="btn btn-ghost" type="button" aria-haspopup="dialog">도움말</button>
+      <button class="btn" type="button">로그인</button>
+    </div>
+  </header>
+  <main style="flex: 1; display: flex; justify-content: center; padding: 56px 24px 96px">
+    <div class="stack" style="width: 100%; max-width: 760px; gap: 28px">
+      <div class="file-row" aria-live="polite">
+        <span class="file-ico" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M7 3.5h6.5L18 8v12.5H7z"></path><path d="M13.5 3.5V8H18"></path></svg></span>
+        <span class="stack" style="flex: 1; min-width: 0; gap: 2px">
+          <strong style="overflow: hidden; white-space: nowrap; text-overflow: ellipsis">2025 3월 모의고사 수학.hwp</strong>
+          <span class="t-small muted"><span class="ext">HWP</span> 1.8MB</span>
+        </span>
+        <label class="btn btn-ghost" for="swapFile">다른 파일</label>
+        <input id="swapFile" class="sr" type="file">
+        <button class="ibtn" type="button" aria-label="선택한 파일 제거"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8m0-8-8 8"></path></svg></button>
+      </div>
+
+      <div class="stack" style="gap: 8px; text-align: center">
+        <h1 class="t-h1">20개 문항을 인식했습니다</h1>
+        <p class="soft">원래 순서와 번호로 변환하거나, 필요한 문항을 골라 편집하세요.</p>
+      </div>
+
+      <div class="grid-2" style="gap: 20px">
+        <section class="card card-pad stack" style="gap: 14px; border-color: #2f56c7; box-shadow: 0 0 0 1px #2f56c7" aria-labelledby="optBasic">
+          <span class="badge badge-free" style="align-self: flex-start">기본 제공</span>
+          <h2 id="optBasic" class="t-h2">원래 순서·번호 그대로</h2>
+          <p class="t-small soft" style="flex: 1">인식한 20문항을 원본 순서와 번호 그대로 편집 가능한 HWPX로 받습니다.</p>
+          <button class="btn btn-primary btn-lg btn-block" type="button">HWPX로 변환</button>
+          <p class="t-cap muted">변환이 끝나면 다운로드가 시작되고, 최근 변환에서 다시 받을 수 있습니다.</p>
+        </section>
+        <section class="card card-pad stack" style="gap: 14px" aria-labelledby="optPremium">
+          <span class="badge badge-premium" style="align-self: flex-start">Premium</span>
+          <h2 id="optPremium" class="t-h2">문항을 골라 새 시험지로</h2>
+          <p class="t-small soft" style="flex: 1">필요한 문항만 골라 순서를 바꾸고, 본문·정답표·해설 번호를 함께 맞춥니다.</p>
+          <button class="btn btn-lg btn-block" type="button">로그인하고 문항 편집</button>
+          <p class="t-cap muted">로그인 후 이 파일과 인식한 문항을 그대로 가져갑니다.</p>
+        </section>
+      </div>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>
