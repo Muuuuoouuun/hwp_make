@@ -1,6 +1,8 @@
 # Priority Work Queue
 
-Updated: 2026-09-23
+Updated: 2026-11-25
+
+Recognition audit (2026-11-25): [recognition, application and speed](audits/2026-11-25/README.md). Question numbers matched 100% while the import path dropped about 40% of body text (boxed material, shared passages); now 0.35% on 90 booklets, measured by `scripts/audit_recognition_orphans.py`. A cover or blank page no longer fails the native export, and `quality_check="fast"` skips only the source comparison render. Open: mixed text-and-chart boxes become one image, `1)` question numbers still fail the native route, shared passages repeat per question in whole-exam exports, and the fast option and the Gemini math checkbox await a UI decision.
 
 Latest strict audit: [grid-frame paragraph editing and reassessment](audits/2026-09-23/grid-frame-paragraphs-progress.md). The 36-page harsh average is 87.06 (85.80 Korean, 88.67 math, 87.17 English), versus 87.04 in the previous same-environment output. English page 4 improves 72.20 to 72.85; the other 35 page scores remain equal. English Q27 framed notice now has five separately editable bullet paragraphs, and a 50-to-60 student edit survives save/reopen with eight pages and unchanged bitmaps. The full gate is 103 PASS, 11 SKIP, 1 existing visual-quality FAIL. Prior math Q27 editable graph-label grouping and the long English paragraph edit remain documented in the [graph audit](audits/2026-09-23/native-graph-annotations-progress.md). The 93-point goal remains unmet; this page score is not a five-field overall score.
 
