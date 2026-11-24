@@ -1217,7 +1217,11 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
             and fidelity.get("meets_layout_view_sync_target")
         )
         quality["quality_check"] = payload.quality_check
-        if not quality["meets_objective_score_target"] and not fast_check:
+        if fast_check:
+            # 화면 대조를 하지 않았으므로 '미달'이 아니라 '미측정'이다.
+            quality["meets_objective_score_target"] = None
+            quality["meets_paging_target"] = None
+        if quality["meets_objective_score_target"] is False:
             quality["visual_review_flags"] = list(dict.fromkeys([
                 *quality["visual_review_flags"], "native_output_requires_layout_review"
             ]))

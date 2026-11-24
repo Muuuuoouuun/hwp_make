@@ -142,11 +142,91 @@ def long_marker_line_pdf() -> bytes:
     return doc.tobytes()
 
 
+def unlinked_passage_pdf() -> bytes:
+    """발췌본: 8번 아래 [9~10] 지문은 있는데 9번이 없다."""
+    doc = fitz.open()
+    page = new_page(doc)
+    put(page, 60, 120, "8. Question eight of an excerpt?")
+    put(page, 60, 145, "choice text for question eight")
+    put(page, 60, 220, "[9~10] Read the next passage and answer.")
+    put(page, 60, 245, "ORPHAN_SENTINEL passage body without its questions.")
+    return doc.tobytes()
+
+
+def restarted_form_pdf() -> bytes:
+    """첫 유형은 12·13번까지만 있고 둘째 유형이 12번부터 다시 시작한다."""
+    doc = fitz.open()
+    first = new_page(doc)
+    put(first, 60, 120, "[12~15] Read the passage and answer.")
+    put(first, 60, 145, "FORM-ONE passage body.")
+    put(first, 60, 220, "12. First form question twelve?")
+    put(first, 60, 300, "13. First form question thirteen?")
+    second = new_page(doc)
+    for index, number in enumerate((12, 13, 14, 15)):
+        put(second, 60, 120 + 80 * index, f"{number}. Second form question {number}?")
+    return doc.tobytes()
+
+
+def single_path_table_pdf() -> bytes:
+    """테두리와 칸 구분선을 한 벡터 경로로 그린 표."""
+    doc = fitz.open()
+    page = new_page(doc)
+    put(page, 60, 120, "1. Read the table and answer.")
+    shape = page.new_shape()
+    shape.draw_rect(fitz.Rect(60, 135, 290, 235))
+    shape.draw_line((175, 135), (175, 235))
+    shape.draw_line((60, 185), (290, 185))
+    shape.finish(width=0.8)
+    shape.commit()
+    put(page, 68, 165, "TBL-A1 height km")
+    put(page, 183, 165, "TBL-B1 temp deg")
+    put(page, 68, 215, "TBL-A2 3.0 2.0")
+    put(page, 183, 215, "TBL-B2 -4 26")
+    put(page, 60, 300, "2. Second question after the table.")
+    return doc.tobytes()
+
+
+def central_rule_single_column_pdf() -> bytes:
+    """1단 시험지인데 쪽 가운데에 긴 세로선이 있다(답안 작성란 등)."""
+    doc = fitz.open()
+    page = new_page(doc)
+    page.draw_line((297.5, 150), (297.5, 760), width=0.6)
+    put(page, 60, 120, "1. This full width question line clearly runs across the middle of the page to the right side.")
+    put(page, 60, 145, "FULLWIDTH-SENTINEL body line that also runs across the middle of the page to the right.")
+    put(page, 60, 300, "2. The second full width question line also runs across the middle of the page layout.")
+    return doc.tobytes()
+
+
+def band_marker_pdf() -> bytes:
+    """다음 쪽의 첫 문항 번호 줄이 머리글 밴드(위 13%) 안에서 시작한다."""
+    doc = fitz.open()
+    first = new_page(doc)
+    put(first, 60, 150, "1. Opening question?")
+    put(first, 60, 300, "[2~3] Read the passage and answer.")
+    put(first, 60, 325, "BAND-PASSAGE body line.")
+    second = new_page(doc)
+    put(second, 60, 105, "2. Question two starts inside the header band?")
+    put(second, 60, 140, "QUESTION-ONLY body line of question two.")
+    put(second, 60, 280, "3. Question three?")
+    return doc.tobytes()
+
+
+def fullwidth_heading_pdf() -> bytes:
+    doc = fitz.open()
+    page = new_page(doc)
+    page.insert_text((60, 120), "［1～2］ Read the passage and answer.", fontsize=11, fontname="korea")
+    put(page, 60, 145, "FULLWIDTH-PASSAGE body line.")
+    put(page, 60, 220, "1. First question about the passage?")
+    put(page, 60, 300, "2. Second question about the passage?")
+    return doc.tobytes()
+
+
 def date_like_question_pdf() -> bytes:
     doc = fitz.open()
     page = new_page(doc)
     put(page, 60, 30, "24. 11. 7. PM 3:21", size=8)  # 인쇄일 머리글(쪽 여백)
-    put(page, 60, 200, "10. Ordinary question before it.")
+    put(page, 60, 90, "24. 11. 7. PM 3:21", size=8)  # 여백 밴드(8%) 밖에 찍힌 인쇄일
+    put(page, 60, 200, "10. 3. 1. Movement was a turning point because?")  # 날짜로 시작하는 문항 줄
     put(page, 60, 300, "11. AM 9 and PM 3 readings were 12 degrees.")
     return doc.tobytes()
 
@@ -198,7 +278,63 @@ def check_recognition() -> None:
 
     dated = recognize_pdf(date_like_question_pdf(), subject=Subject.KOREAN)
     numbers = [problem.number for problem in dated.problems]
-    check("본문의 날짜형 문항 줄은 문항이고 여백의 인쇄일은 아니다", numbers == [10, 11], repr(numbers))
+    check("본문의 날짜형 문항 줄은 문항이고 인쇄일은 어디에 찍혀도 아니다", numbers == [10, 11], repr(numbers))
+
+    unlinked = recognize_pdf(unlinked_passage_pdf(), subject=Subject.KOREAN)
+    check("받을 문항이 없는 지문의 글은 앞 문항에 남는다(소실·0번 없음)",
+          [p.number for p in unlinked.problems] == [8] and "ORPHAN_SENTINEL" in unlinked.problems[0].text,
+          repr([(p.number, p.text[-60:]) for p in unlinked.problems]))
+
+    restarted = recognize_pdf(restarted_form_pdf(), subject=Subject.KOREAN)
+    owners = [(p.page_number, p.number) for p in restarted.problems if "FORM-ONE" in p.shared_passage_text]
+    check("번호가 다시 시작한 다음 유형에는 앞 유형의 지문을 붙이지 않는다", owners == [(1, 12), (1, 13)], repr(owners))
+
+    single_path = by_number(recognize_pdf(single_path_table_pdf(), subject=Subject.KOREAN))
+    check("한 경로로 그린 표도 그림으로 보존한다", len(getattr(single_path.get(1), "figure_pngs", [])) == 1
+          and "TBL-A1" not in getattr(single_path.get(1), "text", "TBL-A1"))
+
+    data = central_rule_single_column_pdf()
+    check("본문이 가운데를 가로지르면 세로선이 있어도 1단이다",
+          [int(page.metadata.get("column_count") or 0) for page in segment_pdf(data, subject=Subject.KOREAN)] == [1])
+    check("1단 시험지의 전폭 줄을 잃지 않는다",
+          "FULLWIDTH-SENTINEL" in getattr(by_number(recognize_pdf(data, subject=Subject.KOREAN)).get(1), "text", ""))
+
+    band = by_number(recognize_pdf(band_marker_pdf(), subject=Subject.KOREAN))
+    shared = [getattr(band.get(n), "shared_passage_text", "") for n in (2, 3)]
+    check("머리글 밴드 안에서 시작한 문항의 본문이 지문에 섞이지 않는다",
+          all("BAND-PASSAGE" in s and "QUESTION-ONLY" not in s for s in shared)
+          and "QUESTION-ONLY" in getattr(band.get(2), "text", ""), repr(shared))
+
+    try:
+        fullwidth = by_number(recognize_pdf(fullwidth_heading_pdf(), subject=Subject.KOREAN))
+    except Exception as exc:  # 내장 CJK 글꼴이 없는 PyMuPDF 빌드
+        print(f"  [SKIP] 전각 대괄호 지문 머리 - {type(exc).__name__}")
+    else:
+        check("전각 대괄호 ［N～M］ 지문 머리도 인식한다",
+              all("FULLWIDTH-PASSAGE" in getattr(fullwidth.get(n), "shared_passage_text", "") for n in (1, 2)))
+
+
+def check_importer() -> None:
+    from app import importers, storage
+
+    stem, choices = importers._split_stem_and_choices(
+        "12. Pick the right ones.\na. first item\nb. second item\n① a ② b ③ a, b ④ a, c ⑤ b, c")
+    check("원문자 선지가 있으면 a./b. 줄은 <보기> 항목으로 본문에 남는다",
+          len(choices) == 5 and "a. first item" in stem and "b. second item" in stem, repr((stem, choices)))
+    _, lettered = importers._split_stem_and_choices("3. Pick one.\nA. alpha\nB. beta\nC. gamma\nD. delta")
+    check("원문자가 없는 문항의 A.~D. 는 그대로 선지다", len(lettered) == 4, repr(lettered))
+
+    storage.init_db()
+    result = importers.import_pdf("korean_passage.pdf", same_page_passage_pdf(), {})
+    created = [storage.get_problem(item["id"]) for item in result.get("created") or []]
+    first = next((problem for problem in created if str(problem.get("number")) == "1"), {})
+    layout = first.get("layout") or {}
+    passage_lines = [line for line in layout.get("pdf_lines") or [] if "PASSAGE" in str(line.get("text") or "")]
+    check("가져온 문항이 지문 사본을 지닌다", layout.get("block_type") == "problem_with_shared_passage"
+          and "PASSAGE-ONE" in str(first.get("stem") or ""), repr(layout.get("block_type")))
+    check("지문 줄 좌표는 글·상자·쪽만 저장한다(글자별 좌표 복제 없음)",
+          bool(passage_lines) and all(set(line) <= {"text", "bbox_px", "page"} for line in passage_lines),
+          repr([sorted(line) for line in passage_lines[:1]]))
 
 
 def check_render_flag() -> None:
@@ -256,6 +392,9 @@ def check_application() -> None:
     quick = fast.json()
     check("빠른 변환은 원본 대조만 생략", (quick.get("fidelity") or {}).get("skipped") is True
           and (quick.get("quality") or {}).get("quality_check") == "fast")
+    check("빠른 변환의 화면 대조 판정은 미달이 아니라 미측정이다",
+          (quick.get("quality") or {}).get("meets_objective_score_target") is None
+          and "native_output_requires_layout_review" not in ((quick.get("quality") or {}).get("visual_review_flags") or []))
     notices = quick.get("notices") or []
     check("빠른 변환 안내가 있고 품질 미달로 표시하지 않는다",
           any("빠른 변환" in notice for notice in notices)
@@ -268,6 +407,7 @@ def main() -> int:
     try:
         check_recognition()
         check_render_flag()
+        check_importer()
         check_application()
     finally:
         _tmp.cleanup()

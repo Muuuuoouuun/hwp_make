@@ -30,7 +30,8 @@ from app.hancom_pua_map import is_hancom_eq_font
 # 문항 본문에서 이 비율 이상이 아직 복원되지 않은 PUA이면 텍스트만으로는 부족하다고 본다.
 # 이 경우 보존용 crop을 붙이되, 가능한 라인/문자 좌표는 계속 남겨 후속 수식 복원에 쓴다.
 _PUA_UNRELIABLE_RATIO = 0.12
-_PASSAGE_RANGE_RE = re.compile(r"\[\s*(\d{1,2})\s*[~～∼\-–]\s*(\d{1,2})\s*\]")
+# 전각 대괄호(［12～13］)도 같은 머리다. 편집형 작성기의 SHARED_PASSAGE_START 와 맞춘다.
+_PASSAGE_RANGE_RE = re.compile(r"[\[［]\s*(\d{1,2})\s*[~～∼\-–]\s*(\d{1,2})\s*[\]］]")
 
 
 # ---------------------------------------------------------------------------
@@ -98,43 +99,35 @@ def infer_subject(filename: str | None) -> Subject:
     return Subject.UNKNOWN
 
 
-def _source_literal_english_pages(pdf_bytes: bytes) -> list[bool]:
+def _source_literal_english_pages(pages: list[PageModel]) -> list[bool]:
     """Prove prose from actual source area/directions, independent of names.
 
     KICE sometimes paints the area name as an image. Its actual 1-17 listening
     directions still identify the English paper. Clear later area headings
     reset the inherited proof in a mixed-subject PDF.
-    """
-    import fitz
 
+    Reads the top-quarter lines the segmenter already extracted, so the PDF is
+    not reopened and every page's text layer is not extracted a second time.
+    """
     proved: list[bool] = []
     english = False
-    try:
-        with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
-            for page in document:
-                header_lines = ["".join(span.get("text", "") for span in line.get("spans", []))
-                                for block in page.get_text("dict").get("blocks", [])
-                                for line in block.get("lines", [])
-                                if line["bbox"][1] <= page.rect.height * .25]
-                compact = [re.sub(r"\s+", "", line) for line in header_lines]
-                areas = [line for line in compact if re.fullmatch(
-                    r"(?:제[1-5]교시)?(?:국어|수학|영어|과학탐구|사회탐구|한국사)영역", line)]
-                english_area = any(re.fullmatch(r"(?:제3교시)?영어(?:영역)?|English(?:Area|Section)?", line, re.I)
-                                   for line in compact)
-                if areas:
-                    english = all("영어영역" in line for line in areas)
-                elif english_area:
-                    english = True
-                else:
-                    directions = "".join(compact)
-                    if ("1번부터17번까지는듣고답하는문제입니다" in directions
-                            and "15번까지는한번만들려주고" in directions
-                            and "16번부터17번까지는두번" in directions):
-                        english = True
-                proved.append(english)
-    except Exception:
-        # A missing source proof retains the existing equation-aware writer.
-        return []
+    for page in pages:
+        compact = [re.sub(r"\s+", "", str(line)) for line in page.metadata.get("top_quarter_lines") or []]
+        areas = [line for line in compact if re.fullmatch(
+            r"(?:제[1-5]교시)?(?:국어|수학|영어|과학탐구|사회탐구|한국사)영역", line)]
+        english_area = any(re.fullmatch(r"(?:제3교시)?영어(?:영역)?|English(?:Area|Section)?", line, re.I)
+                           for line in compact)
+        if areas:
+            english = all("영어영역" in line for line in areas)
+        elif english_area:
+            english = True
+        else:
+            directions = "".join(compact)
+            if ("1번부터17번까지는듣고답하는문제입니다" in directions
+                    and "15번까지는한번만들려주고" in directions
+                    and "16번부터17번까지는두번" in directions):
+                english = True
+        proved.append(english)
     return proved
 
 
@@ -427,7 +420,7 @@ def recognize_pdf(
         return result
 
     result.page_count = len(pages)
-    literal_english_pages = _source_literal_english_pages(pdf_bytes)
+    literal_english_pages = _source_literal_english_pages(pages)
     header_source = " ".join(
         str(page.metadata.get("header_text") or "").strip()
         for page in pages
@@ -463,11 +456,19 @@ def recognize_pdf(
         if leading and open_passage is not None and open_passage["page_number"] == page_index:
             # 지문이 쪽을 넘어 이 쪽 선두(첫 문항 위)에서 끝난다. 뒷부분을 잃지 않는다.
             open_passage["text"] = "\n".join([open_passage["text"], leading["text"]])
-            open_passage["line_geometries"] = [*open_passage["line_geometries"],
-                                               *leading["line_geometries"]]
+            # 이어 붙인 줄은 다음 쪽 좌표다. 줄마다 쪽을 적어 소비자가 구분할 수 있게 한다.
+            open_passage["line_geometries"] = [
+                *open_passage["line_geometries"],
+                *({**geometry, "page": page_index + 1} for geometry in leading["line_geometries"]),
+            ]
         open_passage = None
         for shared in page.metadata.get("shared_passages", []):
-            pending_passages.append({**shared, "page_number": page_index + 1})
+            # 지문 줄 좌표는 지문이 인쇄된 쪽 기준이다. 문항과 다른 쪽일 수 있어 쪽을 적어 둔다.
+            pending_passages.append({
+                **shared, "page_number": page_index + 1,
+                "line_geometries": [{**geometry, "page": page_index + 1}
+                                    for geometry in shared.get("line_geometries") or []],
+            })
             if shared.get("open"):
                 open_passage = pending_passages[-1]
         if marker_count > 0:
@@ -481,6 +482,8 @@ def recognize_pdf(
 
         if not page.problems:
             if passage is not None:
+                passage["line_geometries"] = [{**geometry, "page": page_index + 1}
+                                              for geometry in passage.get("line_geometries") or []]
                 pending_passages.append(passage)
                 open_passage = passage
                 continue
@@ -583,6 +586,8 @@ def recognize_pdf(
         for problem in result.problems[start_index:]:
             if not int(passage["start"]) <= problem.number <= int(passage["end"]):
                 break
+            if targets and problem.number <= targets[-1].number:
+                break  # 번호가 다시 시작했다: 다음 유형(홀·짝형)의 문항이다
             targets.append(problem)
             if problem.number == int(passage["end"]):
                 break
@@ -601,6 +606,14 @@ def recognize_pdf(
     for passage in unlinked_passages:
         page_number = int(passage["page_number"])
         page_index = page_number - 1
+        owner = next((problem for problem in reversed(result.problems)
+                      if problem.page_number == page_number and problem.number > 0), None)
+        if owner is not None:
+            # 같은 쪽 문항 뒤에서 시작한 지문인데 받을 문항이 없다(발췌본 등). 지문으로 떼어 낸
+            # 글을 바로 앞 문항에 되돌려 잃지 않는다.
+            owner.text = "\n".join(part for part in (owner.text, str(passage.get("text") or "").strip()) if part)
+            owner.line_geometries.extend(passage.get("line_geometries") or [])
+            continue
         page_img = page_images.get(page_index)
         fallback = _page_fallback_problem(pages[page_index], page_number, page_img)
         if fallback is not None:

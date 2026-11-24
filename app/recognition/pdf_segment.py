@@ -53,10 +53,16 @@ __all__ = ["segment_pdf"]
 # 검사(선두가 숫자면 배제)로 걸러 오탐을 막는다.
 _MARKER_RE = re.compile(r"^([1-9][0-9]?)([.)])(?:\s|$)")
 _NUMERIC_CHOICE_MARKER_RE = re.compile(r"^\s*([1-5])([.)])(?:\s|$)")
-_PASSAGE_RANGE_RE = re.compile(r"\[\s*(\d{1,2})\s*[~～∼\-–]\s*(\d{1,2})\s*\]")
+# 전각 대괄호(［12～13］)도 같은 머리다. 편집형 작성기의 SHARED_PASSAGE_START 와 맞춘다.
+_PASSAGE_RANGE_RE = re.compile(r"[\[［]\s*(\d{1,2})\s*[~～∼\-–]\s*(\d{1,2})\s*[\]］]")
 
 # 인쇄일/헤더 날짜 라인 판정(edb `_looks_like_pdf_print_date_header`).
 _DATE_HEADER_RE = re.compile(r"^[0-9]{2,4}\s*[.\-/]?\s*[0-9]{1,2}\s*[.\-/]?\s*[0-9]{1,2}\.")
+# 줄 전체가 날짜(와 시각)뿐인 인쇄 타임스탬프. 쪽 어디에 찍혀도 문항 번호 줄이 아니다.
+_PRINT_TIMESTAMP_RE = re.compile(
+    r"[0-9]{2,4}\s*[.\-/]\s*[0-9]{1,2}\s*[.\-/]\s*[0-9]{1,2}\.?"
+    r"(?:\s*(?:오전|오후|AM|PM)?\s*[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?\s*(?:AM|PM)?)?"
+)
 _AMPM_MARKERS = ("오전", "오후", "AM", "PM")
 # 상단 헤더 밴드에서만 배제 근거로 쓰는 토큰(연/월/교시/배점 표기).
 _HEADER_TOKENS = ("年", "월", "교시", "점]", "학년도", "모의평가")
@@ -84,10 +90,19 @@ _CHOICE_MARKERS = (
 # ---------------------------------------------------------------------------
 # 텍스트/헤더 판정 helper
 # ---------------------------------------------------------------------------
-def _looks_like_date_header(text: str) -> bool:
-    """인쇄일/타임스탬프 헤더 라인인가(edb 포팅)."""
+def _looks_like_date_header(text: str, *, loose: bool = True) -> bool:
+    """인쇄일/타임스탬프 헤더 라인인가(edb 포팅).
+
+    loose=False 면 줄 전체가 날짜·시각뿐인 인쇄 타임스탬프만 본다. 날짜로 시작하거나 오전·오후와
+    숫자가 섞인 줄까지 보는 느슨한 판정은 본문의 "10. 3. 1. 운동에 대한 설명으로…",
+    "11. 오전 9시와 오후 3시의 기온은 12도" 같은 문항 첫 줄도 맞으므로 쪽 여백에서만 쓴다.
+    """
     normalized = str(text or "").strip()
     if not normalized:
+        return False
+    if _PRINT_TIMESTAMP_RE.fullmatch(normalized):
+        return True
+    if not loose:
         return False
     if _DATE_HEADER_RE.match(normalized):
         return True
@@ -422,9 +437,10 @@ def _extract_markers(
     for line in text_lines:
         text = str(line["text"])
         box: Box = line["box"]
-        # 인쇄일 머리글·꼬리글은 쪽 여백에만 찍힌다. 본문의 "11. 오전 9시와 오후 3시의 기온은
-        # 12도" 같은 문항 첫 줄까지 날짜로 보고 버리지 않는다.
-        if (box.top < margin_band or box.bottom > height_px - margin_band) and _looks_like_date_header(text):
+        # 날짜 형식(연.월.일.)은 어디서든 인쇄일로 본다. 오전·오후 기반의 느슨한 판정은 쪽
+        # 여백에서만 쓴다(본문의 문항 첫 줄을 버리지 않도록).
+        in_margin = box.top < margin_band or box.bottom > height_px - margin_band
+        if _looks_like_date_header(text, loose=in_margin):
             continue
         match = _MARKER_RE.match(text)
         if not match:
@@ -700,6 +716,15 @@ def _extract_figures(page: Any, scale: float) -> tuple[list[Box], list[bool]]:
             if box is None:
                 continue
             drawings.append(box)
+            # 테두리와 칸 구분선을 한 경로로 그린 표는 경로 bbox 하나로만 보인다. 그림 판정용으로
+            # 경로 안의 선분도 넘긴다(선 하나짜리 경로는 위 bbox 와 같으므로 중복으로 세지 않는다).
+            items = drawing.get("items") or ()
+            if len(items) > 1:
+                for item in items:
+                    if item and item[0] == "l" and len(item) >= 3:
+                        segment = _scaled_drawing_box((item[1].x, item[1].y, item[2].x, item[2].y), scale)
+                        if segment is not None:
+                            drawings.append(segment)
             thin_long_line = (
                 min(box.width, box.height) <= thin
                 and max(box.width, box.height) >= min_line_length
@@ -941,16 +966,20 @@ def _page_leading_lines(
     """
     two_columns = column_count > 1
     marker_ids = {id(marker["line"]) for marker in markers}
-    body = [line for line in text_lines if line["box"].top > height_px * 0.13]
     leading: list[dict[str, Any]] = []
     for column in range(2 if two_columns else 1):
-        column_lines = [line for line in body
+        column_lines = [line for line in text_lines
                         if not two_columns
                         or int(line["box"].left + line["box"].width / 2 >= width_px / 2) == column]
         for line in _english_reading_order(column_lines):
+            # 첫 문항 번호 줄이 머리글 밴드 안에 걸쳐 있어도(실측 0.3%) 거기서 멈춘다. 밴드로
+            # 먼저 걸러 내면 그 문항의 본문이 지문 뒤에 붙는다.
             if id(line) in marker_ids or _range_heading(line["text"], anchored):
                 return leading
-            leading.append(line)
+            # 머리글 줄은 쪽 높이의 8~10.5%, 본문 첫 줄은 11.8%부터다(90책자 실측). 13%로 자르면
+            # 이어진 지문의 첫 줄이 걸릴 수 있어 그 사이에서 자른다. 괘선 글리프 줄은 장식이다.
+            if line["box"].top > height_px * 0.11 and not re.fullmatch(r"[━─═]{8,}", str(line["text"]).strip()):
+                leading.append(line)
     return leading
 
 
@@ -1157,6 +1186,11 @@ def _segment_page(
     }
 
     text_lines = _extract_text_lines(page, scale)
+    # 영어 원문 판정(파이프라인)이 쓰는 상단 1/4 줄. 이미 뽑은 줄을 넘겨 PDF 를 다시 열어
+    # 전 쪽 글을 재추출하지 않게 한다.
+    base_metadata["top_quarter_lines"] = [
+        str(line["text"]) for line in text_lines if line["box"].top <= float(height_px) * 0.25
+    ]
     header_cutoff = float(height_px) * 0.13
     base_metadata["header_text"] = " ".join(
         str(line.get("text") or "").strip()
@@ -1299,12 +1333,19 @@ def _segment_page(
         # the other. Question markers alone cannot detect the two-column
         # layout in that case, and a full-width question box would then mix
         # the passage lines into the questions by height.
+        # A central rule alone proves columns only when no body line runs across
+        # it: a one-column sheet can carry a long vertical rule in its answer area.
+        gutter = float(width_px) * 0.05
+        crosses_middle = subject != Subject.ENGLISH and any(
+            line["box"].top > float(height_px) * 0.13
+            and line["box"].left < middle - gutter and line["box"].right > middle + gutter
+            for line in text_lines)
         if len(marker_sides) == 1 and (
             range_sides - marker_sides
             # English keeps its tuned proof (a divider counts only beside a
             # range heading); elsewhere the page-spanning central rule of a
             # two-column exam sheet is proof on its own.
-            or ((bool(range_sides) or subject != Subject.ENGLISH)
+            or ((bool(range_sides) or (subject != Subject.ENGLISH and not crosses_middle))
                 and _english_has_column_divider(page, scale, float(width_px), float(height_px)))
         ):
             columns = [[marker for marker in markers if marker["box"].left < middle],
