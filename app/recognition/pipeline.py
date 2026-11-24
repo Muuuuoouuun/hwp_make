@@ -568,16 +568,17 @@ def recognize_pdf(
     unlinked_passages: list[dict[str, Any]] = []
     for passage in pending_passages:
         passage_page = int(passage["page_number"])
-        if passage.get("open"):
+        # 같은 쪽에 시작 번호 문항이 있으면 그 문항이 받는다. 한 쪽에 두 유형이 섞이지는 않으므로
+        # 단 배치를 잘못 읽어 열린 지문으로 표시된 경우에도 안전하다.
+        target = next((problem for problem in result.problems
+                       if problem.number == int(passage["start"])
+                       and problem.page_number == passage_page), None)
+        if target is None and passage.get("open"):
             # 지문 뒤에 이 쪽 문항이 없었다. 읽기 순서로 바로 다음에 오는 문항이 범위의 시작
             # 번호일 때만 잇는다(뒤에 이어 붙은 다른 유형의 같은 번호로 건너뛰지 않는다).
             following = next((problem for problem in result.problems
                               if problem.page_number > passage_page and problem.number > 0), None)
             target = following if following is not None and following.number == int(passage["start"]) else None
-        else:
-            target = next((problem for problem in result.problems
-                           if problem.number == int(passage["start"])
-                           and problem.page_number == passage_page), None)
         if target is None:
             unlinked_passages.append(passage)
             continue

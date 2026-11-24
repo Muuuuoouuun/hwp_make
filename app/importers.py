@@ -805,6 +805,17 @@ def _numeric_choice_sequence_starts(lines: list[str], index: int) -> bool:
     return labels[:3] == [1, 2, 3]
 
 
+def _has_circled_choice_set(lines: list[str]) -> bool:
+    """원문자 선지 묶음이 있는가.
+
+    원문자로 시작하는 줄이 3개 이상이거나 한 줄에 원문자가 3개 이상 나란히 있을 때만 그렇다.
+    본문이 자료의 ①·②·③을 한 번씩 가리키는 정도는 선지 묶음이 아니다.
+    """
+    starts = sum(1 for line in lines if line.lstrip()[:1] and line.lstrip()[0] in CIRCLED_CHOICE_MARKERS)
+    inline = max((sum(char in CIRCLED_CHOICE_MARKERS for char in line) for line in lines), default=0)
+    return starts >= 3 or inline >= 3
+
+
 def _choice_line_body(
     lines: list[str],
     index: int,
@@ -821,10 +832,8 @@ def _choice_line_body(
     label = match.group("label")
     number = _numeric_choice_label(label)
     if number is None:
-        if label[0].isalpha() and sum(
-                char in CIRCLED_CHOICE_MARKERS for other in lines for char in other) >= 3:
-            # 원문자 선지 묶음(①②③…)이 따로 있는 문항의 "a." "b." 줄은 <보기> 항목이지 선지가
-            # 아니다. 원문자가 한두 개 섞인 정도로는 글자 선지를 건드리지 않는다.
+        if label[0].isalpha() and _has_circled_choice_set(lines):
+            # 원문자 선지 묶음(①②③…)이 따로 있는 문항의 "a." "b." 줄은 <보기> 항목이지 선지가 아니다.
             return None
         return match.group("body").strip()
     if not choices_started:

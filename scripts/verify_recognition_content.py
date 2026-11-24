@@ -254,6 +254,18 @@ def cut_corner_frame_pdf() -> bytes:
     return doc.tobytes()
 
 
+def narrow_gutter_pdf() -> bytes:
+    """오른쪽 단이 쪽 가운데보다 왼쪽에서 시작해, 짧은 번호 줄의 중심이 가운데 왼쪽에 놓인다."""
+    doc = fitz.open()
+    page = new_page(doc)
+    put(page, 45, 200, "11. Left column question with some text?")
+    put(page, 45, 400, "[12~13] Read the passage.")
+    put(page, 45, 425, "NARROW-PASSAGE body line.")
+    put(page, 265, 200, "12. Why?")
+    put(page, 265, 300, "13. How?")
+    return doc.tobytes()
+
+
 def band_marker_pdf() -> bytes:
     """다음 쪽의 첫 문항 번호 줄이 머리글 밴드(위 13%) 안에서 시작한다."""
     doc = fitz.open()
@@ -378,6 +390,11 @@ def check_recognition() -> None:
           all("DATEBAND-PASSAGE" in getattr(boundary.get(n), "shared_passage_text", "") for n in (12, 13)),
           repr(sorted(boundary)))
 
+    narrow = by_number(recognize_pdf(narrow_gutter_pdf(), subject=Subject.KOREAN))
+    check("단 배치를 잘못 읽어도 같은 쪽의 시작 번호 문항에는 지문이 붙는다",
+          all("NARROW-PASSAGE" in getattr(narrow.get(n), "shared_passage_text", "") for n in (12, 13)),
+          repr({n: bool(getattr(narrow.get(n), "shared_passage_text", "")) for n in (11, 12, 13)}))
+
     cut_corner = by_number(recognize_pdf(cut_corner_frame_pdf(), subject=Subject.KOREAN))
     check("모서리를 자른 한 경로 테두리의 상자 글은 본문에 남는다",
           "CUTBOX-A" in getattr(cut_corner.get(1), "text", "") and not getattr(cut_corner.get(1), "figure_pngs", [1]))
@@ -404,6 +421,10 @@ def check_importer() -> None:
     check("빈 줄이 있어도 A.~E. 선지는 그대로다", len(spaced) == 5, repr(spaced))
     _, mixed = importers._split_stem_and_choices("3. Pick one.\nA. alpha\nB. beta\n③ gamma\nD. delta\nE. epsilon")
     check("원문자가 한 개 섞인 정도로는 글자 선지를 빼지 않는다", len(mixed) == 5, repr(mixed))
+    _, referenced = importers._split_stem_and_choices(
+        "3. Read the data.\nAt ① the valve opens.\nAt ② the pressure rises.\nAt ③ the cycle ends.\n"
+        "A. alpha\nB. beta\nC. gamma\nD. delta\nE. epsilon")
+    check("본문이 원문자를 세 번 가리켜도 A.~E. 선지는 그대로다", len(referenced) == 5, repr(referenced))
 
     storage.init_db()
     result = importers.import_pdf("korean_passage.pdf", same_page_passage_pdf(), {})
