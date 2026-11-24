@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>모바일 회원가입</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm bg-white" style="width: 390px; min-height: 900px; display: flex; flex-direction: column">
+  <header class="topbar clean" style="padding: 0 16px; height: 60px">
+    <a class="brand" href="#"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</a>
+    <a class="btn btn-ghost" href="#" style="padding: 0 12px">로그인</a>
+  </header>
+  <form class="stack" style="flex: 1; gap: 16px; padding: 16px 20px 28px" aria-labelledby="msTitle">
+    <div class="stack" style="gap: 6px">
+      <span class="badge badge-free" style="align-self: flex-start">무료 계정</span>
+      <h1 id="msTitle" class="t-h1" style="font-size: 24px">가입하고 계속 무료로 변환하세요</h1>
+      <p class="t-small soft">무료 변환 [M]회 · 결과 30일 보관 · 다른 기기에서 다시 받기</p>
+    </div>
+    <div class="field"><label class="label" for="msName">이름</label><input id="msName" class="input" type="text" autocomplete="name"></div>
+    <div class="field"><label class="label" for="msEmail">이메일</label><input id="msEmail" class="input" type="email" inputmode="email" autocomplete="email" placeholder="teacher@example.com"></div>
+    <div class="field"><label class="label" for="msPw">비밀번호</label><input id="msPw" class="input" type="password" autocomplete="new-password" aria-describedby="msPwHelp"><span id="msPwHelp" class="help">10자 이상</span></div>
+    <label class="check" style="align-items: flex-start"><input type="checkbox" style="margin-top: 2px"><span><span class="strong">[필수]</span> <a href="#">이용약관</a>과 <a href="#">개인정보 처리방침</a>에 동의합니다.</span></label>
+    <div style="flex: 1"></div>
+    <button class="btn btn-primary btn-lg btn-block" type="submit">무료로 가입하기</button>
+    <p class="t-cap muted" style="text-align: center">가입하지 않아도 무료 [N]회까지 바로 변환할 수 있어요.</p>
+  </form>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

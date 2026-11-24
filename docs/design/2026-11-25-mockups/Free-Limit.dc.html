@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>무료 변환 한도 도달</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./hm.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#2447aa}a:hover{color:#172033}
+</style>
+</helmet>
+<div class="hm bg-white" style="min-height: 900px; display: flex; flex-direction: column">
+  <header class="topbar clean">
+    <a class="brand" href="#"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</a>
+    <div class="row" style="gap: 8px"><a class="btn btn-ghost" href="#">로그인</a><a class="btn btn-primary" href="#">회원가입</a></div>
+  </header>
+  <main style="flex: 1; display: flex; justify-content: center; padding: 56px 24px 96px">
+    <div class="stack" style="width: 100%; max-width: 640px; gap: 24px">
+      <div class="file-row">
+        <span class="file-ico" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M7 3.5h6.5L18 8v12.5H7z"></path><path d="M13.5 3.5V8H18"></path></svg></span>
+        <span class="stack" style="flex: 1; min-width: 0; gap: 2px"><strong style="overflow: hidden; white-space: nowrap; text-overflow: ellipsis">2025 3월 모의고사 수학.hwp</strong><span class="t-small muted"><span class="ext">HWP</span> 1.8MB · 선택한 파일은 그대로 유지됩니다</span></span>
+        <button class="ibtn" type="button" aria-label="선택한 파일 제거"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8m0-8-8 8"></path></svg></button>
+      </div>
+      <section class="card card-raise card-pad stack" style="gap: 16px; border-color: #2f56c7" aria-labelledby="flTitle" role="status">
+        <span class="chip chip-info nodot" style="align-self: flex-start">무료 변환 [N]/[N]회 사용</span>
+        <h1 id="flTitle" class="t-h2" style="font-size: 22px">로그인 없이 쓸 수 있는 무료 변환을 모두 사용했어요</h1>
+        <p class="soft">무료로 가입하면 이 파일을 바로 이어서 변환할 수 있어요. 가입에 요금은 들지 않습니다.</p>
+        <div class="grid-2" style="gap: 10px">
+          <a class="btn btn-primary btn-lg" href="#">무료로 가입하고 변환</a>
+          <a class="btn btn-lg" href="#">로그인</a>
+        </div>
+        <p class="help" style="font-size: 13px">이미 받은 결과는 그대로 다시 받을 수 있어요. 무료 횟수는 [초기화 주기]마다 다시 채워집니다.</p>
+      </section>
+      <a class="t-small" href="#" style="align-self: center">최근 변환에서 다시 받기</a>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

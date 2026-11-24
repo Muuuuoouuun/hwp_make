@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<title>계정 만들기</title>
+<title>회원가입</title>
 <script src="./support.js"></script>
 <link rel="stylesheet" href="./hm.css">
 </head>
@@ -20,22 +20,30 @@ a{color:#2447aa}a:hover{color:#172033}
     <a class="brand" href="#"><span class="brand-mark" aria-hidden="true">H</span>HWP Make</a>
     <a class="btn btn-ghost" href="#">로그인</a>
   </header>
-  <main style="flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px 16px 80px">
-    <form class="card card-raise stack" style="width: 100%; max-width: 460px; gap: 18px; padding: 36px 32px" aria-labelledby="suTitle">
-      <div class="stack" style="gap: 8px">
-        <span class="chip chip-info nodot" style="align-self: flex-start">초대 링크로 계정 만들기</span>
-        <h1 id="suTitle" class="t-h1" style="font-size: 26px">내 문서 공간을 시작하세요</h1>
-        <p class="t-small soft">처음 사용할 계정을 만들어 주세요. 이 설정 링크는 한 번만 사용할 수 있어요.</p>
-      </div>
-      <div class="field"><label class="label" for="suName">표시 이름</label><input id="suName" class="input" type="text" autocomplete="name" maxlength="60" required></div>
-      <div class="field"><label class="label" for="suEmail">이메일</label><input id="suEmail" class="input" type="email" autocomplete="username" required placeholder="teacher@example.com"></div>
-      <div class="field"><label class="label" for="suPw">비밀번호</label><input id="suPw" class="input" type="password" autocomplete="new-password" minlength="10" required aria-describedby="suPwHelp"><span id="suPwHelp" class="help">10자 이상</span></div>
-      <button class="btn btn-primary btn-lg btn-block" type="submit">계정 만들고 시작</button>
-      <ul class="stack t-small soft" style="gap: 6px; padding-top: 14px; border-top: 1px solid #d9deea">
-        <li class="row" style="gap: 8px"><svg class="icon icon-sm" viewBox="0 0 20 20" aria-hidden="true" style="color: #1d6f4e"><path d="m5 10 3 3 7-7"></path></svg>업로드한 파일과 변환 결과는 내 계정에서만 볼 수 있어요.</li>
-        <li class="row" style="gap: 8px"><svg class="icon icon-sm" viewBox="0 0 20 20" aria-hidden="true" style="color: #1d6f4e"><path d="m5 10 3 3 7-7"></path></svg>파일은 30일 보관되며 언제든 삭제할 수 있어요.</li>
-      </ul>
-    </form>
+  <main style="flex: 1; display: flex; align-items: center; padding: 24px 0 72px">
+    <div class="wrap grid-2" style="max-width: 1000px; gap: 48px; align-items: center">
+      <section class="stack" style="gap: 18px" aria-labelledby="suBenefit">
+        <span class="badge badge-free" style="align-self: flex-start">무료 계정</span>
+        <h1 id="suBenefit" class="t-display" style="font-size: 34px">가입하고 계속 무료로 변환하세요</h1>
+        <p class="soft">가입하지 않아도 바로 변환할 수 있어요. 계정을 만들면 결과를 보관하고 더 많이 변환할 수 있습니다.</p>
+        <ul class="stack" style="gap: 12px">
+          <li class="row" style="gap: 12px; align-items: flex-start"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true" style="color: #1d6f4e; margin-top: 2px"><path d="m5 10 3 3 7-7"></path></svg><span><strong>무료 변환 [M]회</strong><span class="t-small muted" style="display: block">로그인 없이 쓸 수 있는 [N]회보다 많이</span></span></li>
+          <li class="row" style="gap: 12px; align-items: flex-start"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true" style="color: #1d6f4e; margin-top: 2px"><path d="m5 10 3 3 7-7"></path></svg><span><strong>내 작업에 결과 보관</strong><span class="t-small muted" style="display: block">30일 동안 언제든 다시 받기, 다른 기기에서도</span></span></li>
+          <li class="row" style="gap: 12px; align-items: flex-start"><svg class="icon" viewBox="0 0 20 20" aria-hidden="true" style="color: #1d6f4e; margin-top: 2px"><path d="m5 10 3 3 7-7"></path></svg><span><strong>창을 닫아도 계속 변환</strong><span class="t-small muted" style="display: block">긴 문서도 접수만 하면 나중에 받기</span></span></li>
+        </ul>
+        <p class="help">문항 편집·번호 맞춤은 별도 Premium 기능입니다. 가입만으로 요금이 청구되지 않습니다.</p>
+      </section>
+
+      <form class="card card-raise stack" style="gap: 16px; padding: 32px 28px" aria-labelledby="suTitle">
+        <h2 id="suTitle" class="t-h2">회원가입</h2>
+        <div class="field"><label class="label" for="suName">이름</label><input id="suName" class="input" type="text" autocomplete="name" maxlength="60" required></div>
+        <div class="field"><label class="label" for="suEmail">이메일</label><input id="suEmail" class="input" type="email" autocomplete="email" required placeholder="teacher@example.com"></div>
+        <div class="field"><label class="label" for="suPw">비밀번호</label><input id="suPw" class="input" type="password" autocomplete="new-password" minlength="10" required aria-describedby="suPwHelp"><span id="suPwHelp" class="help">10자 이상</span></div>
+        <label class="check" style="align-items: flex-start; padding-top: 10px"><input type="checkbox" required style="margin-top: 2px"><span><span class="strong">[필수]</span> <a href="#">이용약관</a>과 <a href="#">개인정보 처리방침</a>에 동의합니다.</span></label>
+        <button class="btn btn-primary btn-lg btn-block" type="submit">무료로 가입하기</button>
+        <p class="t-small muted" style="text-align: center">이미 계정이 있나요? <a href="#">로그인</a></p>
+      </form>
+    </div>
   </main>
 </div>
 </x-dc>
