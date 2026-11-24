@@ -484,6 +484,7 @@ def recognize_pdf(
             if passage is not None:
                 passage["line_geometries"] = [{**geometry, "page": page_index + 1}
                                               for geometry in passage.get("line_geometries") or []]
+                passage["open"] = True  # 이 쪽에는 문항이 없다: 받을 문항은 뒤 쪽에 있다
                 pending_passages.append(passage)
                 open_passage = passage
                 continue
@@ -566,15 +567,17 @@ def recognize_pdf(
     linked_passages = 0
     unlinked_passages: list[dict[str, Any]] = []
     for passage in pending_passages:
-        target = next(
-            (
-                problem
-                for problem in result.problems
-                if problem.number == int(passage["start"])
-                and problem.page_number >= int(passage["page_number"])
-            ),
-            None,
-        )
+        passage_page = int(passage["page_number"])
+        if passage.get("open"):
+            # 지문 뒤에 이 쪽 문항이 없었다. 읽기 순서로 바로 다음에 오는 문항이 범위의 시작
+            # 번호일 때만 잇는다(뒤에 이어 붙은 다른 유형의 같은 번호로 건너뛰지 않는다).
+            following = next((problem for problem in result.problems
+                              if problem.page_number > passage_page and problem.number > 0), None)
+            target = following if following is not None and following.number == int(passage["start"]) else None
+        else:
+            target = next((problem for problem in result.problems
+                           if problem.number == int(passage["start"])
+                           and problem.page_number == passage_page), None)
         if target is None:
             unlinked_passages.append(passage)
             continue

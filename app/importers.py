@@ -821,8 +821,10 @@ def _choice_line_body(
     label = match.group("label")
     number = _numeric_choice_label(label)
     if number is None:
-        if label[0].isalpha() and any(other.lstrip()[:1] in CIRCLED_CHOICE_MARKERS for other in lines):
-            # 원문자 선지(①~⑤)가 따로 있는 문항의 "a." "b." 줄은 <보기> 항목이지 선지가 아니다.
+        if label[0].isalpha() and sum(
+                char in CIRCLED_CHOICE_MARKERS for other in lines for char in other) >= 3:
+            # 원문자 선지 묶음(①②③…)이 따로 있는 문항의 "a." "b." 줄은 <보기> 항목이지 선지가
+            # 아니다. 원문자가 한두 개 섞인 정도로는 글자 선지를 건드리지 않는다.
             return None
         return match.group("body").strip()
     if not choices_started:

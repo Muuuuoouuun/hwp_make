@@ -197,6 +197,63 @@ def central_rule_single_column_pdf() -> bytes:
     return doc.tobytes()
 
 
+def other_form_pdf() -> bytes:
+    """홀수형 발췌가 11번과 [12~13] 지문에서 끝나고, 짝수형이 1번부터 다시 이어진다."""
+    doc = fitz.open()
+    first = new_page(doc)
+    put(first, 60, 120, "11. Last question of the odd form excerpt?")
+    put(first, 60, 145, "choice text for question eleven")
+    put(first, 60, 300, "[12~13] Read the passage and answer.")
+    put(first, 60, 325, "ODD-ONLY passage body.")
+    second = new_page(doc)
+    for index, number in enumerate((1, 12, 13)):
+        put(second, 60, 120 + 90 * index, f"{number}. Even form question {number}?")
+    return doc.tobytes()
+
+
+def central_rule_with_heading_pdf() -> bytes:
+    """1단 시험지: 가운데 세로선이 있고, 범위 머리도 문항과 같은 왼쪽에서 시작한다."""
+    doc = fitz.open()
+    page = new_page(doc)
+    page.draw_line((297.5, 150), (297.5, 760), width=0.6)
+    put(page, 60, 120, "[1~2] Read this full width passage that clearly runs across the middle of the page.")
+    put(page, 60, 145, "HEADED-FULLWIDTH passage line that also runs across the middle of the page to the right.")
+    put(page, 60, 250, "1. This full width question line clearly runs across the middle of the page to the right side.")
+    put(page, 60, 275, "QUESTION-FULLWIDTH body line that also runs across the middle of the page to the right.")
+    put(page, 60, 400, "2. The second full width question line also runs across the middle of the page layout.")
+    return doc.tobytes()
+
+
+def date_like_boundary_pdf() -> bytes:
+    """오른쪽 단의 첫 문항 줄이 머리글 밴드 안에 있고 날짜 꼴(AM·PM과 숫자)이다."""
+    doc = fitz.open()
+    page = new_page(doc)
+    put(page, 60, 200, "11. Left column question?")
+    put(page, 60, 400, "[12~13] Read the passage and answer.")
+    put(page, 60, 425, "DATEBAND-PASSAGE body line.")
+    put(page, 320, 95, "12. AM 9 and PM 3 readings were 12 degrees?")
+    put(page, 320, 200, "13. Right column question thirteen?")
+    return doc.tobytes()
+
+
+def cut_corner_frame_pdf() -> bytes:
+    """모서리를 사선으로 자른 테두리를 한 경로로 그린 <보기> 상자."""
+    doc = fitz.open()
+    page = new_page(doc)
+    put(page, 60, 120, "1. Which statement follows from the box?")
+    left, top, right, bottom, cut = 60, 135, 290, 275, 45
+    points = [(left + cut, top), (right - cut, top), (right, top + cut), (right, bottom - cut),
+              (right - cut, bottom), (left + cut, bottom), (left, bottom - cut), (left, top + cut), (left + cut, top)]
+    shape = page.new_shape()
+    shape.draw_polyline(points)
+    shape.finish(width=0.8)
+    shape.commit()
+    put(page, 110, 190, "CUTBOX-A the committee approved it")
+    put(page, 110, 210, "CUTBOX-B after a long public debate")
+    put(page, 60, 340, "2. Second question after the box.")
+    return doc.tobytes()
+
+
 def band_marker_pdf() -> bytes:
     """다음 쪽의 첫 문항 번호 줄이 머리글 밴드(위 13%) 안에서 시작한다."""
     doc = fitz.open()
@@ -305,6 +362,26 @@ def check_recognition() -> None:
           all("BAND-PASSAGE" in s and "QUESTION-ONLY" not in s for s in shared)
           and "QUESTION-ONLY" in getattr(band.get(2), "text", ""), repr(shared))
 
+    other_form = recognize_pdf(other_form_pdf(), subject=Subject.KOREAN)
+    check("바로 다음 문항이 시작 번호가 아니면 뒤 유형의 같은 번호로 건너뛰지 않는다",
+          not any("ODD-ONLY" in p.shared_passage_text for p in other_form.problems)
+          and "ODD-ONLY" in next(p.text for p in other_form.problems if p.number == 11),
+          repr([(p.page_number, p.number, bool(p.shared_passage_text)) for p in other_form.problems]))
+
+    data = central_rule_with_heading_pdf()
+    check("같은 쪽에 범위 머리가 있어도 본문이 가운데를 가로지르면 1단이다",
+          [int(page.metadata.get("column_count") or 0) for page in segment_pdf(data, subject=Subject.KOREAN)] == [1]
+          and "QUESTION-FULLWIDTH" in getattr(by_number(recognize_pdf(data, subject=Subject.KOREAN)).get(1), "text", ""))
+
+    boundary = by_number(recognize_pdf(date_like_boundary_pdf(), subject=Subject.KOREAN))
+    check("머리글 밴드 안의 날짜 꼴 문항 줄도 지문의 경계로 남는다",
+          all("DATEBAND-PASSAGE" in getattr(boundary.get(n), "shared_passage_text", "") for n in (12, 13)),
+          repr(sorted(boundary)))
+
+    cut_corner = by_number(recognize_pdf(cut_corner_frame_pdf(), subject=Subject.KOREAN))
+    check("모서리를 자른 한 경로 테두리의 상자 글은 본문에 남는다",
+          "CUTBOX-A" in getattr(cut_corner.get(1), "text", "") and not getattr(cut_corner.get(1), "figure_pngs", [1]))
+
     try:
         fullwidth = by_number(recognize_pdf(fullwidth_heading_pdf(), subject=Subject.KOREAN))
     except Exception as exc:  # 내장 CJK 글꼴이 없는 PyMuPDF 빌드
@@ -323,6 +400,10 @@ def check_importer() -> None:
           len(choices) == 5 and "a. first item" in stem and "b. second item" in stem, repr((stem, choices)))
     _, lettered = importers._split_stem_and_choices("3. Pick one.\nA. alpha\nB. beta\nC. gamma\nD. delta")
     check("원문자가 없는 문항의 A.~D. 는 그대로 선지다", len(lettered) == 4, repr(lettered))
+    _, spaced = importers._split_stem_and_choices("3. Pick one.\nA. alpha\nB. beta\n\nC. gamma\nD. delta\nE. epsilon")
+    check("빈 줄이 있어도 A.~E. 선지는 그대로다", len(spaced) == 5, repr(spaced))
+    _, mixed = importers._split_stem_and_choices("3. Pick one.\nA. alpha\nB. beta\n③ gamma\nD. delta\nE. epsilon")
+    check("원문자가 한 개 섞인 정도로는 글자 선지를 빼지 않는다", len(mixed) == 5, repr(mixed))
 
     storage.init_db()
     result = importers.import_pdf("korean_passage.pdf", same_page_passage_pdf(), {})

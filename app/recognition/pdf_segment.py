@@ -418,7 +418,7 @@ def _extract_text_lines(page: Any, scale: float) -> list[dict[str, Any]]:
             box = _scaled_box(line.get("bbox"), scale)
             if box is None:
                 continue
-            item = {"box": box, "text": text}
+            item = {"box": box, "text": text, "source_order": len(lines)}
             item.update(_line_geometry_payload(line, scale))
             lines.append(item)
     lines.sort(key=lambda item: (item["box"].top, item["box"].left))
@@ -721,7 +721,9 @@ def _extract_figures(page: Any, scale: float) -> tuple[list[Box], list[bool]]:
             items = drawing.get("items") or ()
             if len(items) > 1:
                 for item in items:
-                    if item and item[0] == "l" and len(item) >= 3:
+                    # 세로 칸 구분선만 넘긴다. 모서리를 자른 테두리의 사선은 면적 있는 도형으로
+                    # 세어져 본문 상자를 그림으로 만든다.
+                    if item and item[0] == "l" and len(item) >= 3 and abs(item[1].x - item[2].x) <= 1.0:
                         segment = _scaled_drawing_box((item[1].x, item[1].y, item[2].x, item[2].y), scale)
                         if segment is not None:
                             drawings.append(segment)
@@ -1038,8 +1040,11 @@ def _shared_passage_regions(
             r"|(?:홀|짝)\s*수\s*형|(?:Odd|Even)\s+Form"
             r"|(?:고|중)\s*[1-3](?:\s*학년)?|\d{1,3})")
         running_header = re.compile(header_token + r"(?:\s*" + header_token + r")*", re.I)
+        confirmed_markers = {id(marker["line"]) for marker in markers}
         body_lines = [line for line in text_lines
-                      if not (line["box"].top <= height_px * .13
+                      # 이미 문항 번호로 확정된 줄은 머리글 꼴이어도 지문의 경계다.
+                      if id(line) in confirmed_markers
+                      or not (line["box"].top <= height_px * .13
                               and (running_header.fullmatch(str(line["text"]).strip())
                                    or _looks_like_header_band_line(line["text"])
                                    or _looks_like_date_header(line["text"])))]
@@ -1189,7 +1194,10 @@ def _segment_page(
     # 영어 원문 판정(파이프라인)이 쓰는 상단 1/4 줄. 이미 뽑은 줄을 넘겨 PDF 를 다시 열어
     # 전 쪽 글을 재추출하지 않게 한다.
     base_metadata["top_quarter_lines"] = [
-        str(line["text"]) for line in text_lines if line["box"].top <= float(height_px) * 0.25
+        str(line["text"])
+        # PDF 추출 순서로 둔다: 두 줄에 걸친 듣기 안내문 사이에 다른 단의 줄이 끼지 않는다.
+        for line in sorted(text_lines, key=lambda item: item["source_order"])
+        if line["box"].top <= float(height_px) * 0.25
     ]
     header_cutoff = float(height_px) * 0.13
     base_metadata["header_text"] = " ".join(
@@ -1345,7 +1353,7 @@ def _segment_page(
             # English keeps its tuned proof (a divider counts only beside a
             # range heading); elsewhere the page-spanning central rule of a
             # two-column exam sheet is proof on its own.
-            or ((bool(range_sides) or (subject != Subject.ENGLISH and not crosses_middle))
+            or ((bool(range_sides) if subject == Subject.ENGLISH else not crosses_middle)
                 and _english_has_column_divider(page, scale, float(width_px), float(height_px)))
         ):
             columns = [[marker for marker in markers if marker["box"].left < middle],
