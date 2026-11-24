@@ -172,6 +172,7 @@ def inspect_pdf_editability(
     *,
     page_limit: int | None = None,
     require_question_boxes: bool = False,
+    recognition=None,
 ) -> dict:
     issues: list[str] = []
     text_boxes = positioned_tables = images = body_paragraphs = 0
@@ -290,6 +291,7 @@ def inspect_pdf_editability(
         required=require_question_boxes,
         provenance=provenance,
         source_grid_cache=source_grid_cache,
+        recognition=recognition,
     )
     issues.extend(question_units["issues"])
     from .pdf_paragraph_flow import inspect_paragraph_flow

@@ -186,6 +186,7 @@ def inspect_question_units(
     required=True,
     provenance=None,
     source_grid_cache=None,
+    recognition=None,
 ) -> dict:
     from . import pdf_layout_writer as w
     from .pdf_editability import _compact_text, _package_text
@@ -336,9 +337,11 @@ def inspect_question_units(
             "inline_label_frames": inline_labels,
             "required": False,
         }
-    recognition = recognize_pdf(Path(source).read_bytes(), filename=Path(source).name)
+    if recognition is None:  # 변환 경로는 작성기가 쓴 인식 결과를 넘겨 준다(같은 PDF 재인식 방지)
+        recognition = recognize_pdf(Path(source).read_bytes(), filename=Path(source).name, render=False)
     problems = [
-        p for p in recognition.problems if not page_limit or p.page_number <= page_limit
+        p for p in recognition.problems
+        if (not page_limit or p.page_number <= page_limit) and p.number > 0  # 0 = 번호 없는 쪽
     ]
     expected = []
     variant = 1

@@ -1944,7 +1944,10 @@ def write_native_content(
         # 2026-10-03: the masthead shows the area read from page 1 (text line or
         # 교시) instead of the template's default "수학 영역".
         items[0].setdefault("layout", {})["source_masthead_area"] = subject_area
-    problems = [p for p in recognized.problems if 0 < p.page_number <= page_limit]
+    # 번호 0은 문항이 아니라 번호 없는 쪽(표지·여백·안내)의 보존용 항목이다. 그 쪽의 글은
+    # 위 items 에 일반 문단으로 이미 들어 있으므로 문항 인벤토리에서는 뺀다(2026-11-25:
+    # 표지 한 쪽 때문에 변환 전체가 실패하던 원인).
+    problems = [p for p in recognized.problems if 0 < p.page_number <= page_limit and p.number > 0]
     grouping = annotate_question_groups(items, problems)
     if not grouping["inventory_matches"]:
         raise ValueError(

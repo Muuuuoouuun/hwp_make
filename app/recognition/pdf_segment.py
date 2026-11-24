@@ -418,10 +418,13 @@ def _extract_markers(
     """텍스트 라인에서 문항번호 마커를 뽑는다(edb `_extract_pdf_problem_markers` 포팅)."""
     markers: list[dict[str, Any]] = []
     top_band = height_px * 0.05
+    margin_band = height_px * 0.08
     for line in text_lines:
         text = str(line["text"])
         box: Box = line["box"]
-        if _looks_like_date_header(text):
+        # 인쇄일 머리글·꼬리글은 쪽 여백에만 찍힌다. 본문의 "11. 오전 9시와 오후 3시의 기온은
+        # 12도" 같은 문항 첫 줄까지 날짜로 보고 버리지 않는다.
+        if (box.top < margin_band or box.bottom > height_px - margin_band) and _looks_like_date_header(text):
             continue
         match = _MARKER_RE.match(text)
         if not match:
@@ -599,12 +602,70 @@ def _merge_boxes(
     return items
 
 
-def _extract_figures(page: Any, scale: float) -> list[Box]:
-    """페이지의 embedded 이미지 + 유의미한 드로잉 bbox(픽셀 좌표).
+# 지역 그림으로 잘라 보존하는 최소 크기(150dpi 기준 약 2.5cm 사각형)와, 영역 안 글자가
+# 이 수 미만이면 라벨뿐인 그림으로 보는 기준. 인식 파이프라인과 함께 쓴다.
+CROP_MIN_AREA_PX = 22000.0
+CROP_MIN_SIDE_PX = 60.0
+TEXT_BLOCK_MIN_CHARS = 24
+
+
+def figure_is_crop_candidate(box: Box, text_chars: int, graphic: bool) -> bool:
+    """이 영역을 이미지로 잘라 보존하는가.
+
+    False 인 영역은 '테두리만 있는 본문 상자'다. 그 안의 줄은 잘라낸 그림에 남지 않으므로
+    반드시 문항 본문으로 보존해야 한다(둘 중 하나에는 항상 남는다).
+    """
+    return (
+        box.area >= CROP_MIN_AREA_PX
+        and box.width >= CROP_MIN_SIDE_PX
+        and box.height >= CROP_MIN_SIDE_PX
+        and (text_chars < TEXT_BLOCK_MIN_CHARS or graphic)
+    )
+
+
+def _figure_has_graphics(figure: Box, images: list[Box], drawings: list[Box], thin: float) -> bool:
+    """테두리 말고도 그려진 것이 있는가(삽화·그래프·표 격자).
+
+    보기·제시문 상자는 테두리 선만 있다. 래스터 그림이 들어 있거나 테두리 안쪽에 선·도형이
+    충분히 있으면 글자가 많아도 그림(또는 표)이므로 이미지로 보존한다.
+    """
+    edge = max(6.0, thin * 2.0)
+    if sum(_intersection_area(image, figure) for image in images) >= figure.area * 0.08:
+        return True
+    shape_area = 0.0
+    vertical_rules = 0.0
+    for box in drawings:
+        if not (figure.left - edge <= box.left and box.right <= figure.right + edge
+                and figure.top - edge <= box.top and box.bottom <= figure.bottom + edge):
+            continue
+        hugs = [abs(box.left - figure.left) <= edge, abs(box.right - figure.right) <= edge,
+                abs(box.top - figure.top) <= edge, abs(box.bottom - figure.bottom) <= edge]
+        if all(hugs):
+            continue  # 테두리 사각형·바탕
+        if box.height <= thin:
+            # ponytail: 가로선은 테두리 조각이거나 밑줄·빈칸이라 증거로 쓰지 않는다. 가로선만으로
+            # 된 그림(연표, 세로선 없는 표)은 글이 본문에 남고 선만 빠진다. 필요해지면 글줄 바로
+            # 아래 선(밑줄)만 골라 제외하도록 올린다.
+            continue
+        if box.width <= thin:
+            if not (hugs[0] or hugs[1]):
+                vertical_rules += box.height  # 표의 칸 구분선, 그래프 세로축
+            continue
+        if (hugs[0] and hugs[1] and box.height <= figure.height * 0.2) or (
+                hugs[2] and hugs[3] and box.width <= figure.width * 0.2):
+            continue  # 폭(또는 높이) 전체를 가로지르는 색 머리띠·옆 띠 장식
+        shape_area += box.area  # 칸·말풍선·곡선·안쪽 상자
+    return vertical_rules >= figure.height * 0.5 or shape_area >= figure.area * 0.15
+
+
+def _extract_figures(page: Any, scale: float) -> tuple[list[Box], list[bool]]:
+    """페이지의 embedded 이미지 + 유의미한 드로잉 bbox(픽셀 좌표)와 영역별 그림 여부.
 
     개별 벡터 스트로크는 마지막에 `_merge_boxes` 로 합성 그림 영역으로 병합한다.
     """
     figures: list[Box] = []
+    images: list[Box] = []
+    drawings: list[Box] = []
     try:
         page_w = float(page.rect.width) * scale
         page_h = float(page.rect.height) * scale
@@ -618,9 +679,11 @@ def _extract_figures(page: Any, scale: float) -> list[Box]:
             box = _scaled_box(info.get("bbox"), scale)
             if box is not None:
                 figures.append(box)
+                images.append(box)
     except Exception:
         pass
     # 벡터 드로잉(도형/그래프). 개별 스트로크가 많으므로 유의미한 크기만 수집.
+    thin = max(3.0, scale * 2.0)
     try:
         min_area = max(400.0, (page_w * page_h) * 0.0008)
         min_line_length = max(50.0, page_w * 0.04)
@@ -636,8 +699,9 @@ def _extract_figures(page: Any, scale: float) -> list[Box]:
             )
             if box is None:
                 continue
+            drawings.append(box)
             thin_long_line = (
-                min(box.width, box.height) <= max(3.0, scale * 2.0)
+                min(box.width, box.height) <= thin
                 and max(box.width, box.height) >= min_line_length
             )
             if box.area < min_area and not thin_long_line:
@@ -650,7 +714,8 @@ def _extract_figures(page: Any, scale: float) -> list[Box]:
     # 과병합(과탐 등 벡터 밀집 페이지의 '페이지 전체 블롭')은 막는다.
     max_w = page_w * 0.8 if page_w else None
     max_h = page_h * 0.5 if page_h else None
-    return _merge_boxes(figures, max_width=max_w, max_height=max_h)
+    merged = _merge_boxes(figures, max_width=max_w, max_height=max_h)
+    return merged, [_figure_has_graphics(figure, images, drawings, thin) for figure in merged]
 
 
 def _figure_text_char_counts(
@@ -662,7 +727,7 @@ def _figure_text_char_counts(
     candidate_indexes = [
         index
         for index, box in enumerate(boxes)
-        if box.area >= 22000.0 and box.width >= 60.0 and box.height >= 60.0
+        if figure_is_crop_candidate(box, 0, False)
     ]
     if not candidate_indexes:
         return counts
@@ -854,21 +919,74 @@ def _english_blank_underlines(page: Any, lines: list[dict[str, Any]], scale: flo
     return count
 
 
-def _english_shared_regions(
+def _range_heading(text: Any, anchored: bool) -> re.Match[str] | None:
+    """``[N~M]`` 공통 지문 머리. anchored 면 줄 맨 앞에서만 인정한다."""
+    value = str(text or "")
+    return _PASSAGE_RANGE_RE.match(value.lstrip()) if anchored else _PASSAGE_RANGE_RE.search(value)
+
+
+def _page_leading_lines(
+    text_lines: list[dict[str, Any]],
+    markers: list[dict[str, Any]],
+    width_px: float,
+    height_px: float,
+    column_count: int,
+    *,
+    anchored: bool,
+) -> list[dict[str, Any]]:
+    """읽기 순서에서 첫 문항·지문 머리보다 앞에 놓인 본문 줄.
+
+    앞 쪽에서 시작한 지문이 이 쪽 위(또는 문항 없는 왼쪽 단 전체)로 이어진 부분이다.
+    머리글 밴드(13%)는 뺀다. 앞 쪽에 열린 지문이 있을 때만 파이프라인이 이어 붙인다.
+    """
+    two_columns = column_count > 1
+    marker_ids = {id(marker["line"]) for marker in markers}
+    body = [line for line in text_lines if line["box"].top > height_px * 0.13]
+    leading: list[dict[str, Any]] = []
+    for column in range(2 if two_columns else 1):
+        column_lines = [line for line in body
+                        if not two_columns
+                        or int(line["box"].left + line["box"].width / 2 >= width_px / 2) == column]
+        for line in _english_reading_order(column_lines):
+            if id(line) in marker_ids or _range_heading(line["text"], anchored):
+                return leading
+            leading.append(line)
+    return leading
+
+
+def _line_geometry(line: dict[str, Any]) -> dict[str, Any]:
+    box = line["box"]
+    return {
+        "text": line["text"],
+        "bbox_px": [box.left, box.top, box.width, box.height],
+        **{name: line[name] for name in ("pdf_line_chars", "pdf_line_spans") if name in line},
+    }
+
+
+def _shared_passage_regions(
     text_lines: list[dict[str, Any]],
     markers: list[dict[str, Any]],
     descriptors: list[dict[str, Any]],
     width_px: float,
     height_px: float,
     column_count: int,
+    *,
+    anchored: bool,
 ) -> list[dict[str, Any]]:
     """Own range instructions and prose before their first printed question.
 
     The passage can start at the bottom of the left column and continue at
     the top of the right column. Remove it from the preceding question and
     retain source geometry so every member can carry it into a new exam.
+
+    ``anchored`` accepts a ``[N~M]`` heading only at the start of a line.
+    English keeps its tuned mid-line search; other subjects print ranges such
+    as an interval ``[1-3]`` inside prose and formulas.
     """
-    headings = [line for line in text_lines if _PASSAGE_RANGE_RE.search(line["text"])]
+    def heading_match(line: dict[str, Any]) -> re.Match[str] | None:
+        return _range_heading(line["text"], anchored)
+
+    headings = [line for line in text_lines if heading_match(line)]
     if not headings:
         return []
     body_top = min([m["box"].top for m in markers] + [line["box"].top for line in headings])
@@ -902,7 +1020,7 @@ def _english_shared_regions(
     shared_ids: set[int] = set()
     passages: list[dict[str, Any]] = []
     for index, line in enumerate(ordered):
-        match = _PASSAGE_RANGE_RE.search(line["text"])
+        match = heading_match(line)
         if not match:
             continue
         start, end = int(match[1]), int(match[2])
@@ -912,7 +1030,7 @@ def _english_shared_regions(
         for candidate in ordered[index:]:
             if id(candidate) in marker_lines:
                 break
-            if candidate is not line and _PASSAGE_RANGE_RE.search(candidate["text"]):
+            if candidate is not line and heading_match(candidate):
                 break
             selected.append(candidate)
         following = next((candidate for candidate in ordered[index + 1:]
@@ -920,17 +1038,11 @@ def _english_shared_regions(
         if not selected or (following is not None and marker_lines[id(following)] != start):
             continue
         shared_ids.update(id(candidate) for candidate in selected)
-        geometries = []
-        for candidate in selected:
-            box = candidate["box"]
-            geometries.append({
-                "text": candidate["text"],
-                "bbox_px": [box.left, box.top, box.width, box.height],
-                **{name: candidate[name] for name in ("pdf_line_chars", "pdf_line_spans") if name in candidate},
-            })
         passages.append({"start": start, "end": end,
                          "text": "\n".join(candidate["text"] for candidate in selected),
-                         "line_geometries": geometries})
+                         "line_geometries": [_line_geometry(candidate) for candidate in selected],
+                         # 이 쪽 끝까지 문항이 나오지 않았다: 다음 쪽 선두로 이어질 수 있다.
+                         "open": following is None})
     for desc in descriptors:
         desc["region_lines"] = [line for line in desc["region_lines"] if id(line) not in shared_ids]
     return passages
@@ -962,6 +1074,7 @@ def _refine_problem_bottom(
     top: float,
     initial_bottom: float,
     height_px: float,
+    marker_line: dict[str, Any] | None = None,
 ) -> float:
     """다음-마커-top 으로 잡은 initial_bottom 을 실제 콘텐츠 하단으로 다듬는다.
 
@@ -977,9 +1090,11 @@ def _refine_problem_bottom(
     median_h = sorted(heights)[len(heights) // 2] if heights else 18.0
     continuation_gap = max(18.0, min(72.0, max(median_h * 2.2, height_px * 0.018)))
 
+    # 1~5번 문항의 번호 줄("3. …")은 숫자형 선지와 같은 꼴이다. 자기 번호 줄을 마지막 선지로
+    # 보면 그 아래 본문이 줄 간격 하나 차이로 잘려 나간다.
     choice_indexes = [
         i for i, ln in enumerate(region_lines)
-        if _starts_with_choice_marker(ln["text"])
+        if ln is not marker_line and _starts_with_choice_marker(ln["text"])
     ]
     if choice_indexes:
         content_bottom = region_lines[choice_indexes[-1]]["box"].bottom
@@ -1074,7 +1189,7 @@ def _segment_page(
         and not (subject == Subject.ENGLISH and re.fullmatch(r"[━─═]{8,}", str(line["text"]).strip()))
     ]
     base_metadata["footer_line_removed_count"] = footer_removed
-    figures = _extract_figures(page, scale)
+    figures, figure_graphics = _extract_figures(page, scale)
     chart_figures: list[Box] = []
     if subject == Subject.ENGLISH:
         from app.pdf_figure_labels import statistical_chart_regions
@@ -1085,6 +1200,8 @@ def _segment_page(
         # remain editable text even when generic drawing clustering joins
         # their frames to a neighboring chart.
         base_metadata["source_chart_indexes"] = list(range(len(figures), len(figures) + len(chart_figures)))
+        # English keeps its tuned rule: only proven charts are graphics.
+        figure_graphics = [False] * len(figures) + [True] * len(chart_figures)
         figures.extend(chart_figures)
         source_images = [box for info in page.get_image_info()
                          if (box := _scaled_box(info.get("bbox"), scale)) is not None]
@@ -1096,7 +1213,13 @@ def _segment_page(
     # Preserve this cheap summary while the raw text dictionary is already in
     # memory.  The recognition pipeline uses it to distinguish real diagrams
     # from bordered editable-text blocks without reopening and rescanning PDF.
-    base_metadata["figure_text_char_counts"] = _figure_text_char_counts(figures, text_lines)
+    figure_counts = _figure_text_char_counts(figures, text_lines)
+    base_metadata["figure_text_char_counts"] = figure_counts
+    # 이미지로 잘라 보존할 영역. 여기에 없는 영역 안의 줄은 문항 본문에 남긴다.
+    crop_indexes = [index for index, figure in enumerate(figures)
+                    if figure_is_crop_candidate(figure, figure_counts[index], figure_graphics[index])]
+    base_metadata["figure_crop_indexes"] = crop_indexes
+    crop_figures = [figures[index] for index in crop_indexes]
 
     raw_markers = _extract_markers(text_lines, height_px=float(height_px))
     figure_filtered_markers, suppressed_figure_markers = _filter_figure_embedded_markers(
@@ -1166,17 +1289,24 @@ def _segment_page(
         return page_model
 
     columns, bounds = _cluster_columns(markers, float(width_px))
-    if subject == Subject.ENGLISH and len(columns) == 1:
+    anchored_ranges = subject != Subject.ENGLISH
+    if len(columns) == 1:
         middle = float(width_px) / 2
         marker_sides = {int(marker["box"].left >= middle) for marker in markers}
         range_sides = {int(line["box"].left >= middle) for line in text_lines
-                       if _PASSAGE_RANGE_RE.search(line["text"])}
-        # A passage can occupy the left column while all of its numbered
-        # questions occupy the right. Question markers alone cannot detect
-        # the two-column layout in that case.
-        divider_proves_columns = bool(range_sides) and _english_has_column_divider(
-            page, scale, float(width_px), float(height_px))
-        if len(marker_sides) == 1 and (range_sides - marker_sides or divider_proves_columns):
+                       if _range_heading(line["text"], anchored_ranges)}
+        # A passage can occupy one column while all numbered questions occupy
+        # the other. Question markers alone cannot detect the two-column
+        # layout in that case, and a full-width question box would then mix
+        # the passage lines into the questions by height.
+        if len(marker_sides) == 1 and (
+            range_sides - marker_sides
+            # English keeps its tuned proof (a divider counts only beside a
+            # range heading); elsewhere the page-spanning central rule of a
+            # two-column exam sheet is proof on its own.
+            or ((bool(range_sides) or subject != Subject.ENGLISH)
+                and _english_has_column_divider(page, scale, float(width_px), float(height_px)))
+        ):
             columns = [[marker for marker in markers if marker["box"].left < middle],
                        [marker for marker in markers if marker["box"].left >= middle]]
             bounds = [(0.0, middle), (middle, float(width_px))]
@@ -1216,6 +1346,7 @@ def _segment_page(
                 top=top,
                 initial_bottom=initial_bottom,
                 height_px=float(height_px),
+                marker_line=marker["line"],
             )
             region_lines = [
                 line
@@ -1239,9 +1370,18 @@ def _segment_page(
 
     # 읽기 순서: (컬럼, top)
     descriptors.sort(key=lambda d: (d["column_index"], d["box"].top))
-    if subject == Subject.ENGLISH:
-        base_metadata["shared_passages"] = _english_shared_regions(
-            text_lines, markers, descriptors, float(width_px), float(height_px), len(columns))
+    # 2026-11-25: 국어·탐구의 같은 쪽 [N~M] 지문도 문항에 연결한다(이전에는 영어만).
+    base_metadata["shared_passages"] = _shared_passage_regions(
+        text_lines, markers, descriptors, float(width_px), float(height_px), len(columns),
+        anchored=anchored_ranges)
+    if subject != Subject.ENGLISH:
+        leading = _page_leading_lines(text_lines, markers, float(width_px), float(height_px),
+                                      len(columns), anchored=anchored_ranges)
+        if leading:
+            base_metadata["leading_passage"] = {
+                "text": "\n".join(line["text"] for line in leading),
+                "line_geometries": [_line_geometry(line) for line in leading],
+            }
 
     block_seq = 0
     unit_seq = 0
@@ -1283,10 +1423,10 @@ def _segment_page(
             child_text = str(line["text"])
             if not child_text:
                 continue
-            # English frames contain editable passages and insertion sentences.
             # A drawing around text must not turn that text into a discarded
-            # figure label. Genuine charts are handled separately below.
-            label_figures = chart_figures if subject == Subject.ENGLISH else figures
+            # figure label: a line leaves the body only when a cropped image
+            # keeps it. Bordered passages, <보기> and data boxes stay editable.
+            label_figures = chart_figures if subject == Subject.ENGLISH else crop_figures
             if _line_inside_figure(line, label_figures, desc["box"]):
                 continue
             block_type = classify_text_block(child_text)
@@ -1327,7 +1467,8 @@ def _segment_page(
             block_type=BlockType.TITLE,
             bbox=desc["box"],
             reading_order=0,  # 임시, 아래에서 재부여
-            text=marker_text if marker_text else f"{number}.",
+            # marker_text 는 미리보기용 120자 축약이다. 본문에는 줄 전체를 남긴다.
+            text=str(marker_line.get("text") or marker_text or f"{number}."),
             confidence=1.0,
             children=child_ids,
             metadata=problem_meta,

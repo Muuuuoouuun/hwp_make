@@ -22,7 +22,7 @@ from typing import Any
 
 from app.recognition.schema import Box, ContentBlock, PageModel, Subject
 from app.recognition import cutout
-from app.recognition.pdf_segment import segment_pdf
+from app.recognition.pdf_segment import CROP_MIN_AREA_PX, segment_pdf
 from app.exam_header import masthead_from_text
 from app.math_text import is_recoverable_pua_math_char, normalize_recognized_math_layout_text
 from app.hancom_pua_map import is_hancom_eq_font
@@ -207,31 +207,19 @@ def _figures_from_metadata(page: PageModel) -> list[Box]:
 
 
 def _text_light_figures(page: PageModel, figures: list[Box]) -> list[Box]:
-    """Return image candidates while excluding bordered editable-text blocks."""
-    chart_indexes = set(page.metadata.get("source_chart_indexes") or [])
-    raw_counts = page.metadata.get("figure_text_char_counts") or []
-    counts: list[int] = []
-    for value in raw_counts:
-        try:
-            counts.append(int(value))
-        except (TypeError, ValueError):
-            counts.append(0)
-    if len(counts) < len(figures):
-        counts.extend([0] * (len(figures) - len(counts)))
-    return [
-        figure
-        for index, figure in enumerate(figures)
-        if figure.area >= _MIN_FIGURE_AREA_PX
-        and figure.width >= 60.0
-        and figure.height >= 60.0
-        and (counts[index] < 24 or index in chart_indexes)
-    ]
+    """Return image candidates while excluding bordered editable-text blocks.
+
+    The segmenter decides this once (``figure_crop_indexes``) and keeps the text
+    of every other region in the question body, so nothing is dropped twice.
+    """
+    return [figures[index] for index in page.metadata.get("figure_crop_indexes") or []
+            if 0 <= index < len(figures)]
 
 
 # 그림 언급 키워드(본문에 있으면 도형/그래프/표가 딸린 문항으로 본다).
 _VISUAL_CUE = ("그림", "그래프", "도형", "좌표평면", "자료", "표는", "곡선", "직선", "삼각형", "사각형", "지도", "회로", "장치")
 # 문항 내부 그림으로 인정할 최소 면적(px²). 150dpi 기준 ~2.5×2.5cm.
-_MIN_FIGURE_AREA_PX = 22000.0
+_MIN_FIGURE_AREA_PX = CROP_MIN_AREA_PX
 
 
 def _box_center_in(box: Box, outer: Box) -> bool:
@@ -417,11 +405,16 @@ def recognize_pdf(
     filename: str | None = None,
     dpi: int = 150,
     subject: Subject | None = None,
+    render: bool = True,
 ) -> RecognitionResult:
     """born-digital PDF 를 문항 단위로 인식한다.
 
     반환된 RecognitionResult.found 가 False 면(문항 0개) 스캔/텍스트레이어 없음 →
     상위 호출자가 기존 OCR/텍스트 경로로 폴백해야 한다.
+
+    render=False 는 쪽 래스터와 그림·문항 PNG 를 만들지 않는다. 문항 목록·좌표·본문만
+    쓰는 호출자(편집형 작성기, 결과 검수)용이며, 번호 없는 쪽의 이미지 보존 항목(번호 0)도
+    생기지 않는다.
     """
     if subject is None:
         subject = infer_subject(filename)
@@ -446,7 +439,7 @@ def recognize_pdf(
     pending_passages: list[dict[str, Any]] = []
 
     page_images: dict[int, Any] = {}
-    if any_problems:
+    if any_problems and render:
         try:
             raster_page_indexes = {
                 page_index
@@ -462,11 +455,21 @@ def recognize_pdf(
             result.notices.append(f"페이지 렌더 실패({type(exc).__name__}) — 그림 없이 텍스트만 가져옵니다.")
             page_images = {}
 
+    open_passage: dict[str, Any] | None = None  # 앞 쪽 끝까지 이어진(문항이 아직 안 나온) 지문
     for page_index, page in enumerate(pages):
         marker_count = int(page.metadata.get("marker_count") or 0)
         passage = _page_shared_passage(page, page_index + 1) if not page.problems else None
+        leading = page.metadata.get("leading_passage")
+        if leading and open_passage is not None and open_passage["page_number"] == page_index:
+            # 지문이 쪽을 넘어 이 쪽 선두(첫 문항 위)에서 끝난다. 뒷부분을 잃지 않는다.
+            open_passage["text"] = "\n".join([open_passage["text"], leading["text"]])
+            open_passage["line_geometries"] = [*open_passage["line_geometries"],
+                                               *leading["line_geometries"]]
+        open_passage = None
         for shared in page.metadata.get("shared_passages", []):
-            pending_passages.append({**shared, "page_number": page_index + 1, "attach_all": True})
+            pending_passages.append({**shared, "page_number": page_index + 1})
+            if shared.get("open"):
+                open_passage = pending_passages[-1]
         if marker_count > 0:
             result.pages_with_markers += 1
         elif passage is not None:
@@ -478,8 +481,8 @@ def recognize_pdf(
 
         if not page.problems:
             if passage is not None:
-                passage["attach_all"] = page.subject == Subject.ENGLISH
                 pending_passages.append(passage)
+                open_passage = passage
                 continue
             if any_problems:
                 page_img = page_images.get(page_index)
@@ -572,18 +575,17 @@ def recognize_pdf(
         if target is None:
             unlinked_passages.append(passage)
             continue
-        targets = [target]
-        if passage.get("attach_all"):
-            # Each library item must remain usable when selected on its own.
-            # Stop at the end of this occurrence, before another odd/even form.
-            targets = []
-            start_index = next(i for i, problem in enumerate(result.problems) if problem is target)
-            for problem in result.problems[start_index:]:
-                if not int(passage["start"]) <= problem.number <= int(passage["end"]):
-                    break
-                targets.append(problem)
-                if problem.number == int(passage["end"]):
-                    break
+        # Each library item must remain usable when selected on its own, in
+        # every subject. Stop at the end of this occurrence, before another
+        # odd/even form.
+        targets = []
+        start_index = next(i for i, problem in enumerate(result.problems) if problem is target)
+        for problem in result.problems[start_index:]:
+            if not int(passage["start"]) <= problem.number <= int(passage["end"]):
+                break
+            targets.append(problem)
+            if problem.number == int(passage["end"]):
+                break
         passage_text = str(passage.get("text") or "").strip()
         for problem in targets:
             if problem.shared_passage_text:
