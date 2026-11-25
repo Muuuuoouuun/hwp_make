@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import secrets
 import shutil
 import sqlite3
+import unicodedata
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -89,7 +91,19 @@ class BodyLimit:
         await self.app(scope, limited_receive, send)
 
 
-def validate_upload(path: Path, kind: str):
+def converted_download_name(original: str, output_format: str) -> str:
+    stem = unicodedata.normalize("NFC", Path(original.replace("\\", "/")).stem)
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', "_", stem).strip(" .") or "문서"
+    if re.fullmatch(r"CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9¹²³]", stem.partition(".")[0].rstrip(), re.I):
+        stem = "_" + stem
+    suffix = "_변환." + output_format
+    # Leave room in a filesystem component for the browser's duplicate counter.
+    budget = 200 - len(suffix.encode("utf-8"))
+    stem = stem.encode("utf-8")[:budget].decode("utf-8", errors="ignore").rstrip(" .")
+    return (stem or "문서") + suffix
+
+
+def validate_upload(path: Path, kind: str, *, text_pdf_only: bool = False):
     with path.open("rb") as stream:
         prefix = stream.read(16)
     signatures = {
@@ -101,14 +115,24 @@ def validate_upload(path: Path, kind: str):
     if kind in signatures and not prefix.startswith(signatures[kind]):
         raise HTTPException(400, "확장자와 파일 내용이 일치하지 않습니다.")
     if kind in ("hwpx", "docx"):
-        from .document_security import DocumentSecurityError, validate_archive
+        from lxml.etree import XMLSyntaxError
+        from .document_security import DocumentSecurityError, parse_document_xml, validate_archive
 
         try:
             with zipfile.ZipFile(path) as archive:
                 validate_archive(archive)
+                if kind == "docx":
+                    types_info = archive.getinfo("[Content_Types].xml")
+                    if types_info.file_size > 1024 * 1024 or "word/document.xml" not in archive.namelist():
+                        raise ValueError("Missing Word document")
+                    types = parse_document_xml(archive.read(types_info))
+                    word_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+                    if not any(part.get("PartName") == "/word/document.xml" and part.get("ContentType") == word_type
+                               for part in types):
+                        raise ValueError("Missing Word document type")
         except DocumentSecurityError as exc:
             raise HTTPException(413 if exc.too_large else 400, str(exc)) from exc
-        except zipfile.BadZipFile as exc:
+        except (zipfile.BadZipFile, KeyError, ValueError, RuntimeError, XMLSyntaxError) as exc:
             raise HTTPException(400, "손상된 문서입니다.") from exc
     if kind == "pdf":
         import fitz
@@ -119,6 +143,8 @@ def validate_upload(path: Path, kind: str):
                     raise HTTPException(400, "암호가 걸린 PDF는 지원하지 않습니다.")
                 if not 1 <= len(doc) <= 50:
                     raise HTTPException(413, "PDF는 1~50쪽까지 지원합니다.")
+                if text_pdf_only and not any(page.get_text("words") for page in doc):
+                    raise HTTPException(400, "선택할 수 있는 글자가 없는 PDF예요. 텍스트 PDF 또는 DOCX를 올려 주세요.")
         except HTTPException:
             raise
         except Exception as exc:
@@ -133,6 +159,9 @@ def create_app(
         origin or os.environ.get("HWP_WEB_ORIGIN", "http://127.0.0.1:8788")
     ).rstrip("/")
     secure = urlsplit(origin).scheme == "https"
+    account_cookie = os.environ.get("HWP_WEB_AUTH_COOKIE", "hwp_session")
+    guest_cookie = "hwp_guest_beta"
+
 
     @asynccontextmanager
     async def lifespan(app):
@@ -201,10 +230,40 @@ def create_app(
         )
 
     def current_user(request: Request):
-        user = store.authenticate(request.cookies.get("hwp_session", ""))
+        user = store.authenticate(request.cookies.get(account_cookie, ""))
         if not user:
             raise HTTPException(401, "로그인이 필요합니다.")
         return user
+
+    def current_actor(request: Request):
+        user = store.authenticate(request.cookies.get(account_cookie, ""))
+        if user:
+            return user
+        guest = store.authenticate_guest(request.cookies.get(guest_cookie, ""))
+        if not guest:
+            raise HTTPException(401, "현재 브라우저의 게스트 세션 또는 로그인이 필요합니다.")
+        return guest
+
+    @app.post("/api/guest")
+    def guest_session(request: Request):
+        if store.authenticate(request.cookies.get(account_cookie, "")):
+            raise HTTPException(409, "이미 계정으로 로그인되어 있습니다.")
+        guest = store.authenticate_guest(request.cookies.get(guest_cookie, ""))
+        token = None
+        if not guest:
+            if not store.rate_limit("guest-session:" + (request.client.host if request.client else "unknown"),
+                                    limit=90, seconds=3600):
+                raise HTTPException(429, "게스트 세션 요청이 많습니다. 잠시 후 다시 시도해 주세요.")
+            token = store.new_guest()
+            guest = store.authenticate_guest(token)
+        if not guest:
+            raise HTTPException(500, "게스트 세션을 시작하지 못했습니다.")
+        result = JSONResponse({"user": {"guest": True, "name": "게스트"},
+                               "quota": store.guest_quota(guest["id"])})
+        if token:
+            result.set_cookie(guest_cookie, token, max_age=86400, httponly=True,
+                              secure=secure, samesite="strict", path="/")
+        return result
 
     def authorized_job(job_id: str, user: dict):
         row = store.get(user["id"], job_id)
@@ -213,10 +272,10 @@ def create_app(
         return row
 
     def session_response(user, request):
-        store.logout(request.cookies.get("hwp_session", ""))
+        store.logout(request.cookies.get(account_cookie, ""))
         response = JSONResponse({"user": user})
         response.set_cookie(
-            "hwp_session",
+            account_cookie,
             store.session(user["id"]),
             httponly=True,
             secure=secure,
@@ -270,9 +329,9 @@ def create_app(
 
     @app.post("/api/logout")
     def logout(request: Request):
-        store.logout(request.cookies.get("hwp_session", ""))
+        store.logout(request.cookies.get(account_cookie, ""))
         response = JSONResponse({"ok": True})
-        response.delete_cookie("hwp_session")
+        response.delete_cookie(account_cookie)
         return response
 
     @app.get("/api/me")
@@ -313,20 +372,25 @@ def create_app(
     def jobs(
         offset: int = Query(0, ge=0, le=100000),
         status: Literal["all", "active", "succeeded"] = "all",
-        user=Depends(current_user),
+        user=Depends(current_actor),
     ):
-        return store.list_jobs(user["id"], offset, status)
+        payload = store.list_jobs(user["id"], offset, status)
+        if user.get("guest"):
+            payload["quota"] = store.guest_quota(user["id"])
+        return payload
 
     @app.post("/api/jobs", status_code=202)
     def submit(
         file: UploadFile = File(...),
         output_format: Literal["hwpx", "docx"] = Form("hwpx"),
         idempotency_key: str = Header(min_length=8, max_length=128),
-        user=Depends(current_user),
+        user=Depends(current_actor),
     ):
-        filename = Path((file.filename or "document").replace("\\", "/")).name[:200]
+        filename = Path((file.filename or "document").replace("\\", "/")).name
         kind = Path(filename).suffix.lower().lstrip(".")
         kind = "text" if kind == "txt" else kind
+        if user.get("guest") and (kind not in ("pdf", "docx") or output_format != "hwpx"):
+            raise HTTPException(400, "게스트는 PDF와 DOCX를 HWPX로 변환할 수 있습니다.")
         if kind not in {"pdf", "hwp", "hwpx", "docx", "text"}:
             raise HTTPException(400, "PDF, HWP, HWPX, DOCX, TXT 파일을 선택해 주세요.")
         job_id = secrets.token_hex(16)
@@ -345,7 +409,7 @@ def create_app(
                     out.write(chunk)
             if not size:
                 raise HTTPException(400, "빈 파일은 변환할 수 없습니다.")
-            validate_upload(folder / "source", kind)
+            validate_upload(folder / "source", kind, text_pdf_only=bool(user.get("guest")))
             fingerprint = (
                 content_hash.hexdigest() + ":" + output_format + ":" + filename
             )
@@ -360,6 +424,8 @@ def create_app(
                 size,
             )
             return {"job": store.public(job)}
+        except PermissionError as exc:
+            raise HTTPException(401, str(exc)) from exc
         except OverflowError as exc:
             raise HTTPException(429, str(exc), headers={"Retry-After": "10"}) from exc
         except ValueError as exc:
@@ -369,11 +435,11 @@ def create_app(
                 shutil.rmtree(folder, ignore_errors=True)
 
     @app.get("/api/jobs/{job_id}")
-    def job_detail(job_id: str, user=Depends(current_user)):
+    def job_detail(job_id: str, user=Depends(current_actor)):
         return {"job": store.public(authorized_job(job_id, user))}
 
     @app.post("/api/jobs/{job_id}/cancel")
-    def cancel(job_id: str, user=Depends(current_user)):
+    def cancel(job_id: str, user=Depends(current_actor)):
         if not store.cancel(user["id"], job_id):
             raise HTTPException(404, "작업을 찾을 수 없습니다.")
         return {"job": store.public(authorized_job(job_id, user))}
@@ -382,7 +448,7 @@ def create_app(
     def retry(
         job_id: str,
         idempotency_key: str = Header(min_length=8, max_length=128),
-        user=Depends(current_user),
+        user=Depends(current_actor),
     ):
         original = authorized_job(job_id, user)
         if original["state"] not in ("failed", "cancelled"):
@@ -409,6 +475,8 @@ def create_app(
                 original["input_size"],
             )
             return {"job": store.public(job)}
+        except PermissionError as exc:
+            raise HTTPException(401, str(exc)) from exc
         except OverflowError as exc:
             raise HTTPException(429, str(exc), headers={"Retry-After": "10"}) from exc
         except ValueError as exc:
@@ -418,27 +486,35 @@ def create_app(
                 shutil.rmtree(folder, ignore_errors=True)
 
     @app.delete("/api/jobs/{job_id}")
-    def delete_job(job_id: str, user=Depends(current_user)):
+    def delete_job(job_id: str, user=Depends(current_actor)):
         try:
             if not store.mark_deleted(user["id"], job_id):
                 raise HTTPException(404, "작업을 찾을 수 없습니다.")
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         # Access is revoked in DB first. Worker sweeper retries any locked files.
-        shutil.rmtree(store.job_dir(job_id), ignore_errors=True)
-        return {"ok": True}
+        if not store.purge_files(job_id):
+            return JSONResponse({"deletion": "pending"}, status_code=202)
+        return {"ok": True, "deletion": "complete"}
 
     @app.get("/api/jobs/{job_id}/download")
-    def download(job_id: str, source: bool = False, user=Depends(current_user)):
+    def download(job_id: str, source: bool = False, user=Depends(current_actor)):
         row = authorized_job(job_id, user)
+        try:
+            folder = store.job_dir(job_id)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(404, "보관된 파일을 찾을 수 없습니다.") from exc
         if source:
-            path, filename = store.job_dir(job_id) / "source", row["filename"]
+            path, filename = folder / "source", row["filename"]
         else:
             if row["state"] != "succeeded":
                 raise HTTPException(409, "아직 다운로드할 결과가 없습니다.")
-            path = store.job_dir(job_id) / row["attempt"] / f"output.{row['format']}"
-            filename = Path(row["filename"]).stem + "." + row["format"]
-        if not path.is_file():
+            if not re.fullmatch(r"[0-9a-f]{32}", row["attempt"] or "") or row["format"] not in ("hwpx", "docx"):
+                raise HTTPException(404, "보관된 파일을 찾을 수 없습니다.")
+            path = folder / row["attempt"] / f"output.{row['format']}"
+            filename = converted_download_name(row["filename"], row["format"])
+        expected_size = row["input_size"] if source else row["output_size"]
+        if path.resolve() != path or not path.is_file() or path.stat().st_size != expected_size or expected_size <= 0:
             raise HTTPException(404, "보관된 파일을 찾을 수 없습니다.")
         return FileResponse(
             path, filename=filename, media_type="application/octet-stream"

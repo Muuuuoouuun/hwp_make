@@ -396,6 +396,8 @@ def recognize_pdf(
         if str(page.metadata.get("header_text") or "").strip()
     )
     result.exam_title = masthead_from_text(f"{header_source} {filename or ''}")
+    if not result.exam_title and pages:
+        result.exam_title = str(pages[0].metadata.get("display_heading") or "")
     result.ai_available = _ai_available()
     any_problems = any(page.problems for page in pages)
     pending_passages: list[dict[str, Any]] = []

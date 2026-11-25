@@ -828,6 +828,13 @@ def _segment_page(
         if str(line.get("text") or "").strip()
         and getattr(line.get("box"), "top", float(height_px)) <= header_cutoff
     )
+    if len(text_lines) >= 2:
+        first, second = text_lines[:2]
+        first_box, second_box = first["box"], second["box"]
+        if (first_box.bottom <= header_cutoff < second_box.top
+                and first_box.bottom - first_box.top >= 1.25 * (second_box.bottom - second_box.top)
+                and len(first["text"]) <= 80 and not _MARKER_RE.match(first["text"])):
+            base_metadata["display_heading"] = first["text"]
     footer_removed = sum(
         1 for line in text_lines if _looks_like_footer_band_line(line, float(height_px))
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import json
 import os
 import shutil
@@ -23,17 +24,28 @@ class Worker:
             target=self.loop, name="hwp-conversion-worker", daemon=True
         )
 
+        self.cleaner = threading.Thread(target=self.cleanup_loop, daemon=True)
+
     def start(self):
+        self.sweep()
+        self.cleaner.start()
         self.thread.start()
 
     def close(self):
         self.stop.set()
         self.thread.join(timeout=10)
+        self.cleaner.join(timeout=10)
+
+    def cleanup_loop(self):
+        while not self.stop.wait(10):
+            try:
+                self.sweep()
+            except Exception:
+                logging.getLogger(__name__).exception("File cleanup failed")
 
     def loop(self):
         while not self.stop.is_set():
             try:
-                self.sweep()
                 job = self.store.claim()
                 if job:
                     self.run(job)
@@ -48,29 +60,43 @@ class Worker:
     def sweep(self):
         now = time.time()
         with self.store.connect() as db:
+            db.execute("""UPDATE jobs SET deleted=1,
+                          state=CASE WHEN state='queued' THEN 'cancelled'
+                                     WHEN state IN ('running','validating') THEN 'cancel_requested' ELSE state END
+                          WHERE deleted=0 AND owner_id IN (SELECT owner_id FROM guests WHERE expires<=?)""",
+                       (now,))
             # Prototype has no persistent problem bank; entire job expiry is safe.
             db.execute(
                 "UPDATE jobs SET deleted=1 WHERE deleted=0 AND state NOT IN ('queued','running','validating','cancel_requested') AND created<?",
                 (now - 30 * 86400,),
             )
             deleted = [
-                row[0] for row in db.execute("SELECT id FROM jobs WHERE deleted=1")
+                row[0] for row in db.execute("""SELECT id FROM jobs WHERE deleted=1
+                    AND state NOT IN ('queued','running','validating','cancel_requested')""")
             ]
             known = {row[0] for row in db.execute("SELECT id FROM jobs")}
         for job_id in deleted:
-            shutil.rmtree(self.store.job_dir(job_id), ignore_errors=True)
+            self.store.purge_files(job_id)
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            expired = db.execute("""SELECT owner_id FROM guests WHERE expires<=?
+                AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.owner_id=guests.owner_id AND deleted<>2)""", (now,)).fetchall()
+            for (owner,) in expired:
+                db.execute("DELETE FROM jobs WHERE owner_id=?", (owner,))
+                db.execute("DELETE FROM guests WHERE owner_id=?", (owner,))
+                db.execute("DELETE FROM users WHERE id=?", (owner,))
         for path in (self.store.root / "jobs").iterdir():
             if (
                 path.is_dir()
                 and path.name not in known
                 and path.stat().st_mtime < now - 86400
             ):
-                shutil.rmtree(path, ignore_errors=True)
+                self.store.purge_files(path.name)
 
     def run(self, job: dict):
         folder = self.store.job_dir(job["id"])
         attempt_dir = folder / job["attempt"]
-        attempt_dir.mkdir(parents=True, exist_ok=True)
+        attempt_dir.mkdir(exist_ok=True)
         # Previous attempts are unreachable and cannot be served by the API.
         (attempt_dir / "spec.json").write_text(
             json.dumps(

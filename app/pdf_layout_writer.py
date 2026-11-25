@@ -6006,6 +6006,17 @@ def _append_native_flow_table(
                     force_font=force_font,
                 ):
                     count += 1
+    merges = item.get("merges", [])
+    for merge in merges:
+        table.merge_cells(*merge)
+    if merges:
+        # Hancom counts physical cells while laying out a row. A zero-size
+        # placeholder after a spanning cell can hide the next real column.
+        for row in table.element.findall(_q("tr")):
+            for slot in row.findall(_q("tc")):
+                size = slot.find(_q("cellSz"))
+                if size is not None and size.get("width") == size.get("height") == "0":
+                    row.remove(slot)
     return count
 
 
@@ -7915,6 +7926,22 @@ def _flow_column_balance_gap_pt(
     return target_gap_pt / scale
 
 
+def _isolated_worksheet_heading(lines: list[dict[str, Any]], page_height: float,
+                                table_top: float) -> tuple[dict[str, Any], float] | None:
+    """Identify a single large line above both columns without using its wording."""
+    ordered = sorted(lines, key=lambda line: _item_bbox(line).y0)
+    if len(ordered) < 2:
+        return None
+    first, second = ordered[:2]
+    title, body = _item_bbox(first), _item_bbox(second)
+    size = _line_median_font_size(first)
+    gap = min(body.y0, table_top) - title.y1
+    if (title.y0 < page_height * 0.2 and gap >= size
+            and size >= 1.25 * _line_median_font_size(second)):
+        return first, gap
+    return None
+
+
 def write_pdf_flow_hwpx(
     pdf_path: str | Path,
     output_path: str | Path,
@@ -7924,6 +7951,7 @@ def write_pdf_flow_hwpx(
     target_a4: bool = False,
     rasterize_tables: bool = True,
     preserve_repeated_headers: bool = False,
+    worksheet_grids: list[dict[str, Any]] | None = None,
     force_font: str | None = None,
     subject_title_override: str | None = None,
 ) -> dict[str, int]:
@@ -7975,6 +8003,8 @@ def write_pdf_flow_hwpx(
             raise ValueError(f"empty PDF: {Path(pdf_path).name}")
         first = pdf_doc[0]
         first_page_lines = _iter_text_lines(first)
+        heading = (_isolated_worksheet_heading(first_page_lines, first.rect.height, worksheet_grids[0]["bbox"].y0)
+                   if worksheet_grids is not None else None)
         first_page_text = " ".join(_line_text(line) for line in first_page_lines)
         form_label = next(
             (label for label in ("홀수형", "짝수형") if label in first_page_text),
@@ -7998,6 +8028,8 @@ def write_pdf_flow_hwpx(
             margin_right_mm = 7.0
             margin_top_mm = 7.0
             margin_bottom_mm = 7.0
+        if heading:
+            margin_top_mm = _pt_to_mm(_item_bbox(heading[0]).y0)
         subject_title = subject_title_override or _flow_subject_title(pdf_path)
         english_body = "english" in pdf_path.stem.lower() or "영어" in pdf_path.stem
         font_scale = coordinate_scale * (
@@ -8032,6 +8064,7 @@ def write_pdf_flow_hwpx(
             right=_mm_to_hwp(margin_right_mm),
             top=_mm_to_hwp(margin_top_mm),
             bottom=_mm_to_hwp(margin_bottom_mm),
+            header=0 if heading else None,
         )
 
         total_pages = len(pdf_doc) if max_pages is None else min(len(pdf_doc), max_pages)
@@ -8043,6 +8076,9 @@ def write_pdf_flow_hwpx(
                 if page_index == 0
                 else _iter_text_lines(page)
             )
+            grid = worksheet_grids[page_index] if worksheet_grids is not None else None
+            if grid is not None and page_index:
+                heading = _isolated_worksheet_heading(page_text_lines, page.rect.height, grid["bbox"].y0)
             footer_lines = [
                 line for line in page_text_lines if _is_flow_footer_line(page, line)
             ]
@@ -8063,16 +8099,11 @@ def write_pdf_flow_hwpx(
                 if rasterize_tables
                 else []
             )
-            native_table_items = (
-                []
-                if rasterize_tables
-                else _flow_native_table_items(
-                    page,
-                    page_text_lines,
-                    page_drawings,
-                )
-            )
-            if not rasterize_tables:
+            native_table_items = []
+            if grid is not None:
+                native_table_items = [grid]
+            elif not rasterize_tables:
+                native_table_items = _flow_native_table_items(page, page_text_lines, page_drawings)
                 for raster_table in _raster_native_table_items(
                     page,
                     page_text_lines,
@@ -8133,6 +8164,22 @@ def write_pdf_flow_hwpx(
                 if not _is_flow_footer_line(page, line)
                 and not _inside_any_region(fitz.Rect(line["bbox"]), excluded_text_regions)
             ]
+            if heading:
+                title_line, gap = heading
+                title_box = _item_bbox(title_line)
+                line_items = [item for item in line_items if _item_bbox(item) != title_box]
+                title_pp = header.ensure_paragraph_format(
+                    alignment="LEFT", line_spacing_percent=100,
+                    margins={"left": _pt_to_hwp(max(0, title_box.x0 - margin_left_pt)),
+                             "prev": 0, "next": _pt_to_hwp(gap)},
+                )
+                title_cp = doc.ensure_run_style(font="HY신명조", size=_line_median_font_size(title_line))
+                # The template's first paragraph carries section controls and is
+                # otherwise empty. Reuse it so it cannot push the heading down.
+                paragraph = doc.add_paragraph(pageBreak="1") if page_index else doc.paragraphs[0]
+                paragraph.para_pr_id_ref = title_pp
+                paragraph.add_run(_line_text(title_line), char_pr_id_ref=title_cp)
+                line_count += 1
             image_items = native_image_items + table_image_items
             image_count += len(image_items)
             all_items = line_items + image_items + native_table_items
@@ -8253,9 +8300,12 @@ def write_pdf_flow_hwpx(
                 starts_page = True
             table_attrs = (
                 {"pageBreak": "1"}
-                if page_index > 0 and not starts_page
+                if page_index > 0 and not starts_page and not heading
                 else {}
             )
+            if heading:
+                # Allow the columns to grow to their content below the title.
+                body_height = _pt_to_hwp(1)
             table = doc.add_table(
                 1,
                 2,
@@ -8273,7 +8323,7 @@ def write_pdf_flow_hwpx(
                 # this fixed-height page-table layout. CENTER keeps their
                 # native flow order; explicit gap tables determine the visible
                 # question positions on sparse pages.
-                _set_cell_vertical_alignment(body_cell, "CENTER")
+                _set_cell_vertical_alignment(body_cell, "TOP" if heading else "CENTER")
             left_cell, right_cell = body_cells
             _set_cell_border_fill(left_cell, column_divider_border_fill)
             _set_cell_margin(left_cell, left_mm=0.4, right_mm=2.3, top_mm=0.0, bottom_mm=0.0)

@@ -3,9 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#184e3b" />
-    <title>HWP Make · 내 문서 변환</title>
-    <link rel="icon" href="/web-static/mark.svg" type="image/svg+xml" />
+    <meta name="theme-color" content="#171e36" />
+    <title>학습지 변환 · PDF를 한글로</title>
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/web-static/style.css" />
     <script src="/web-static/app.js" defer></script>
     <script src="/web-static/bugs.js" defer></script>
@@ -13,22 +13,22 @@
   <body>
     <a class="skip" href="#main">본문으로 이동</a>
     <header class="header">
-      <a class="brand" href="/" aria-label="HWP Make 홈"
-        ><img src="/web-static/mark.svg" alt="" width="32" height="40" />HWP
-        Make</a
-      >
-      <nav id="navigation" hidden aria-label="주 메뉴">
-        <a href="#jobs">내 작업</a>
+      <a class="brand" href="/" aria-label="학습지 변환 홈"><span class="hand checked" aria-hidden="true"></span>학습지 변환</a>
+<nav id="navigation" hidden aria-label="주 메뉴">
+        <p id="guest-quota" hidden></p><a href="#jobs">내 작업</a>
         <button id="open-bug-report" class="plain" type="button">
           버그 신고
         </button>
         <button id="logout" class="plain" type="button">로그아웃</button>
+        <a id="guest-signin" href="/?login=1" hidden>계정 로그인</a>
       </nav>
     </header>
     <main id="main">
-      <section id="auth" class="auth" aria-labelledby="auth-title">
+      <div id="startup"><p id="startup-message" role="status">로컬 게스트 작업 공간을 여는 중이에요.</p><button id="guest-reconnect" class="outline" type="button" hidden>게스트로 다시 연결</button></div>
+      <noscript>변환 도구를 사용하려면 JavaScript를 켜 주세요.</noscript>
+      <section id="auth" class="auth" aria-labelledby="auth-title" hidden>
         <div class="auth-intro">
-          <img src="/web-static/mark.svg" width="42" height="52" alt="" />
+          <span class="hand notebook" aria-hidden="true"></span>
           <h1 id="auth-title">내 문서 작업을 이어가세요</h1>
           <p id="auth-description">
             초대받은 계정으로 로그인하세요.<br />자료와 변환 결과는 내
@@ -63,97 +63,51 @@
             로그인
           </button>
         </form>
-        <p class="auth-foot">PDF와 한글 문서, 이제 한곳에서.</p>
+        <p class="auth-foot"><a href="/">로그인 없이 PDF 변환하기</a></p>
       </section>
       <div id="workspace" hidden>
-        <section class="intro">
-          <h1>시험지를 편집 가능한 문서로</h1>
-          <p>파일을 올려두세요. 변환이 끝나면 여기서 다시 받을 수 있어요.</p>
+        <section class="intro" aria-labelledby="tool-title">
+<h1 id="tool-title">PDF <span aria-label="에서">→</span> 한글</h1>
+<p id="workspace-copy"></p></section>
+<form id="upload-form">
+<div id="dropzone" class="dropzone">
+  <span class="hand upload-art" aria-hidden="true"></span>
+  <p id="file-ready" hidden>파일 선택 완료</p>
+  <h2 id="file-title">학습지 파일을 여기에 놓으세요</h2>
+  <p id="file-meta"></p>
+  <input id="file" class="visually-hidden" type="file" accept=".pdf,.docx" tabindex="-1" aria-label="변환할 파일 선택">
+  <div id="format-row" class="format-row" hidden><label for="format">출력 형식</label><select id="format"><option value="hwpx">HWPX (한글)</option><option value="docx">DOCX (Word)</option></select></div>
+  <div class="drop-actions">
+    <button id="convert" class="primary" type="submit" disabled hidden>한글로 변환</button>
+    <button id="choose-file" class="choose" type="button">파일 선택</button>
+  </div>
+  <div class="inline-error"><span class="hand corrected" aria-hidden="true"></span><p id="upload-error" role="alert" hidden></p></div>
+</div>
+<div class="sample-row"><button id="use-example" class="text-button" type="button">예제로 시작</button><a href="/web-static/lesson-example.pdf" download="분수-연습지.pdf">예제 PDF 받기</a></div>
+<p id="upload-message" class="message" role="status" hidden></p>
+<details id="batch-panel" class="batch-panel">
+  <summary>여러 파일 한 번에 변환</summary>
+  <p>프리미엄 기능 로컬 체험 · PDF와 DOCX를 최대 3개까지 선택하세요. 각 파일을 HWPX로 변환하며 파일별로 변환 1회를 사용해요.</p>
+  <input id="batch-files" type="file" accept=".pdf,.docx" multiple hidden>
+  <button type="button" id="batch-choose" class="outline">여러 파일 선택</button>
+  <ol id="batch-list" class="batch-list" aria-label="선택한 파일과 접수 상태"></ol>
+  <button type="button" id="batch-start" class="primary" hidden>선택한 파일 접수</button>
+  <p id="batch-message" class="message" role="status" hidden></p>
+  <p id="batch-error" class="error" role="alert" hidden></p>
+</details>
+</form>
+<section id="current-job" class="current-job" aria-labelledby="current-job-title" hidden>
+          <div class="current-job-copy">
+
+            <h2 id="current-job-title"><span class="hand" aria-hidden="true"></span>최근 변환</h2>
+            <p id="current-job-file"></p>
+            <p id="current-job-status" role="status" aria-atomic="true"></p>
+          </div>
+          <div class="current-job-actions">
+            <button id="current-job-detail" type="button" class="outline">상세 보기</button>
+            <a id="current-job-download" class="primary" download hidden>HWPX 다운로드</a>
+          </div>
         </section>
-        <div class="conversion-grid">
-          <form id="upload-form" class="upload-form">
-            <div id="dropzone" class="dropzone">
-              <svg
-                class="document-icon"
-                width="64"
-                height="76"
-                viewBox="0 0 64 76"
-                fill="none"
-                aria-hidden="true"
-              >
-                <path
-                  d="M9 3h30l16 17v49a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4V7a4 4 0 0 1 4-4Z"
-                />
-                <path d="M39 3v18h16M18 39h25M18 52h15" />
-              </svg>
-              <h2 id="file-title">변환할 파일을 놓아주세요</h2>
-              <p id="file-meta">PDF · HWP · HWPX · DOCX · TXT / 최대 20MB</p>
-              <input
-                id="file"
-                class="visually-hidden"
-                type="file"
-                accept=".pdf,.hwp,.hwpx,.docx,.txt"
-                aria-label="변환할 파일 선택"
-              />
-              <button id="choose-file" type="button" class="outline">
-                파일 선택
-              </button>
-            </div>
-            <div class="format-row">
-              <label for="format">출력 형식</label
-              ><select id="format">
-                <option value="hwpx">HWPX (한글)</option>
-                <option value="docx">DOCX (Word)</option>
-              </select>
-            </div>
-            <button id="convert" class="primary" type="submit">
-              변환 시작
-            </button>
-            <p id="upload-message" class="message" role="status" hidden></p>
-            <p id="upload-error" class="error" role="alert" hidden></p>
-          </form>
-          <aside class="benefits" aria-labelledby="benefits-title">
-            <h2 id="benefits-title">변환 후에도, 내 자료 그대로</h2>
-            <div class="benefit">
-              <svg viewBox="0 0 32 32" aria-hidden="true">
-                <circle cx="16" cy="16" r="13" />
-                <path d="M16 8v9l6 4" />
-              </svg>
-              <div>
-                <h3>창을 닫아도 계속 변환</h3>
-                <p>
-                  접수한 파일은 서버에서 변환해요.<br />
-                  언제든 돌아와 결과를 받을 수 있어요.
-                </p>
-              </div>
-            </div>
-            <div class="benefit">
-              <svg viewBox="0 0 32 32" aria-hidden="true">
-                <circle cx="16" cy="9" r="7" />
-                <path d="M3 30v-3c0-11 26-11 26 0v3" />
-              </svg>
-              <div>
-                <h3>내 계정에서만 확인</h3>
-                <p>
-                  업로드한 파일과 변환 결과는<br />
-                  내 계정에서만 확인할 수 있어요.
-                </p>
-              </div>
-            </div>
-            <div class="benefit">
-              <svg viewBox="0 0 32 36" aria-hidden="true">
-                <path d="M5 2h15l8 8v23H5ZM20 2v9h8" />
-              </svg>
-              <div>
-                <h3>한글에서 마지막 검수</h3>
-                <p>
-                  변환된 파일을 한글에서 열어<br />
-                  수식과 배치를 확인해 주세요.
-                </p>
-              </div>
-            </div>
-          </aside>
-        </div>
         <section id="jobs" class="jobs" aria-labelledby="jobs-title">
           <div class="section-heading">
             <h2 id="jobs-title">내 작업</h2>
@@ -193,12 +147,10 @@
           </div>
           <p id="poll-status" class="visually-hidden" role="status"></p>
         </section>
-        <footer>
-          원본 배치와 수식은 다운로드 후 한글에서 확인해 주세요.<br /><span
-            >PDF 최대 50쪽 · 하루 10회 · 파일은 30일 보관되며 언제든 삭제할 수
-            있어요.</span
-          >
-        </footer>
+        <details class="more"><summary>이용 안내</summary>
+<p id="guide-format"></p><p id="guide-output"></p><p><strong id="privacy-title"></strong> · <span id="privacy-copy"></span></p><p id="workspace-footer-note"></p></details>
+<details class="more"><summary>프리미엄</summary><p>프리미엄 기능은 준비 중입니다. 현재 게스트는 무료 변환을 이용할 수 있어요.</p></details>
+
       </div>
     </main>
     <dialog id="detail" aria-labelledby="detail-title">

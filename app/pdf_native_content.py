@@ -1292,6 +1292,10 @@ def extract_native_content(
             if page_index > 0:
                 from .pdf_running_headings import measure_running_heading
                 running = measure_running_heading(page, body_top, source_masthead_area)
+                if running is None and not source_masthead_area and len(document) == 2:
+                    from .pdf_running_headings import measure_second_sheet_heading
+                    first = document[0]
+                    running = measure_second_sheet_heading(first, w._page_body_top(first), page, body_top)
                 if running:
                     source_running_headings.append(running)
             lines = [

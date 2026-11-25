@@ -19,7 +19,10 @@ PRIME_CHARS = "'′″"
 UNICODE_SUP_SUB_PATTERN = rf"(?<![a-zA-Z0-9{GREEK_RANGE}])[a-zA-Z{GREEK_RANGE}][a-zA-Z0-9{GREEK_RANGE}]*[{SUPERSCRIPT_CHARS}{SUBSCRIPT_CHARS}]+"
 VULGAR_FRACTION_PATTERN = rf"[{VULGAR_FRACTION_CHARS}]"
 MATH_OPERAND = (
-    rf"(?:[+\-]?\d+(?:\.\d+)?(?:\s*\/\s*[+\-]?\d+(?:\.\d+)?)?"
+    # Let the variable branch below consume a coefficient and its scripts as
+    # one operand. A longer Latin word following a quantity may be a unit.
+    rf"(?:[+\-]?\d+(?:\.\d+)?(?:\s*\/\s*[+\-]?\d+(?:\.\d+)?)?(?!\d|\.\d|[a-zA-Z{GREEK_RANGE}](?![a-zA-Z{GREEK_RANGE}]))"
+    rf"|(?<![a-zA-Z])[a-zA-Z][ \t]+x[ \t]+[a-zA-Z](?![a-zA-Z0-9_^])"
     rf"|[+\-]?\d+(?:\.\d+)?\([^()\n]{{1,120}}\)"
     rf"|[+\-]?\d*(?:\.\d+)?{IDENTIFIER}[{PRIME_CHARS}]*(?:\([^()\n]{{0,120}}\))?(?:[_^](?:\{{[^{{}}\n]{{1,80}}\}}|[a-zA-Z0-9]+))*"
     rf"|{IDENTIFIER}[{PRIME_CHARS}]*\([^()\n]{{0,120}}\)(?:[_^](?:\{{[^{{}}\n]{{1,80}}\}}|[a-zA-Z0-9]+))*"

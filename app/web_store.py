@@ -10,6 +10,8 @@ import hashlib
 import hmac
 import json
 import os
+import re
+import shutil
 import secrets
 import sqlite3
 import time
@@ -26,6 +28,9 @@ ROOT = Path(
 MAX_FILE = 20 * 1024 * 1024
 MAX_STORAGE = 500 * 1024 * 1024
 ACTIVE = ("queued", "running", "validating", "cancel_requested")
+GUEST_CAP = 3
+GUEST_TTL = 86400
+REAL_USERS = "SELECT 1 FROM users u WHERE NOT EXISTS (SELECT 1 FROM guests g WHERE g.owner_id=u.id) LIMIT 1"
 
 
 def digest(value: str) -> str:
@@ -57,6 +62,9 @@ class Store:
                     name TEXT NOT NULL, password TEXT NOT NULL, created REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS sessions (
                     token TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), expires REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS guests (
+                    owner_id TEXT PRIMARY KEY REFERENCES users(id),
+                    token TEXT UNIQUE NOT NULL, expires REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS attempts (bucket TEXT PRIMARY KEY, count INTEGER NOT NULL, expires REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -224,7 +232,7 @@ class Store:
         """Only the local launcher receives this one-use setup credential."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            if db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+            if db.execute(REAL_USERS).fetchone():
                 return None
             token = secrets.token_urlsafe(32)
             db.execute(
@@ -247,7 +255,7 @@ class Store:
                 if (
                     not expected
                     or not hmac.compare_digest(expected[0], digest(bootstrap))
-                    or db.execute("SELECT 1 FROM users LIMIT 1").fetchone()
+                    or db.execute(REAL_USERS).fetchone()
                 ):
                     raise ValueError(
                         "초기 설정 링크가 만료되었습니다. 실행기를 다시 시작해 주세요."
@@ -262,7 +270,8 @@ class Store:
     def login(self, email: str, password: str) -> dict | None:
         with self.connect() as db:
             user = db.execute(
-                "SELECT * FROM users WHERE email=?", (email.lower(),)
+                "SELECT * FROM users u WHERE email=? AND NOT EXISTS (SELECT 1 FROM guests g WHERE g.owner_id=u.id)",
+                (email.lower(),)
             ).fetchone()
         # Equal-cost unknown account lookup, without a reusable default account.
         encoded = user["password"] if user else ("00" * 16 + ":" + "00" * 32)
@@ -299,7 +308,7 @@ class Store:
     def authenticate(self, token: str) -> dict | None:
         with self.connect() as db:
             row = db.execute(
-                "SELECT u.id,u.email,u.name FROM sessions s JOIN users u ON u.id=s.owner_id WHERE s.token=? AND s.expires>?",
+                "SELECT u.id,u.email,u.name FROM sessions s JOIN users u ON u.id=s.owner_id WHERE s.token=? AND s.expires>? AND NOT EXISTS (SELECT 1 FROM guests g WHERE g.owner_id=u.id)",
                 (digest(token), time.time()),
             ).fetchone()
         return dict(row) if row else None
@@ -308,12 +317,60 @@ class Store:
         with self.connect() as db:
             db.execute("DELETE FROM sessions WHERE token=?", (digest(token),))
 
+    def new_guest(self) -> str:
+        token = secrets.token_urlsafe(32)
+        owner = secrets.token_hex(16)
+        now = time.time()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "INSERT INTO users VALUES (?,?,?,?,?)",
+                (owner, owner + "@guest.invalid", "게스트", "00" * 16 + ":" + "00" * 32, now),
+            )
+            db.execute("INSERT INTO guests VALUES (?,?,?)", (owner, digest(token), now + GUEST_TTL))
+        return token
+
+    def authenticate_guest(self, token: str) -> dict | None:
+        if len(token) != 43:
+            return None
+        with self.connect() as db:
+            row = db.execute("SELECT owner_id FROM guests WHERE token=? AND expires>?",
+                             (digest(token), time.time())).fetchone()
+        return {"id": row[0], "guest": True} if row else None
+
+    @staticmethod
+    def _guest_usage(db, owner):
+        # Count deleted successful jobs too, so deleting output cannot restore credit.
+        return db.execute("""SELECT
+          count(CASE WHEN state='succeeded' THEN 1 END),
+          count(CASE WHEN state IN ('queued','running','validating','cancel_requested') THEN 1 END)
+          FROM jobs WHERE owner_id=?""", (owner,)).fetchone()
+
+    def guest_quota(self, owner: str) -> dict:
+        with self.connect() as db:
+            succeeded, reserved = self._guest_usage(db, owner)
+        return {"limit": GUEST_CAP, "used": succeeded, "pending": reserved,
+                "remaining": max(0, GUEST_CAP - succeeded - reserved)}
+
     def job_dir(self, job_id: str) -> Path:
         # IDs come from our DB, but containment is also enforced at the boundary.
-        path = (self.root / "jobs" / job_id).resolve()
-        if path.parent != self.root / "jobs":
+        path = self.root / "jobs" / job_id
+        if not re.fullmatch(r"[0-9a-f]{32}", job_id) or path.resolve() != path:
             raise ValueError("Invalid job path")
         return path
+
+    def purge_files(self, job_id: str) -> bool:
+        try:
+            shutil.rmtree(self.job_dir(job_id))
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError):
+            return False
+        with self.connect() as db:
+            # 1 = revoked and pending removal; 2 = files removed.
+            db.execute("""UPDATE jobs SET deleted=2, filename='', fingerprint='', result=NULL, error=NULL
+                          WHERE id=? AND deleted=1""", (job_id,))
+        return True
 
     def enqueue(
         self,
@@ -329,6 +386,11 @@ class Store:
         now = time.time()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            guest = db.execute("SELECT expires FROM guests WHERE owner_id=?", (owner,)).fetchone()
+            if guest and guest[0] <= time.time():
+                raise PermissionError("게스트 세션이 끝났습니다.")
+            if not guest and not db.execute("SELECT 1 FROM users WHERE id=?", (owner,)).fetchone():
+                raise PermissionError("세션이 끝났습니다. 다시 연결해 주세요.")
             existing = db.execute(
                 "SELECT * FROM jobs WHERE owner_id=? AND request_key=?", (owner, key)
             ).fetchone()
@@ -338,6 +400,15 @@ class Store:
                         "이미 사용한 접수 키입니다. 새 작업으로 다시 접수해 주세요."
                     )
                 return dict(existing), False
+            if guest:
+                if kind not in ("pdf", "docx") or output_format != "hwpx":
+                    raise ValueError("게스트는 PDF와 DOCX를 HWPX로 변환할 수 있습니다.")
+                succeeded, reserved = self._guest_usage(db, owner)
+                if succeeded + reserved >= GUEST_CAP:
+                    raise OverflowError(
+                        "게스트 무료 변환 3회를 모두 사용했습니다." if succeeded >= GUEST_CAP
+                        else "남은 횟수는 진행 중 작업이 예약했어요. 완료나 취소 후 다시 확인해 주세요."
+                    )
             active = db.execute(
                 "SELECT count(*) FROM jobs WHERE owner_id=? AND state IN ('queued','running','validating','cancel_requested')",
                 (owner,),
@@ -388,24 +459,28 @@ class Store:
             if status == "succeeded"
             else ""
         )
+        cutoff = time.time() - 30 * 86400
         with self.connect() as db:
             rows = db.execute(
-                "SELECT * FROM jobs WHERE owner_id=? AND deleted=0"
+                "SELECT * FROM jobs WHERE owner_id=? AND deleted=0 AND created>?"
                 + clause
                 + " ORDER BY created DESC LIMIT 50 OFFSET ?",
-                (owner, offset),
+                (owner, cutoff, offset),
             ).fetchall()
             total = db.execute(
-                "SELECT count(*) FROM jobs WHERE owner_id=? AND deleted=0" + clause,
-                (owner,),
+                "SELECT count(*) FROM jobs WHERE owner_id=? AND deleted=0 AND created>?" + clause,
+                (owner, cutoff),
             ).fetchone()[0]
         return {"items": [self.public(dict(row)) for row in rows], "total": total}
 
     def get(self, owner: str, job_id: str) -> dict | None:
         with self.connect() as db:
             row = db.execute(
-                "SELECT * FROM jobs WHERE id=? AND owner_id=? AND deleted=0",
-                (job_id, owner),
+                """SELECT * FROM jobs WHERE id=? AND owner_id=? AND deleted=0
+                   AND created>? AND NOT EXISTS (
+                       SELECT 1 FROM guests WHERE owner_id=jobs.owner_id AND expires<=?
+                   )""",
+                (job_id, owner, time.time() - 30 * 86400, time.time()),
             ).fetchone()
         return dict(row) if row else None
 
@@ -479,7 +554,9 @@ class Store:
             ).fetchone():
                 return None  # Prototype: one worker slot across all processes.
             row = db.execute(
-                "SELECT * FROM jobs WHERE state='queued' AND deleted=0 ORDER BY created LIMIT 1"
+                """SELECT * FROM jobs WHERE state='queued' AND deleted=0 AND NOT EXISTS (
+                    SELECT 1 FROM guests WHERE owner_id=jobs.owner_id AND expires<=?
+                ) ORDER BY created LIMIT 1""", (now,)
             ).fetchone()
             if not row:
                 return None

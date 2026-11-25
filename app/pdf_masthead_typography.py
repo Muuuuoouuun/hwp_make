@@ -1,6 +1,7 @@
 """Measure native masthead text, typography and its source flow geometry."""
 
 import re
+from copy import deepcopy
 from statistics import median
 from lxml import etree
 from .pdf_source_page_memo import source_text_dict
@@ -12,12 +13,9 @@ HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
 def measure_source_masthead(page, body_top, *, subject_area=""):
     from .pdf_layout_writer import _recover_pdf_font_name
 
-    lines = [
-        line
-        for block in source_text_dict(page)["blocks"]
-        for line in block.get("lines", [])
-        if line["bbox"][3] < body_top
-    ]
+    all_lines = [line for block in source_text_dict(page)["blocks"]
+                 for line in block.get("lines", [])]
+    lines = [line for line in all_lines if line["bbox"][3] < body_top]
     def text(line):
         return "".join(s.get("text", "") for s in line.get("spans", [])).strip()
     titles = [line for line in lines if re.search(r"\d{4}학년도.*문제지", text(line))]
@@ -25,6 +23,19 @@ def measure_source_masthead(page, body_top, *, subject_area=""):
         line for line in lines if re.fullmatch(r".{1,16}영역(?:\s*\([^\n]+\))?", text(line))
     ]
     if not titles:
+        # Only a single prominent heading aligned with the first question's
+        # left edge establishes left alignment. A long centered title may
+        # also begin near that edge, so require its midpoint to be leftward.
+        if not areas and len(lines) == 1:
+            line = lines[0]
+            x0, _, x1, _ = line["bbox"]
+            heading = text(line)
+            if (1 < len(heading) <= 80 and (x0 + x1) / 2 < page.rect.width * .4
+                    and max(s["size"] for s in line["spans"]) >= 16
+                    and any(abs(q["bbox"][0] - x0) <= 2 and q["bbox"][1] >= body_top
+                            and re.match(r"^\d{1,3}[.)]\s", text(q)) for q in all_lines)):
+                return {"left_title": heading, "left_pt": x0, "top_pt": line["bbox"][1],
+                        "source_page_width_pt": page.rect.width}
         return {}
     area = max(areas, key=lambda line: max(s.get("size", 0) for s in line["spans"])) if areas else None
     title = (min(titles, key=lambda line: abs(line["bbox"][1] - area["bbox"][1]))
@@ -131,6 +142,53 @@ def measure_source_masthead(page, body_top, *, subject_area=""):
     return result
 
 
+def _position_first_title(section, header, title, title_style, page, target_top):
+    # Only the template's single empty section-control line may give up space.
+    # Transfer its removed height to the title's trailing margin to keep both
+    # question columns and the following page at their existing positions.
+    paragraphs = section.findall(HP + "p")
+    if len(paragraphs) < 2 or paragraphs[1] is not title:
+        return
+    lead = paragraphs[0]
+    runs = lead.findall(HP + "run")
+    if (not runs or lead.find(".//" + HP + "secPr") is None
+            or any((t.text or "").strip() for t in lead.iter(HP + "t"))
+            or any(child.tag not in (HP + "secPr", HP + "ctrl", HP + "t")
+                   for run in runs for child in run)):
+        return
+    props = header.find(".//" + HH + "paraProperties")
+    style = props.find(HH + "paraPr[@id='" + lead.get("paraPrIDRef") + "']")
+    char = header.find(".//" + HH + "charPr[@id='" + runs[0].get("charPrIDRef") + "']")
+    if style is None or char is None:
+        return
+    spacing = style.find(".//" + HH + "lineSpacing")
+    if spacing is None or spacing.get("type") != "PERCENT":
+        return
+    old_height = round(int(char.get("height")) * int(spacing.get("value")) / 100)
+    margin = page.find(HP + "margin")
+    lead_height = round(target_top - int(margin.get("top")) - int(margin.get("header", "0")))
+    if not 100 <= lead_height < old_height:
+        return
+    removed = old_height - lead_height
+    fixed = deepcopy(style)
+    fixed.set("id", str(max(int(p.get("id")) for p in props) + 1))
+    for node in fixed.iter(HH + "lineSpacing"):
+        node.set("type", "FIXED")
+        node.set("unit", "HWPUNIT")
+        node.set("value", str(lead_height))
+    props.append(fixed)
+    props.set("itemCnt", str(len(props)))
+    lead.set("paraPrIDRef", fixed.get("id"))
+    for edge in title_style.findall(".//" + HH + "margin/{*}next"):
+        edge.set("value", str(int(edge.get("value", "0")) + removed))
+        edge.set("unit", "HWPUNIT")
+    cache = lead.find(HP + "linesegarray/" + HP + "lineseg")
+    if cache is not None:
+        # Keep the estimated prologue height consistent when question spacing
+        # is calculated from the cached line metrics later in this pass.
+        cache.set("spacing", str(int(cache.get("spacing", "0")) - removed))
+
+
 def apply_source_masthead(section, header, items, char_style):
     from .pdf_native_typography import _flow_height
 
@@ -151,6 +209,32 @@ def apply_source_masthead(section, header, items, char_style):
         for p in section.findall(HP + "p")
         if p.get("nativeSourceItem") is None
     ]
+    if "left_title" in meta:
+        matches = [p for p, text in texts if compact(text) == compact(meta["left_title"])]
+        if len(matches) != 1:
+            return False
+        title = matches[0]
+        page = section.find(".//" + HP + "pagePr")
+        properties = header.find(".//" + HH + "paraProperties")
+        base = next(p for p in properties if p.get("id") == title.get("paraPrIDRef"))
+        style = deepcopy(base)
+        identifier = str(max(int(p.get("id")) for p in properties) + 1)
+        style.set("id", identifier)
+        style.find(HH + "align").set("horizontal", "LEFT")
+        inset = meta["left_pt"] * int(page.get("width")) / meta["source_page_width_pt"]
+        inset -= int(page.find(HP + "margin").get("left"))
+        for margin in style.findall(".//" + HH + "margin"):
+            left = margin.find("{*}left")
+            if left is not None:
+                left.set("unit", "HWPUNIT")
+                left.set("value", str(max(0, round(inset))))
+        properties.append(style)
+        properties.set("itemCnt", str(len(properties)))
+        title.set("paraPrIDRef", identifier)
+        if "top_pt" in meta:
+            scale = int(page.get("width")) / meta["source_page_width_pt"]
+            _position_first_title(section, header, title, style, page, meta["top_pt"] * scale)
+        return True
     title = next(
         (p for p, text in texts if compact(text) == compact(meta["title"]["text"])),
         None,

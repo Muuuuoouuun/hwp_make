@@ -8,6 +8,31 @@ from .pdf_source_page_memo import source_text_dict
 HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 
 
+def measure_second_sheet_heading(first_page, first_body_top, page, body_top):
+    """A single prominent title in the same position on two numbered sheets."""
+    def title(sheet, cutoff):
+        lines = [line for block in source_text_dict(sheet)["blocks"]
+                 for line in block.get("lines", []) if line["bbox"][3] < cutoff
+                 and any(s["text"].strip() for s in line["spans"])]
+        if len(lines) != 1 or len(lines[0]["spans"]) != 1:
+            return None
+        span = lines[0]["spans"][0]
+        if span["size"] >= 16 and 1 < len(span["text"].strip()) <= 80:
+            return span
+
+    first, second = title(first_page, first_body_top), title(page, body_top)
+    if not first or not second or first_page.rect != page.rect:
+        return None
+    if (first["font"] != second["font"] or abs(first["size"] - second["size"]) > 0.5
+            or any(abs(first["bbox"][i] - second["bbox"][i]) > 2 for i in (0, 1))
+            or second["bbox"][0] > page.rect.width * .25):
+        return None
+    heading = measure_running_heading(page, body_top, second["text"].strip())
+    if heading:
+        heading["align"] = "LEFT"
+    return heading
+
+
 def measure_running_heading(page, body_top, subject):
     def compact(text):
         return re.sub(r"\s+", "", text)
@@ -55,6 +80,10 @@ def apply_running_heading(path, records, page_count):
     if len(document.sections) != 2:
         return evidence
     section = document.sections[1]
+    if records[0].get("align") == "LEFT":
+        body = "".join(t.text or "" for t in section.element.iter(HP + "t"))
+        if records[0]["text"] in body:
+            return evidence
     properties = section.properties
     width = properties.page_size.width
     original = properties.page_margins
@@ -71,7 +100,7 @@ def apply_running_heading(path, records, page_count):
     if not 0 <= heading_top < body_top - heading_height:
         return evidence
     document.set_page_margins(section_index=1, top=heading_top, header=body_top-heading_top)
-    document.set_header_content([{"align": "CENTER", "runs": [
+    document.set_header_content([{"align": source.get("align", "CENTER"), "runs": [
         {"text": span["text"], "size": span["size"] * scale / 100,
          "font": _font_name(span["font"]), "bold": span["bold"]}
         for span in source["spans"]]}], section_index=1)
