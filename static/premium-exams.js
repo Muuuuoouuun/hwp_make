@@ -60,6 +60,9 @@ export function createExamSync({ api, snapshot, onStatus, onConflict, delay = 80
           : await api("/api/exams", { method: "POST", body });
         if (run !== generation) return false;
         accept(result);
+        // Edits made while this request was in flight are not on the server yet.
+        const now = snapshot();
+        if (!now || JSON.stringify(pickDraft(now)) !== saved) onStatus("pending", "저장 전 변경 있음");
         // The result may differ from what we sent only by server normalization.
         return JSON.stringify(pickDraft(raw)) === saved;
       } catch (error) {
