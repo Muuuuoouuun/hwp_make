@@ -178,10 +178,12 @@ function showWorkspace(user, quota) {
     ? "게스트 세션 시작 후 24시간 동안 이 브라우저에서 결과를 받을 수 있어요."
     : "업로드한 파일과 변환 결과는 내 계정에서만 확인할 수 있어요.";
   $("workspace-copy").textContent = guest
-    ? "학습지 PDF를 편집 가능한 한글 문서(HWPX)로 바꾸세요."
+    ? "로그인 없이 PDF를 편집 가능한 한글 문서(.hwpx)로 변환해요. DOCX도 돼요."
     : "파일을 올려두세요. 변환이 끝나면 여기서 다시 받을 수 있어요.";
   $("guide-format").textContent = guest ? "텍스트를 선택할 수 있는 PDF를 사용하세요. DOCX도 지원해요." : "PDF, HWP, HWPX, DOCX, TXT를 지원해요.";
-  $("guide-output").textContent = guest ? "HWPX로 받아 문구를 고치세요. 수식과 표 배치는 한글에서 확인하세요." : "HWPX 또는 DOCX로 받을 수 있어요. 수식과 표는 다운로드 후 확인하세요.";
+  $("guide-output").textContent = guest ? "결과는 .hwpx예요. 예전 .hwp가 필요하면 한글에서 다른 이름으로 저장하세요. 수식과 표 배치는 다운로드 후 확인하세요." : "HWPX 또는 DOCX로 받을 수 있어요. 수식과 표는 다운로드 후 확인하세요.";
+  $("batch-panel").hidden = !((location.hostname === "localhost" || /^127\./.test(location.hostname))
+    && new URLSearchParams(location.search).get("internal-preview") === "1");
   if (guest) $("format").value = "hwpx";
   const footerNote = $("workspace-footer-note");
   if (footerNote) footerNote.textContent = guest
@@ -277,7 +279,7 @@ function chooseFile(file) {
       ? "PDF 최대 50쪽 · 파일당 20MB · DOCX도 지원"
       : "PDF · HWP · HWPX · DOCX · TXT / 최대 20MB";
   $("choose-file").textContent = file ? "다른 파일 선택" : "파일 선택";
-  $("convert").textContent = state.uploading ? "접수 중…" : (state.user?.guest ? "한글로 변환" : "변환 시작");
+  $("convert").textContent = state.uploading ? "접수 중…" : (state.user?.guest ? "한글(.hwpx)로 변환" : "변환 시작");
   if (file && !state.uploading) $("convert").focus();
 }
 $("use-example").addEventListener("click", async () => {

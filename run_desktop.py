@@ -65,13 +65,13 @@ class BasicApp:
         body = ttk.Frame(root, padding=28)
         body.pack(fill="both", expand=True)
         ttk.Label(body, text="HWP MAKE   /   BASIC", style="Muted.TLabel").pack(anchor="w")
-        ttk.Label(body, text="파일을 문서로 변환", style="Title.TLabel").pack(anchor="w", pady=(16, 5))
-        ttk.Label(body, text="파일을 선택하고 저장할 형식을 고르세요.", style="Muted.TLabel").pack(anchor="w")
+        ttk.Label(body, text="PDF·DOCX를 한글로", style="Title.TLabel").pack(anchor="w", pady=(16, 5))
+        ttk.Label(body, text="로그인 없이 내 컴퓨터에서 변환합니다.", style="Muted.TLabel").pack(anchor="w")
         self.file_text = tk.StringVar(value="선택한 파일이 없습니다.")
-        self.pick = ttk.Button(body, text="파일 선택", command=self.choose)
+        self.pick = ttk.Button(body, text="변환할 파일 선택", command=self.choose)
         self.pick.pack(fill="x", pady=(22, 8))
         ttk.Label(body, textvariable=self.file_text, wraplength=585).pack(anchor="w")
-        ttk.Label(body, text="PDF · HWP · HWPX · DOCX · TXT · 이미지  /  최대 64MB", style="Muted.TLabel").pack(anchor="w", pady=(5, 15))
+        ttk.Label(body, text="PDF · DOCX · HWP/HWPX · TXT · 이미지  /  최대 64MB", style="Muted.TLabel").pack(anchor="w", pady=(5, 15))
         row = ttk.Frame(body)
         row.pack(fill="x")
         ttk.Label(row, text="저장 형식").pack(side="left", padx=(0, 12))
@@ -104,6 +104,7 @@ class BasicApp:
         self.recent.bind("<<ListboxSelect>>", self.select_recent)
         self.recent.bind("<Double-Button-1>", lambda _: self.open_output())
         self.render_history()
+        self.pick.focus_set()
         root.bind("<Control-o>", lambda _: self.choose())
         self.poll_id = root.after(250, self.poll)
 
@@ -120,14 +121,15 @@ class BasicApp:
             self.recent.insert("end", f"  {Path(item['output']).name}    ·    {item.get('date', '')}")
 
     def update_hint(self):
-        self.hint.set("PDF → HWPX는 원본 전체 페이지 배치를 유지해 변환합니다."
-                      if self.format.get() == "HWPX" else "DOCX는 문항 내용 중심으로 다시 구성하며, 원본 배치와 다를 수 있습니다.")
+        self.hint.set("편집 가능한 한글 문서(.hwpx)로 저장합니다. PDF 배치는 가능한 한 보존하며, .hwp가 필요하면 한글에서 다시 저장하세요."
+                      if self.format.get() == "HWPX" else "Word 문서(.docx)로 저장합니다. 내용 중심으로 재구성해 원본과 배치가 다를 수 있습니다.")
 
     def choose(self):
         if self.process:
             return
         path = filedialog.askopenfilename(title="변환할 파일 선택", filetypes=[
-            ("지원 문서와 이미지", " ".join("*" + x for x in SUPPORTED)), ("모든 파일", "*.*")])
+            ("지원 문서와 이미지", " ".join("*" + x for x in SUPPORTED)),
+            ("PDF 문서", "*.pdf"), ("Word 문서", "*.docx"), ("모든 파일", "*.*")])
         if path:
             self.set_source(Path(path))
 
@@ -153,7 +155,11 @@ class BasicApp:
         target = filedialog.asksaveasfilename(title="변환 결과 저장", initialfile=self.source.stem + "_변환" + ext,
                                             defaultextension=ext, filetypes=[(self.format.get(), "*" + ext)])
         if target:
-            self.start_to(Path(target))
+            destination = Path(target)
+            if destination.suffix.lower() != ext:
+                messagebox.showwarning("저장 형식 확인", f"선택한 저장 형식의 확장자({ext})로 입력해 주세요.", parent=self.root)
+                return
+            self.start_to(destination)
 
     def start_to(self, target: Path):
         if self.process or not self.source:
@@ -207,8 +213,11 @@ class BasicApp:
                 if result.get("ok"):
                     self.output = Path(result["output"])
                     self.status.set("저장 완료 · " + self.output.name)
+                    review = result.get("review") or {}
+                    flags = int(review.get("flag_count") or 0)
                     self.review.set(" · ".join(x for x in [f"전체 {result['pages']}쪽" if result.get("pages") else "",
                                     f"{result['problems']}문항" if result.get("problems") else "",
+                                    f"검토 필요 {flags}개: 수식·그림·배치 확인" if flags else
                                     "수식·그림·배치를 확인해 주세요."] if x))
                     result["date"] = time.strftime("%m/%d %H:%M")
                     self.history = ([result] + [x for x in self.history if x["output"] != result["output"]])[:20]
@@ -253,9 +262,10 @@ class BasicApp:
     def help(self):
         messagebox.showinfo("HWP Make Basic " + VERSION,
             "1. 파일을 선택합니다.\n2. HWPX 또는 DOCX를 고릅니다.\n3. 변환하고 저장을 누릅니다.\n\n"
-            "PDF → HWPX는 전체 원본 배치를 보존하는 경로입니다.\n다른 변환은 내용을 다시 구성해 배치가 달라질 수 있습니다.\n"
+            "PDF → HWPX는 원본 배치를 가능한 한 보존합니다.\n다른 변환은 내용을 다시 구성해 배치가 달라질 수 있습니다.\n"
             "스캔·이미지는 AI OCR 없이 이미지로 보존될 수 있습니다.\n\n"
             "HWPX는 한글에서, DOCX는 Word 등에서 열어 확인하세요.\n"
+            ".hwp가 필요하면 HWPX를 한글에서 열고 다른 이름으로 저장하세요.\n"
             "원본은 수정하지 않으며, 인터넷·로그인·API 키가 필요 없습니다.\n"
             "문항 편집·재배열·자동 번호 설정은 포함하지 않습니다.", parent=self.root)
 

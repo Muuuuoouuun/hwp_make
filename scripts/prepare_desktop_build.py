@@ -30,4 +30,6 @@ draw.rounded_rectangle((8, 8, 248, 248), radius=48, fill="#505ac9")
 draw.rectangle((66, 57, 93, 199), fill="white")
 draw.rectangle((163, 57, 190, 199), fill="white")
 draw.rectangle((90, 113, 167, 140), fill="white")
-icon.save(root / "packaging" / "app.ico", sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+icon_path = root / "packaging" / "app.ico"
+if not icon_path.exists():
+    icon.save(icon_path, sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])

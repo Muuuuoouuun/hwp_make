@@ -17,7 +17,11 @@ hidden = collect_submodules("hwpx") + collect_submodules("rhwp")
 hidden += ["app.desktop_selftest", "PIL._tkinter_finder", "pymupdf", "fitz"]
 a = Analysis([str(root / "run_desktop.py")], pathex=[str(root), str(vendor)],
     binaries=collect_dynamic_libs("rhwp"), datas=datas, hiddenimports=hidden,
-    excludes=["app.web_main", "app.web_worker", "app.web_store", "app.web_convert", "pytest"],
+    # These optional libraries can be discovered in a development interpreter
+    # but are not needed by Basic's offline document, layout or image paths.
+    excludes=["app.web_main", "app.web_worker", "app.web_store", "app.web_convert", "pytest",
+              "torch", "torchvision", "tensorflow", "scipy", "pandas", "pyarrow",
+              "onnxruntime", "pytesseract", "boto3", "botocore", "IPython", "matplotlib"],
     noarchive=False)
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="HWP-Make-Basic",
