@@ -40,6 +40,15 @@
 4. 조작 요소 32→44px, 본문 13→15px, 테두리 대비 #c7cfdf→#8a94a6.
 5. 웹 프로토타입 녹색(#184e3b)과 로컬 앱 파랑(#2f56c7)을 하나로 합치고, Premium은 짙은 상단바와 배지로만 구분한다.
 
+## 프리미엄 디자인·모션 디벨롭 (2026-11-25 총동원)
+
+프리미엄 편집 시안 3종과 디벨롭 결과는 별도 캔버스에 있다: https://claude.ai/artifact/7oBw6X8x47L9tcuRVuw82y (비공개). 네 CLI(Codex·Grok·Antigravity·Claude) 진단 → 본부 판정 → 교차 평가 → 최종 감사를 거쳤다.
+
+- `hm.css` 끝에 추가: 모션 토큰(`--motion-fast` 110ms, `--motion-move` 150ms, `--ease-standard`, `--ease-enter`, 동작 줄이기면 위치 이동 0), 아이콘 크기별 선 굵기 보정(16px→2.25, 28px→1.3), 문항 카드 상태(`is-selected`·`is-warn`·`is-ghost`·`is-unsupported`·`is-unavailable`, 번호 `is-changed`, 놓을 자리 `drop-line`), 짙은 바탕 초점색, 충돌 바.
+- `icons.svg`: 아이콘 30개 단일 원본(20×20, stroke 1.8). 위·아래 이동은 화살표, 꺾쇠는 펼침·쪽 이동만. 텍스트 ✓ 금지.
+- `img/*.webp`: 일러스트 3장(빈 구성 `empty-compose`, 빈 내 시험지 `empty-exams`, 생성 완료 `result-complete`). 글자 없음, 바탕 흰색. `intro-renumber`는 교차 평가 4:0으로 소개 첫 화면에서 뺐고 보조 위치용으로만 보관.
+- 모션 원칙: 바뀐 것만 짧게. 인접 두 카드만 150ms 자리 바꿈, 숫자는 즉시 바뀌고 바뀐 칸에 다음 편집까지 남는 표식, 저장 칩은 움직이지 않고 400ms 넘을 때만 "저장 중", 충돌은 상단 고정 배너(일러스트 없음). 카운트업·스피너·축하 효과·View Transition·외부 라이브러리는 쓰지 않는다.
+
 ## 화면 목록 (캔버스 위→아래 순)
 
 - `DesignSystem.dc.html` — 디자인 시스템 · 토큰과 컴포넌트 (1440×2440)
