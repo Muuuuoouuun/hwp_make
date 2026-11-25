@@ -194,6 +194,10 @@ def prepare_export_problems(
             _renumber_shared_snapshot(problem, str(start_number + offset))
         if isinstance(problem.get("stem"), str):
             problem["stem"] = _strip_original_prefix(problem["stem"], original)
+        # Importers title items "{file} #{original}" and the basic template prints the
+        # title as the heading, so the stale source number would sit beside the new one.
+        if original and isinstance(problem.get("title"), str):
+            problem["title"] = re.sub(r"\s*#\s*" + re.escape(original) + r"\s*$", "", problem["title"])
         if numbering_mode == "sequential":
             problem["number"] = str(start_number + offset)
         problem["_numbering_prepared"] = True

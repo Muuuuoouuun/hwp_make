@@ -157,7 +157,13 @@ def verify_documents(folder):
         path = Path(folder) / f"missing.{extension}"
         writer(path, "Missing test", prepare_export_problems([{"number": "", "stem": "문항"}], "sequential"), "kice_math", include_answer_sheet=True)
         assert "1. 문항" in " ".join(document_text(path).split())
-    print("PASS both writers: decimal content survives, missing answers/explanations accepted")
+        # The basic template uses the title as heading; the importer's "#원번호" must not survive.
+        path = Path(folder) / f"title.{extension}"
+        raw = [{"number": "27", "title": "기출 #27", "stem": "27. 본문"}]
+        writer(path, "Title test", prepare_export_problems(raw, "sequential", 21), "basic")
+        text = " ".join(document_text(path).split())
+        assert "21. 기출" in text and "#27" not in text and raw[0]["title"] == "기출 #27", text
+    print("PASS both writers: decimal content survives, missing answers/explanations accepted, no stale title number")
 
     shared_sources = [{
         "number": str(number), "problem_type": "question",
