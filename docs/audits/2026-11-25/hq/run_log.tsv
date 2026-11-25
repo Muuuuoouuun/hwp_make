@@ -1,0 +1,9 @@
+D1_codex_recognition_audit	11-25 01:15	codex	L3	244s	rc=0	26351B	OK
+D1_claude_application_path	11-25 01:15	claude	L3	252s	rc=0	22525B	OK
+D1_grok_failure_modes	11-25 01:21	grok	L2	630s	rc=0	26913B	OK
+D4_agy_knob_design	11-25 02:10	agy	L2	236s	rc=0	14205B	OK
+D4_codex_correctness_audit	11-25 02:10	codex	L3	247s	rc=0	18792B	OK
+D4_claude_downstream	11-25 02:13	claude	L2	453s	rc=0	20127B	OK
+D4_grok_counterexamples	11-25 02:23	grok	L2	1021s	rc=0	16865B	OK
+D5_codex_final_audit	11-25 02:32	codex	L3	203s	rc=0	16987B	OK
+D6_codex_reaudit	11-25 03:11	codex	L3	195s	rc=0	12554B	OK

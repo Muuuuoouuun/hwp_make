@@ -22,7 +22,7 @@ from typing import Any
 
 from app.recognition.schema import Box, ContentBlock, PageModel, Subject
 from app.recognition import cutout
-from app.recognition.pdf_segment import segment_pdf
+from app.recognition.pdf_segment import CROP_MIN_AREA_PX, segment_pdf
 from app.exam_header import masthead_from_text
 from app.math_text import is_recoverable_pua_math_char, normalize_recognized_math_layout_text
 from app.hancom_pua_map import is_hancom_eq_font
@@ -30,7 +30,8 @@ from app.hancom_pua_map import is_hancom_eq_font
 # 문항 본문에서 이 비율 이상이 아직 복원되지 않은 PUA이면 텍스트만으로는 부족하다고 본다.
 # 이 경우 보존용 crop을 붙이되, 가능한 라인/문자 좌표는 계속 남겨 후속 수식 복원에 쓴다.
 _PUA_UNRELIABLE_RATIO = 0.12
-_PASSAGE_RANGE_RE = re.compile(r"\[\s*(\d{1,2})\s*[~～∼\-–]\s*(\d{1,2})\s*\]")
+# 전각 대괄호(［12～13］)도 같은 머리다. 편집형 작성기의 SHARED_PASSAGE_START 와 맞춘다.
+_PASSAGE_RANGE_RE = re.compile(r"[\[［]\s*(\d{1,2})\s*[~～∼\-–]\s*(\d{1,2})\s*[\]］]")
 
 
 # ---------------------------------------------------------------------------
@@ -98,43 +99,35 @@ def infer_subject(filename: str | None) -> Subject:
     return Subject.UNKNOWN
 
 
-def _source_literal_english_pages(pdf_bytes: bytes) -> list[bool]:
+def _source_literal_english_pages(pages: list[PageModel]) -> list[bool]:
     """Prove prose from actual source area/directions, independent of names.
 
     KICE sometimes paints the area name as an image. Its actual 1-17 listening
     directions still identify the English paper. Clear later area headings
     reset the inherited proof in a mixed-subject PDF.
-    """
-    import fitz
 
+    Reads the top-quarter lines the segmenter already extracted, so the PDF is
+    not reopened and every page's text layer is not extracted a second time.
+    """
     proved: list[bool] = []
     english = False
-    try:
-        with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
-            for page in document:
-                header_lines = ["".join(span.get("text", "") for span in line.get("spans", []))
-                                for block in page.get_text("dict").get("blocks", [])
-                                for line in block.get("lines", [])
-                                if line["bbox"][1] <= page.rect.height * .25]
-                compact = [re.sub(r"\s+", "", line) for line in header_lines]
-                areas = [line for line in compact if re.fullmatch(
-                    r"(?:제[1-5]교시)?(?:국어|수학|영어|과학탐구|사회탐구|한국사)영역", line)]
-                english_area = any(re.fullmatch(r"(?:제3교시)?영어(?:영역)?|English(?:Area|Section)?", line, re.I)
-                                   for line in compact)
-                if areas:
-                    english = all("영어영역" in line for line in areas)
-                elif english_area:
-                    english = True
-                else:
-                    directions = "".join(compact)
-                    if ("1번부터17번까지는듣고답하는문제입니다" in directions
-                            and "15번까지는한번만들려주고" in directions
-                            and "16번부터17번까지는두번" in directions):
-                        english = True
-                proved.append(english)
-    except Exception:
-        # A missing source proof retains the existing equation-aware writer.
-        return []
+    for page in pages:
+        compact = [re.sub(r"\s+", "", str(line)) for line in page.metadata.get("top_quarter_lines") or []]
+        areas = [line for line in compact if re.fullmatch(
+            r"(?:제[1-5]교시)?(?:국어|수학|영어|과학탐구|사회탐구|한국사)영역", line)]
+        english_area = any(re.fullmatch(r"(?:제3교시)?영어(?:영역)?|English(?:Area|Section)?", line, re.I)
+                           for line in compact)
+        if areas:
+            english = all("영어영역" in line for line in areas)
+        elif english_area:
+            english = True
+        else:
+            directions = "".join(compact)
+            if ("1번부터17번까지는듣고답하는문제입니다" in directions
+                    and "15번까지는한번만들려주고" in directions
+                    and "16번부터17번까지는두번" in directions):
+                english = True
+        proved.append(english)
     return proved
 
 
@@ -207,31 +200,19 @@ def _figures_from_metadata(page: PageModel) -> list[Box]:
 
 
 def _text_light_figures(page: PageModel, figures: list[Box]) -> list[Box]:
-    """Return image candidates while excluding bordered editable-text blocks."""
-    chart_indexes = set(page.metadata.get("source_chart_indexes") or [])
-    raw_counts = page.metadata.get("figure_text_char_counts") or []
-    counts: list[int] = []
-    for value in raw_counts:
-        try:
-            counts.append(int(value))
-        except (TypeError, ValueError):
-            counts.append(0)
-    if len(counts) < len(figures):
-        counts.extend([0] * (len(figures) - len(counts)))
-    return [
-        figure
-        for index, figure in enumerate(figures)
-        if figure.area >= _MIN_FIGURE_AREA_PX
-        and figure.width >= 60.0
-        and figure.height >= 60.0
-        and (counts[index] < 24 or index in chart_indexes)
-    ]
+    """Return image candidates while excluding bordered editable-text blocks.
+
+    The segmenter decides this once (``figure_crop_indexes``) and keeps the text
+    of every other region in the question body, so nothing is dropped twice.
+    """
+    return [figures[index] for index in page.metadata.get("figure_crop_indexes") or []
+            if 0 <= index < len(figures)]
 
 
 # 그림 언급 키워드(본문에 있으면 도형/그래프/표가 딸린 문항으로 본다).
 _VISUAL_CUE = ("그림", "그래프", "도형", "좌표평면", "자료", "표는", "곡선", "직선", "삼각형", "사각형", "지도", "회로", "장치")
 # 문항 내부 그림으로 인정할 최소 면적(px²). 150dpi 기준 ~2.5×2.5cm.
-_MIN_FIGURE_AREA_PX = 22000.0
+_MIN_FIGURE_AREA_PX = CROP_MIN_AREA_PX
 
 
 def _box_center_in(box: Box, outer: Box) -> bool:
@@ -417,11 +398,16 @@ def recognize_pdf(
     filename: str | None = None,
     dpi: int = 150,
     subject: Subject | None = None,
+    render: bool = True,
 ) -> RecognitionResult:
     """born-digital PDF 를 문항 단위로 인식한다.
 
     반환된 RecognitionResult.found 가 False 면(문항 0개) 스캔/텍스트레이어 없음 →
     상위 호출자가 기존 OCR/텍스트 경로로 폴백해야 한다.
+
+    render=False 는 쪽 래스터와 그림·문항 PNG 를 만들지 않는다. 문항 목록·좌표·본문만
+    쓰는 호출자(편집형 작성기, 결과 검수)용이며, 번호 없는 쪽의 이미지 보존 항목(번호 0)도
+    생기지 않는다.
     """
     if subject is None:
         subject = infer_subject(filename)
@@ -434,7 +420,7 @@ def recognize_pdf(
         return result
 
     result.page_count = len(pages)
-    literal_english_pages = _source_literal_english_pages(pdf_bytes)
+    literal_english_pages = _source_literal_english_pages(pages)
     header_source = " ".join(
         str(page.metadata.get("header_text") or "").strip()
         for page in pages
@@ -446,7 +432,7 @@ def recognize_pdf(
     pending_passages: list[dict[str, Any]] = []
 
     page_images: dict[int, Any] = {}
-    if any_problems:
+    if any_problems and render:
         try:
             raster_page_indexes = {
                 page_index
@@ -462,11 +448,29 @@ def recognize_pdf(
             result.notices.append(f"페이지 렌더 실패({type(exc).__name__}) — 그림 없이 텍스트만 가져옵니다.")
             page_images = {}
 
+    open_passage: dict[str, Any] | None = None  # 앞 쪽 끝까지 이어진(문항이 아직 안 나온) 지문
     for page_index, page in enumerate(pages):
         marker_count = int(page.metadata.get("marker_count") or 0)
         passage = _page_shared_passage(page, page_index + 1) if not page.problems else None
+        leading = page.metadata.get("leading_passage")
+        if leading and open_passage is not None and open_passage["page_number"] == page_index:
+            # 지문이 쪽을 넘어 이 쪽 선두(첫 문항 위)에서 끝난다. 뒷부분을 잃지 않는다.
+            open_passage["text"] = "\n".join([open_passage["text"], leading["text"]])
+            # 이어 붙인 줄은 다음 쪽 좌표다. 줄마다 쪽을 적어 소비자가 구분할 수 있게 한다.
+            open_passage["line_geometries"] = [
+                *open_passage["line_geometries"],
+                *({**geometry, "page": page_index + 1} for geometry in leading["line_geometries"]),
+            ]
+        open_passage = None
         for shared in page.metadata.get("shared_passages", []):
-            pending_passages.append({**shared, "page_number": page_index + 1, "attach_all": True})
+            # 지문 줄 좌표는 지문이 인쇄된 쪽 기준이다. 문항과 다른 쪽일 수 있어 쪽을 적어 둔다.
+            pending_passages.append({
+                **shared, "page_number": page_index + 1,
+                "line_geometries": [{**geometry, "page": page_index + 1}
+                                    for geometry in shared.get("line_geometries") or []],
+            })
+            if shared.get("open"):
+                open_passage = pending_passages[-1]
         if marker_count > 0:
             result.pages_with_markers += 1
         elif passage is not None:
@@ -478,8 +482,11 @@ def recognize_pdf(
 
         if not page.problems:
             if passage is not None:
-                passage["attach_all"] = page.subject == Subject.ENGLISH
+                passage["line_geometries"] = [{**geometry, "page": page_index + 1}
+                                              for geometry in passage.get("line_geometries") or []]
+                passage["open"] = True  # 이 쪽에는 문항이 없다: 받을 문항은 뒤 쪽에 있다
                 pending_passages.append(passage)
+                open_passage = passage
                 continue
             if any_problems:
                 page_img = page_images.get(page_index)
@@ -560,30 +567,34 @@ def recognize_pdf(
     linked_passages = 0
     unlinked_passages: list[dict[str, Any]] = []
     for passage in pending_passages:
-        target = next(
-            (
-                problem
-                for problem in result.problems
-                if problem.number == int(passage["start"])
-                and problem.page_number >= int(passage["page_number"])
-            ),
-            None,
-        )
+        passage_page = int(passage["page_number"])
+        # 같은 쪽에 시작 번호 문항이 있으면 그 문항이 받는다. 한 쪽에 두 유형이 섞이지는 않으므로
+        # 단 배치를 잘못 읽어 열린 지문으로 표시된 경우에도 안전하다.
+        target = next((problem for problem in result.problems
+                       if problem.number == int(passage["start"])
+                       and problem.page_number == passage_page), None)
+        if target is None and passage.get("open"):
+            # 지문 뒤에 이 쪽 문항이 없었다. 읽기 순서로 바로 다음에 오는 문항이 범위의 시작
+            # 번호일 때만 잇는다(뒤에 이어 붙은 다른 유형의 같은 번호로 건너뛰지 않는다).
+            following = next((problem for problem in result.problems
+                              if problem.page_number > passage_page and problem.number > 0), None)
+            target = following if following is not None and following.number == int(passage["start"]) else None
         if target is None:
             unlinked_passages.append(passage)
             continue
-        targets = [target]
-        if passage.get("attach_all"):
-            # Each library item must remain usable when selected on its own.
-            # Stop at the end of this occurrence, before another odd/even form.
-            targets = []
-            start_index = next(i for i, problem in enumerate(result.problems) if problem is target)
-            for problem in result.problems[start_index:]:
-                if not int(passage["start"]) <= problem.number <= int(passage["end"]):
-                    break
-                targets.append(problem)
-                if problem.number == int(passage["end"]):
-                    break
+        # Each library item must remain usable when selected on its own, in
+        # every subject. Stop at the end of this occurrence, before another
+        # odd/even form.
+        targets = []
+        start_index = next(i for i, problem in enumerate(result.problems) if problem is target)
+        for problem in result.problems[start_index:]:
+            if not int(passage["start"]) <= problem.number <= int(passage["end"]):
+                break
+            if targets and problem.number <= targets[-1].number:
+                break  # 번호가 다시 시작했다: 다음 유형(홀·짝형)의 문항이다
+            targets.append(problem)
+            if problem.number == int(passage["end"]):
+                break
         passage_text = str(passage.get("text") or "").strip()
         for problem in targets:
             if problem.shared_passage_text:
@@ -599,6 +610,14 @@ def recognize_pdf(
     for passage in unlinked_passages:
         page_number = int(passage["page_number"])
         page_index = page_number - 1
+        owner = next((problem for problem in reversed(result.problems)
+                      if problem.page_number == page_number and problem.number > 0), None)
+        if owner is not None:
+            # 같은 쪽 문항 뒤에서 시작한 지문인데 받을 문항이 없다(발췌본 등). 지문으로 떼어 낸
+            # 글을 바로 앞 문항에 되돌려 잃지 않는다.
+            owner.text = "\n".join(part for part in (owner.text, str(passage.get("text") or "").strip()) if part)
+            owner.line_geometries.extend(passage.get("line_geometries") or [])
+            continue
         page_img = page_images.get(page_index)
         fallback = _page_fallback_problem(pages[page_index], page_number, page_img)
         if fallback is not None:

@@ -20,7 +20,7 @@ class NumberingError(ValueError):
 
 
 _PASSAGE_RANGE = re.compile(r"^\s*\[?\s*\d+\s*[~∼\-–]\s*\d+\s*\]?")
-_SHARED_HEADING = re.compile(r"^(\s*)\[\s*(\d{1,3})\s*[~∼～\-–]\s*(\d{1,3})\s*\]")
+_SHARED_HEADING = re.compile(r"^(\s*)[\[［]\s*(\d{1,3})\s*[~∼～\-–]\s*(\d{1,3})\s*[\]］]")
 
 
 def _shared_number_marker(problem):

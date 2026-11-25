@@ -323,7 +323,13 @@ def _import_pdf_recognized(
         if box is not None:
             bbox_px = [box.left, box.top, box.width, box.height]
         pdf_lines = list(getattr(prob, "line_geometries", []) or [])
-        shared_passage_lines = list(getattr(prob, "shared_passage_line_geometries", []) or [])
+        # 같은 지문이 범위의 문항마다 붙는다. 글자별 좌표까지 문항마다 복제하면 국어 한 책자의
+        # 저장량이 몇 배가 되므로 지문 줄은 글·상자·쪽만 남긴다(문항 자신의 줄은 그대로).
+        shared_passage_lines = [
+            {key: line[key] for key in ("text", "bbox_px", "page") if key in line}
+            for line in getattr(prob, "shared_passage_line_geometries", []) or []
+            if isinstance(line, dict)
+        ]
         passage_range = getattr(prob, "shared_passage_range", None)
         payload = {
             "column_count": int(getattr(prob, "column_count", 0) or 0),
@@ -799,6 +805,17 @@ def _numeric_choice_sequence_starts(lines: list[str], index: int) -> bool:
     return labels[:3] == [1, 2, 3]
 
 
+def _has_circled_choice_set(lines: list[str]) -> bool:
+    """원문자 선지 묶음이 있는가.
+
+    원문자로 시작하는 줄이 3개 이상이거나 한 줄에 원문자가 3개 이상 나란히 있을 때만 그렇다.
+    본문이 자료의 ①·②·③을 한 번씩 가리키는 정도는 선지 묶음이 아니다.
+    """
+    starts = sum(1 for line in lines if line.lstrip()[:1] and line.lstrip()[0] in CIRCLED_CHOICE_MARKERS)
+    inline = max((sum(char in CIRCLED_CHOICE_MARKERS for char in line) for line in lines), default=0)
+    return starts >= 3 or inline >= 3
+
+
 def _choice_line_body(
     lines: list[str],
     index: int,
@@ -815,6 +832,9 @@ def _choice_line_body(
     label = match.group("label")
     number = _numeric_choice_label(label)
     if number is None:
+        if label[0].isalpha() and _has_circled_choice_set(lines):
+            # 원문자 선지 묶음(①②③…)이 따로 있는 문항의 "a." "b." 줄은 <보기> 항목이지 선지가 아니다.
+            return None
         return match.group("body").strip()
     if not choices_started:
         if number != 1 or not _numeric_choice_sequence_starts(lines, index):

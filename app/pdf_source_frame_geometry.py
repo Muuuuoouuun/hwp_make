@@ -110,7 +110,11 @@ def source_flow_prose_frame_table(table, root, source):
         with fitz.open(source) as pdf:
             for page in pdf:
                 scale = paper_width / page.rect.width
-                drawings = page.get_drawings()
+                # 배경 표 후보마다 전 쪽을 다시 훑으므로(국어 40쪽에서 518회) 쪽 단위로 한 번만 뽑는다.
+                # 메모 값은 읽기만 한다.
+                from .pdf_source_page_memo import page_memo
+                drawings = page_memo(page, "drawings", page.get_drawings,
+                                     weight=lambda value: 256 * sum(len(d.get("items") or ()) for d in value))
                 horizontals = []
                 for drawing in drawings:
                     for part in drawing.get('items', []):

@@ -10120,6 +10120,7 @@ def write_pdf_structured_hwpx(
     math_ai_model: str | None = None,
     variant_policy: str = "all",
     source_name: str | None = None,
+    recognized: Any = None,
 ) -> dict[str, Any]:
     """Write editable HWPX with deterministic math recovery.
 
@@ -10127,6 +10128,8 @@ def write_pdf_structured_hwpx(
     The legacy high_fidelity_math argument is retained for caller compatibility;
     it must never enable source-image overlays or positioned text boxes.
     All source forms are retained unless variant_policy='first' is requested.
+    A caller that already recognized this PDF passes ``recognized`` so one
+    conversion does not segment the same file again.
     """
     from . import hwpx_writer_v2, importers
     from .pdf_math_geometry import repair_problem_math_layout, reconstruct_stacked_math_rows
@@ -10135,8 +10138,9 @@ def write_pdf_structured_hwpx(
     pdf_path = Path(pdf_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = pdf_path.read_bytes()
-    recognized = recognize_pdf(payload, filename=pdf_path.name)
+    if recognized is None:
+        # The native writer reads the question inventory only, never the crops.
+        recognized = recognize_pdf(pdf_path.read_bytes(), filename=pdf_path.name, render=False)
     if not recognized.found:
         raise ValueError(f"structured PDF recognition found no editable problems: {Path(pdf_path).name}")
     # 2026-10-03: the fallback title is the teacher's file name, not the upload
@@ -10192,17 +10196,26 @@ def write_pdf_structured_hwpx(
         if second_numbers and min(second_numbers) <= 5 and variant_overlap_ratio >= 0.80:
             variant_page_limit = half_pages
 
-    if resolved_template != "kice_math" or not math_ai_recognition:
-        from .pdf_native_content import write_native_content
+    # 2026-11-25: math_ai_recognition no longer changes the writer. It used to send
+    # math sheets to the legacy page-table writer below, which never called the
+    # recognizer (0 network calls measured) and scored lower than the native
+    # writer (unresolved placeholders 0 -> 1, text preservation 1.0 -> 0.992).
+    from .pdf_native_content import write_native_content
 
-        return write_native_content(
-            pdf_path, output_path, title=title, template=resolved_template,
-            recognized=recognized, page_limit=min(total_recognized_pages, max_pages or total_recognized_pages,
-                                                 variant_page_limit or total_recognized_pages),
-            native_math=native_math, variant_policy=variant_policy,
-            variant_page_limit=variant_page_limit, variant_overlap_ratio=variant_overlap_ratio,
-            subject_area=source_subject.get("area", ""),
-        )
+    stats = write_native_content(
+        pdf_path, output_path, title=title, template=resolved_template,
+        recognized=recognized, page_limit=min(total_recognized_pages, max_pages or total_recognized_pages,
+                                             variant_page_limit or total_recognized_pages),
+        native_math=native_math, variant_policy=variant_policy,
+        variant_page_limit=variant_page_limit, variant_overlap_ratio=variant_overlap_ratio,
+        subject_area=source_subject.get("area", ""),
+    )
+    stats["math_ai_requested"] = bool(math_ai_recognition)
+    stats["math_ai_applied"] = False
+    return stats
+    # ponytail: the legacy block below is unreachable. It stays only to avoid merge
+    # conflicts with branches still touching this file; delete it together with
+    # its private helpers once those branches land.
 
     items: list[dict[str, Any]] = []
     seen: set[tuple[int, str, str, tuple[str, ...]]] = set()

@@ -1,0 +1,110 @@
+[
+ {
+  "booklet": "국어(40쪽)",
+  "run": "기준선",
+  "sec": 90.7,
+  "segment_calls": 2,
+  "objective": 64.51,
+  "review_ok": false,
+  "flag_count": 0,
+  "fidelity": true,
+  "questions": 112,
+  "pages": 40
+ },
+ {
+  "booklet": "국어(40쪽)",
+  "run": "수정 후",
+  "sec": 83.1,
+  "segment_calls": 1,
+  "objective": 64.51,
+  "review_ok": false,
+  "flag_count": 0,
+  "fidelity": true,
+  "questions": 112,
+  "pages": 40
+ },
+ {
+  "booklet": "국어(40쪽)",
+  "run": "수정 후·빠른",
+  "sec": 46.6,
+  "segment_calls": 1,
+  "objective": null,
+  "review_ok": false,
+  "flag_count": 0,
+  "fidelity": false,
+  "questions": 112,
+  "pages": 40
+ },
+ {
+  "booklet": "수학(40쪽)",
+  "run": "기준선",
+  "sec": 49.4,
+  "segment_calls": 2,
+  "objective": 67.9,
+  "review_ok": true,
+  "flag_count": 0,
+  "fidelity": true,
+  "questions": 92,
+  "pages": 40
+ },
+ {
+  "booklet": "수학(40쪽)",
+  "run": "수정 후",
+  "sec": 45.7,
+  "segment_calls": 1,
+  "objective": 67.9,
+  "review_ok": true,
+  "flag_count": 0,
+  "fidelity": true,
+  "questions": 92,
+  "pages": 40
+ },
+ {
+  "booklet": "수학(40쪽)",
+  "run": "수정 후·빠른",
+  "sec": 16.8,
+  "segment_calls": 1,
+  "objective": null,
+  "review_ok": true,
+  "flag_count": 0,
+  "fidelity": false,
+  "questions": 92,
+  "pages": 40
+ },
+ {
+  "booklet": "지구과학Ⅰ(4쪽)",
+  "run": "기준선",
+  "sec": 11.3,
+  "segment_calls": 2,
+  "objective": 63.29,
+  "review_ok": true,
+  "flag_count": 0,
+  "fidelity": true,
+  "questions": 20,
+  "pages": 4
+ },
+ {
+  "booklet": "지구과학Ⅰ(4쪽)",
+  "run": "수정 후",
+  "sec": 9.8,
+  "segment_calls": 1,
+  "objective": 63.29,
+  "review_ok": true,
+  "flag_count": 0,
+  "fidelity": true,
+  "questions": 20,
+  "pages": 4
+ },
+ {
+  "booklet": "지구과학Ⅰ(4쪽)",
+  "run": "수정 후·빠른",
+  "sec": 6.3,
+  "segment_calls": 1,
+  "objective": null,
+  "review_ok": true,
+  "flag_count": 0,
+  "fidelity": false,
+  "questions": 20,
+  "pages": 4
+ }
+]

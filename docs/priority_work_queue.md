@@ -1,6 +1,8 @@
 # Priority Work Queue
 
-Updated: 2026-10-15
+Updated: 2026-11-25
+
+Recognition audit (2026-11-25): [recognition, application and speed](audits/2026-11-25/README.md). Question numbers matched 100% while the import path dropped about 40% of body text (boxed material, shared passages); now 0.37% on 90 booklets, measured by `scripts/audit_recognition_orphans.py`. A cover or blank page no longer fails the native export, and `quality_check="fast"` skips only the source comparison render. Open: mixed text-and-chart boxes become one image, `1)` question numbers still fail the native route, shared passages repeat per question in whole-exam exports, and the fast option and the Gemini math checkbox await a UI decision.
 
 Current top priority (2026-10-15): conversion to Hangul `.hwp` files. With the rhwp CLI available, HWP is the default result of the simple converter, studio export, PDF original-layout export and the desktop Basic edition; any round-trip difference falls back to the checked HWPX with a notice. See [HWP output priority](audits/2026-10-15/hwp-output-priority.md): 6/6 sample PDFs (120 pages) convert with identical round-trip structure and character shapes and zero-pixel render differences. Next: open the HWP results in Hancom (letter boxes, two columns, equations, the format limits listed there), build and self-test the Windows installer with rhwp.exe, and decide on HWP output for the web prototype.
 

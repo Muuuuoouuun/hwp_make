@@ -147,6 +147,9 @@ class PdfLayoutExportPayload(BaseModel):
     # strict=True keeps the legacy whole-document 422 for any editability or
     # rendering defect (quality gates); default delivers the file with review.
     strict: bool = False
+    # 속도-품질: "fast" 는 원본 PDF 와의 화면 대조 렌더(변환 시간의 약 40~60%)만 생략한다.
+    # 산출 HWPX 와 문항별 검수 표시는 "full" 과 같고, 시각 일치 점수만 미검증으로 남는다.
+    quality_check: Literal["full", "fast"] = "full"
     # hwp: after every HWPX check, convert the same document to HWP 5.0 with
     # the rhwp CLI (app/rhwp_cli.py). A round-trip difference keeps the HWPX.
     output_format: Literal["hwpx", "hwp"] = "hwpx"
@@ -1108,8 +1111,14 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
         with storage.scoped_upload_directory(run_dir / "assets"):
             # Both public UI modes must satisfy the native editing contract.
             # Keep the old coordinate request value as an API alias only.
+            from .recognition.pipeline import recognize_pdf
+
+            # One recognition serves the writer and the inspection below. Both
+            # read the question inventory only, so no page is rasterized for it.
+            recognized = recognize_pdf(data, filename=source_path.name, render=False)
             stats = pdf_layout_writer.write_pdf_structured_hwpx(
                 source_path, output_path, max_pages=payload.max_pages,
+                recognized=recognized,
                 native_math=payload.native_math,
                 math_ai_recognition=payload.math_ai_recognition,
                 math_ai_model=payload.math_ai_model,
@@ -1147,7 +1156,8 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
             ))
         editability = inspect_pdf_editability(source_copy, output_path, stats.get("image_provenance") or [],
                                              page_limit=int(scope["selected_page_count"]),
-                                             require_question_boxes=bool(stats.get("question_grouping", {}).get("question_count")))
+                                             require_question_boxes=bool(stats.get("question_grouping", {}).get("question_count")),
+                                             recognition=recognized)
         stats["verified_question_units"] = editability["question_units"]
         if not editability["question_units"].get("question_count") and not editability.get("body_paragraphs"):
             # Fatal: nothing in the output is editable, so the file has no use.
@@ -1164,7 +1174,12 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
                 "본문 이미지·문항 분리 오류 또는 원문 누락이 발견되어 편집형 문서를 제공할 수 없습니다.",
                 editability=editability,
             ))
-        fidelity = _pdf_export_fidelity(source_copy, output_path, render_dir, stats, payload, scope)
+        fast_check = payload.quality_check == "fast"
+        if fast_check:
+            fidelity = {"available": False, "skipped": True, "reason": "quality_check=fast",
+                        "target_sync_ratio": 0.94, "meets_target": None, "source_scope": scope}
+        else:
+            fidelity = _pdf_export_fidelity(source_copy, output_path, render_dir, stats, payload, scope)
         rendering = None
         if editability["question_units"].get("question_count"):
             from .pdf_question_rendering import inspect_question_rendering
@@ -1238,7 +1253,12 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
             and not fidelity.get("skipped") and not fidelity.get("page_count_mismatch")
             and fidelity.get("meets_layout_view_sync_target")
         )
-        if not quality["meets_objective_score_target"]:
+        quality["quality_check"] = payload.quality_check
+        if fast_check:
+            # 화면 대조를 하지 않았으므로 '미달'이 아니라 '미측정'이다.
+            quality["meets_objective_score_target"] = None
+            quality["meets_paging_target"] = None
+        if quality["meets_objective_score_target"] is False:
             quality["visual_review_flags"] = list(dict.fromkeys([
                 *quality["visual_review_flags"], "native_output_requires_layout_review"
             ]))
@@ -1308,7 +1328,11 @@ def _export_pdf_layout(payload: PdfLayoutExportPayload) -> dict[str, Any]:
                  if int(stats.get("native_equations") or 0) else []) + ([
                      "원본 그림은 이미지로 유지되며, 그림 내부의 글자는 문단 편집 범위에 포함되지 않습니다."
                  ] if any(record.get("role") == "source_figure" for record in (stats.get("image_provenance") or [])) else []) + (["원본 배치 품질 기준을 충족하지 못했습니다. 결과를 확인해 주세요."]
-                 if not quality["meets_objective_score_target"] else []),
+                 if not quality["meets_objective_score_target"] and not fast_check else []) + (
+                     ["빠른 변환: 원본과의 화면 대조를 생략했습니다. 결과 파일은 정밀 변환과 같습니다."]
+                     if fast_check else []) + (
+                     ["수식 AI 인식은 편집형 변환에 아직 연결되어 있지 않아 기본 수식 복원으로 변환했습니다."]
+                     if payload.math_ai_recognition else []),
         }
 
     except HTTPException:
