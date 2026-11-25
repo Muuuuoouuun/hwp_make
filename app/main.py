@@ -35,6 +35,7 @@ from . import (
     local_auth,
     pdf_layout_fidelity,
     pdf_layout_writer,
+    premium_exams,
     preview,
     storage,
     user_errors,
@@ -71,6 +72,10 @@ ai_api.initialize_ai_runtime()
 app.include_router(ai_api.router)
 _LOCAL_AUTH = local_auth.LocalWorkspaceAuth(storage.DATA_DIR)
 app.include_router(_LOCAL_AUTH.router())
+# Kept apart from the shared problem DB. The single local owner is "local"; a web
+# server passes its account id instead.
+_EXAMS = premium_exams.ExamStore(storage.DATA_DIR / "premium_exams.sqlite3")
+_LOCAL_OWNER = "local"
 
 
 app.add_middleware(RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
@@ -824,13 +829,66 @@ def _pdf_structured_objective_score(
 @app.get("/premium")
 @app.get("/premium/studio")
 def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    # Same policy as /static: a cached page must not pair with a newer app.js.
+    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/api/premium-capabilities")
 def premium_capabilities() -> dict[str, Any]:
     """Describe this local development slice without inventing paid access."""
     return {"available": True, "mode": "local_preview", "billing_enabled": False}
+
+
+def _exam_or_404(call, *args):
+    try:
+        return call(_LOCAL_OWNER, *args)
+    except premium_exams.ExamNotFound as exc:
+        raise HTTPException(status_code=404, detail={
+            "code": "exam_not_found", "message": "시험지를 찾을 수 없습니다. 목록을 새로고침해 주세요."}) from exc
+
+
+@app.get("/api/exams")
+def list_exams(request: Request) -> dict[str, Any]:
+    _LOCAL_AUTH.require_user(request)
+    return {"exams": _EXAMS.list_exams(_LOCAL_OWNER)}
+
+
+@app.post("/api/exams", status_code=201)
+def create_exam(draft: premium_exams.ExamDraft, request: Request) -> dict[str, Any]:
+    _LOCAL_AUTH.require_user(request)
+    return _EXAMS.create(_LOCAL_OWNER, draft)
+
+
+@app.get("/api/exams/{exam_id}")
+def get_exam(exam_id: str, request: Request) -> dict[str, Any]:
+    _LOCAL_AUTH.require_user(request)
+    return _exam_or_404(_EXAMS.get, exam_id)
+
+
+@app.put("/api/exams/{exam_id}")
+def update_exam(exam_id: str, update: premium_exams.ExamUpdate, request: Request) -> dict[str, Any]:
+    _LOCAL_AUTH.require_user(request)
+    try:
+        return _exam_or_404(_EXAMS.update, exam_id, update)
+    except premium_exams.ExamConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "exam_conflict",
+            "message": "다른 화면에서 이 시험지가 먼저 저장되었습니다. 최신본을 열거나 내 변경을 새 시험지로 저장해 주세요.",
+            "exam": exc.current,
+        }) from exc
+
+
+@app.delete("/api/exams/{exam_id}")
+def delete_exam(exam_id: str, request: Request) -> dict[str, Any]:
+    _LOCAL_AUTH.require_user(request)
+    _exam_or_404(_EXAMS.delete, exam_id)
+    return {"deleted": exam_id}
+
+
+@app.post("/api/exams/{exam_id}/duplicate", status_code=201)
+def duplicate_exam(exam_id: str, request: Request) -> dict[str, Any]:
+    _LOCAL_AUTH.require_user(request)
+    return _exam_or_404(_EXAMS.duplicate, exam_id)
 
 
 @app.get("/api/health")

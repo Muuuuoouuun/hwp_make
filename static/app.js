@@ -1,6 +1,7 @@
 import { initSimpleHelp } from "./simple-help.js";
 
 import { createStudioViews } from "./studio-views.js?v=1";
+import { createExamSync, renderExamList } from "./premium-exams.js?v=1";
 
 const DEFAULT_EXPORT_TITLE = "새 시험지";
 // 간단 변환이 인식 문항으로 HWPX를 만들 때 쓰는 서식(비 PDF 변환과 PDF 폴백이 함께 쓴다).
@@ -111,6 +112,18 @@ const els = {
   sessionSubmit: document.querySelector("#sessionSubmit"),
   sessionLogout: document.querySelector("#sessionLogout"),
   sessionResume: document.querySelector("#sessionResume"),
+  examSaveStatus: document.querySelector("#examSaveStatus"),
+  examSaveRetry: document.querySelector("#examSaveRetry"),
+  examConflict: document.querySelector("#examConflict"),
+  examReloadLatest: document.querySelector("#examReloadLatest"),
+  examKeepCopy: document.querySelector("#examKeepCopy"),
+  studioMyExams: document.querySelector("#studioMyExams"),
+  examListModal: document.querySelector("#examListModal"),
+  examListClose: document.querySelector("#examListClose"),
+  examListStatus: document.querySelector("#examListStatus"),
+  examList: document.querySelector("#examList"),
+  examListRecover: document.querySelector("#examListRecover"),
+  examListNew: document.querySelector("#examListNew"),
   simpleRecognitionSummary: document.querySelector("#simpleRecognitionSummary"),
   simpleRecognitionCount: document.querySelector("#simpleRecognitionCount"),
   simpleRecognitionNote: document.querySelector("#simpleRecognitionNote"),
@@ -1541,6 +1554,7 @@ const BASKET_STORAGE_KEY = "hwpmake.premium.basket.v1";
 
 function persistBasket() {
   if (!isPremiumWorkspace()) return;
+  if (typeof examSync !== "undefined") examSync.schedule();
   try {
     localStorage.setItem(BASKET_STORAGE_KEY, JSON.stringify(state.basket));
   } catch {
@@ -2972,6 +2986,11 @@ async function exportSelected(idsOverride = null, overrides = null, { signal = n
     toast("편집 중인 문항을 저장하지 못해 내보내기를 중단했습니다.");
     return false;
   }
+  // A result is only made from a composition the server has confirmed.
+  if (!overrides && typeof examSync !== "undefined" && !(await examSync.flush())) {
+    toast("시험지를 저장하지 못해 내보내기를 중단했습니다. 위쪽 저장 상태를 확인해 주세요.");
+    return false;
+  }
   // Saving can change source numbers and invalidate duplicate acknowledgement.
   const ids = Array.isArray(idsOverride) ? [...idsOverride] : state.basket.map((entry) => entry.id);
   if (!ids.length) return false;
@@ -3753,7 +3772,7 @@ async function openSessionDialog() {
     els.sessionSubmit.classList.toggle("hidden", authenticated);
     els.sessionSubmit.textContent = setup ? "계정 만들기" : "로그인";
     els.sessionLogout.classList.toggle("hidden", !authenticated);
-    els.sessionResume.classList.toggle("hidden", !authenticated || !hasSavedComposition());
+    els.sessionResume.classList.toggle("hidden", !authenticated);
     (authenticated ? els.sessionClose : setup ? els.sessionName : els.sessionPassword).focus();
   } catch (error) {
     els.sessionStatus.textContent = friendlyErrorMessage(error);
@@ -3819,6 +3838,7 @@ async function logoutLocalSession() {
     state.startNumber = 1;
     state.exports = [];
     state.orderDraft = [];
+    examSync.reset();
     try {
       for (const key of [BASKET_STORAGE_KEY, PREMIUM_NUMBERING_KEY, "hwpmake.basket.v1", WORKSPACE_LAYOUT_KEY]) localStorage.removeItem(key);
     } catch { /* The clean in-memory session still applies. */ }
@@ -4486,7 +4506,21 @@ els.editorSessionButton?.addEventListener("click", openSessionDialog);
 els.sessionForm?.addEventListener("submit", authenticateLocalSession);
 els.sessionClose?.addEventListener("click", () => closeModal(els.sessionModal));
 els.sessionLogout?.addEventListener("click", logoutLocalSession);
-els.sessionResume?.addEventListener("click", () => enterPremiumEditor({ resume: true }));
+els.sessionResume?.addEventListener("click", () => openExamList(els.sessionButton));
+els.studioMyExams?.addEventListener("click", () => openExamList(els.studioMyExams));
+els.examListClose?.addEventListener("click", () => closeModal(els.examListModal));
+els.examListModal?.addEventListener("click", (event) => { if (event.target === els.examListModal) closeModal(els.examListModal); });
+els.examListNew?.addEventListener("click", createBlankExam);
+els.examListRecover?.addEventListener("click", () => { closeModal(els.examListModal); enterPremiumEditor({ resume: true }); });
+els.examSaveRetry?.addEventListener("click", () => examSync.flush());
+els.examReloadLatest?.addEventListener("click", () => {
+  const current = examSync.current();
+  if (current) openSavedExam(current.id, { force: true });
+});
+els.examKeepCopy?.addEventListener("click", keepExamAsCopy);
+for (const [control, type] of [[els.exportTitle, "input"], [els.exportTemplate, "change"], [els.exportFormat, "change"], [els.exportAnswerSheet, "change"]]) {
+  control.addEventListener(type, () => { if (isPremiumWorkspace()) examSync.schedule(); });
+}
 els.simpleConvertButton?.addEventListener("click", runSimpleConversion);
 els.simpleCancelButton?.addEventListener("click", () => {
   if (!state.simpleConversionBusy) return;
@@ -4748,7 +4782,11 @@ async function enterPremiumEditor({ resume = false } = {}) {
         state.workspaceStage = previousStage;
         throw new Error("이전에 저장한 시험지가 없습니다. 파일을 먼저 넣어주세요.");
       }
+      // A browser-only draft becomes a new saved exam.
+      if (typeof examSync !== "undefined") examSync.reset();
     } else if (state.editorSourceFile !== state.recognizedFile) {
+      // A newly entered file starts a new saved exam.
+      if (typeof examSync !== "undefined") examSync.reset();
       state.basket = state.recognizedProblems.map((problem) => ({ id: problem.id, label: problemLabel(problem) }));
       for (const problem of state.recognizedProblems) state.problemById.set(problem.id, problem);
       state.editorSourceFile = state.recognizedFile;
@@ -4804,7 +4842,7 @@ async function loadHwpExportOption() {
   if (!state.exportFormatTouched) els.exportFormat.value = "hwp";
 }
 
-async function initializePremiumEditor() {
+async function initializePremiumEditor({ exam = null } = {}) {
   restoreNumbering();
   restoreWorkspaceLayout();
   setMobilePane(state.mobilePane);
@@ -4825,16 +4863,156 @@ async function initializePremiumEditor() {
   if (problemsResult.status === "rejected") renderProblemLoadError(problemsResult.reason);
   await hydrateBasketProblems();
   syncExportTitleToTemplate();
+  if (exam) {
+    applySavedExam(exam);
+    examSync.begin(exam);
+  }
   syncPaperPreviewMeta();
   syncExportOptions({ resetNativeMath: true });
   renderBasket();
   state.paperBaseWidth = 0;
   state.paperViewportMode = null;
   if (typeof studioViews !== "undefined") studioViews.enter();
+  if (!exam) examSync.start();
   window.requestAnimationFrame(() => {
     ensurePaperBaseWidth();
     updatePaperCanvasSize();
   });
+}
+
+// --- 서버 저장 시험지 ---------------------------------------------------------
+
+function examDraft() {
+  const sequential = state.numberingMode !== "preserve";
+  const validStart = Number.isInteger(state.startNumber) && state.startNumber >= 1 && state.startNumber <= 999;
+  if (sequential && !validStart) return null;
+  return {
+    title: els.exportTitle.value,
+    items: state.basket.map(({ id, label }) => ({ id, label })),
+    numbering_mode: sequential ? "sequential" : "preserve",
+    start_number: validStart ? state.startNumber : 1,
+    template_key: els.exportTemplate.value || "basic",
+    format: els.exportFormat.value || "hwpx",
+    include_answer_sheet: els.exportAnswerSheet.checked,
+  };
+}
+
+function applySavedExam(exam) {
+  const offers = (select, value) => [...select.options].some((option) => option.value === value);
+  if (offers(els.exportTemplate, exam.template_key)) els.exportTemplate.value = exam.template_key;
+  if (offers(els.exportFormat, exam.format)) {
+    els.exportFormat.value = exam.format;
+    state.exportFormatTouched = true;
+  }
+  state.lastDefaultTitle = exportDefaultTitle(currentExportTemplate());
+  els.exportTitle.value = exam.title;
+  els.exportAnswerSheet.checked = Boolean(exam.include_answer_sheet);
+  state.numberingMode = exam.numbering_mode;
+  state.startNumber = exam.start_number;
+  els.numberingMode.value = state.numberingMode;
+  els.startNumber.value = String(state.startNumber);
+  syncTemplatePreview();
+}
+
+function showExamStatus(kind, text) {
+  if (!els.examSaveStatus) return; // A page cached before this feature has no status row.
+  els.examSaveStatus.textContent = text;
+  els.examSaveStatus.dataset.state = kind;
+  els.examSaveRetry.classList.toggle("hidden", kind !== "error");
+  els.examConflict.classList.toggle("hidden", kind !== "conflict");
+}
+
+const examSync = createExamSync({ api, snapshot: examDraft, onStatus: showExamStatus, onConflict() {} });
+
+async function leaveCurrentExam() {
+  if (!isPremiumWorkspace()) return true;
+  if (await flushActiveDraft({ quiet: true }) && await examSync.flush()) return true;
+  toast("지금 시험지를 저장하지 못해 다른 시험지를 열 수 없습니다. 위쪽 저장 상태를 확인해 주세요.");
+  return false;
+}
+
+// force skips saving the current exam (used to discard it after a conflict).
+async function openSavedExam(id, { force = false, exam = null } = {}) {
+  if (state.editorOpening || state.simpleConversionBusy) return false;
+  if (!force && !(await leaveCurrentExam())) return false;
+  state.editorOpening = true;
+  try {
+    const loaded = exam || await api(`/api/exams/${encodeURIComponent(id)}`);
+    examSync.reset();
+    state.basket = loaded.items.map(({ id: problemId, label }) => ({ id: problemId, label: label || `#${problemId}` }));
+    state.activeId = null;
+    // Re-entering from the simple screen's file then starts a new exam instead of overwriting this one.
+    state.editorSourceFile = null;
+    state.workspaceStage = "editor";
+    for (const modal of visibleModals()) closeModal(modal);
+    renderWorkspaceStage();
+    await initializePremiumEditor({ exam: loaded });
+    if (state.basket.length) await selectProblem(state.basket[0].id);
+    else renderEditor();
+    return true;
+  } catch (error) {
+    toast(friendlyErrorMessage(error));
+    return false;
+  } finally {
+    state.editorOpening = false;
+    renderWorkspaceStage();
+  }
+}
+
+async function refreshExamList() {
+  els.examListStatus.textContent = "불러오는 중…";
+  try {
+    const { exams } = await api("/api/exams");
+    const editing = isPremiumWorkspace() ? examSync.current()?.id : null;
+    renderExamList(els.examList, exams, { open: (exam) => openSavedExam(exam.id), duplicate: duplicateExam, remove: removeExam }, editing);
+    els.examListStatus.textContent = exams.length ? `${exams.length}개 · 최근 저장 순` : "";
+    els.examListRecover.classList.toggle("hidden", Boolean(exams.length) || !hasSavedComposition());
+  } catch (error) {
+    els.examListStatus.textContent = friendlyErrorMessage(error);
+  }
+}
+
+function openExamList(trigger) {
+  closeModal(els.sessionModal);
+  openModal(els.examListModal, trigger, els.examListNew);
+  return refreshExamList();
+}
+
+async function duplicateExam(exam) {
+  try {
+    await api(`/api/exams/${encodeURIComponent(exam.id)}/duplicate`, { method: "POST" });
+    await refreshExamList();
+  } catch (error) {
+    els.examListStatus.textContent = friendlyErrorMessage(error);
+  }
+}
+
+async function removeExam(exam) {
+  if (!window.confirm(`'${exam.title}' 시험지를 삭제할까요? 저장한 구성만 지우며 원본 문항은 남습니다.`)) return;
+  try {
+    await api(`/api/exams/${encodeURIComponent(exam.id)}`, { method: "DELETE" });
+    await refreshExamList();
+  } catch (error) {
+    els.examListStatus.textContent = friendlyErrorMessage(error);
+  }
+}
+
+async function createBlankExam() {
+  if (!(await leaveCurrentExam())) return;
+  try {
+    const exam = await api("/api/exams", { method: "POST", body: JSON.stringify({}) });
+    await openSavedExam(exam.id, { force: true, exam });
+  } catch (error) {
+    els.examListStatus.textContent = friendlyErrorMessage(error);
+  }
+}
+
+async function keepExamAsCopy() {
+  const copy = await examSync.keepAsCopy();
+  if (!copy) return;
+  els.exportTitle.value = copy.title;
+  syncPaperPreviewMeta();
+  toast(`내 변경을 '${copy.title}'로 저장했습니다. 다른 화면의 시험지는 그대로입니다.`);
 }
 
 const studioViews = createStudioViews({ state, els, selectProblem, resolveBasketProblem,

@@ -236,3 +236,26 @@ body.studio-ready .app-shell { background: #fff; }
   .studio-ready .preview-note { font-size: 10px; }
   .studio-drawer, .studio-settings-dialog { max-height: calc(100dvh - 24px); }
 }
+
+/* Saved exam: autosave state, conflict stop, and the "내 시험지" list. */
+.exam-save { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.exam-save-status { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.exam-save-status[data-state="saving"] { color: var(--ink-soft); }
+.exam-save-status[data-state="error"], .exam-save-status[data-state="conflict"], .exam-save-status[data-state="invalid"] { color: var(--danger); font-weight: 600; }
+#examSaveRetry { min-height: 36px; padding: 4px 10px; font-size: 13px; }
+.exam-conflict { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 14px; border: 1px solid #efc4ca; border-radius: var(--radius); background: var(--danger-soft); color: var(--ink); font-size: 13px; }
+.exam-conflict button { min-height: 36px; padding: 4px 12px; font-size: 13px; }
+.exam-list-dialog { width: min(640px, calc(100vw - 32px)); }
+.exam-list-dialog .modal-head button { flex: 0 0 auto; white-space: nowrap; }
+.exam-list { display: grid; gap: 8px; max-height: min(60vh, 520px); overflow-y: auto; }
+.exam-list-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); }
+.exam-list-copy { display: grid; gap: 4px; min-width: 0; }
+.exam-list-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+.exam-list-copy small { color: var(--muted); font-size: 13px; }
+.exam-list-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.exam-list-actions button { min-height: 40px; padding: 4px 12px; }
+.exam-list-empty { margin: 0; padding: 20px 4px; color: var(--muted); }
+@media (max-width: 640px) {
+  .exam-list-row { flex-direction: column; align-items: stretch; }
+  .exam-list-actions button { flex: 1; }
+}

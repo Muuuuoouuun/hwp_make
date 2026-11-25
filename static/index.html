@@ -6,7 +6,7 @@
     <title>HWPX 변환 · HWP Make</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232f56c7'/%3E%3Cpath d='M4 5h8M4 8h8M4 11h5' stroke='white' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="/static/styles.css?v=33" />
-    <link rel="stylesheet" href="/static/studio-views.css?v=1" />
+    <link rel="stylesheet" href="/static/studio-views.css?v=2" />
   </head>
   <body class="simple-converter-mode" data-workspace-stage="input">
     <main id="simpleConverter" class="simple-converter" aria-labelledby="simpleConverterTitle">
@@ -144,7 +144,17 @@
 
       <section class="studio-context" aria-label="현재 시험지">
         <div id="studioTitleHost"></div>
+        <div class="exam-save">
+          <span id="examSaveStatus" class="exam-save-status" role="status" aria-live="polite"></span>
+          <button id="examSaveRetry" class="hidden" type="button">다시 저장</button>
+        </div>
+        <div id="examConflict" class="exam-conflict hidden" role="alert">
+          <span>다른 화면에서 이 시험지가 먼저 저장되었습니다. 덮어쓰지 않고 멈췄습니다.</span>
+          <button id="examReloadLatest" type="button">최신본 열기</button>
+          <button id="examKeepCopy" type="button">내 변경을 새 시험지로</button>
+        </div>
         <div class="studio-context-actions">
+          <button id="studioMyExams" type="button" aria-haspopup="dialog">내 시험지</button>
           <button id="studioAddSource" type="button">자료 추가</button>
           <button id="studioEditSelected" type="button">선택 문항 편집</button>
           <button id="studioOpenSettings" type="button">번호·출력 설정</button>
@@ -497,11 +507,25 @@
           <p id="sessionStatus" role="status" aria-live="polite"></p>
         </div>
         <div class="settings-actions">
-          <button id="sessionResume" class="ghost hidden" type="button">이전 작업 열기</button>
+          <button id="sessionResume" class="ghost hidden" type="button" aria-haspopup="dialog">내 시험지</button>
           <button id="sessionLogout" class="ghost hidden" type="button">로그아웃</button>
           <button id="sessionSubmit" class="primary" type="submit">로그인</button>
         </div>
       </form>
+    </div>
+
+    <div id="examListModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="examListTitle">
+      <div class="settings-dialog exam-list-dialog">
+        <div class="modal-head"><div><h2 id="examListTitle">내 시험지</h2><p>문항 구성과 번호·출력 설정이 자동 저장됩니다. 원본 문항은 바뀌지 않습니다.</p></div><button id="examListClose" type="button">닫기</button></div>
+        <div class="settings-body">
+          <p id="examListStatus" role="status" aria-live="polite"></p>
+          <div id="examList" class="exam-list"></div>
+        </div>
+        <div class="settings-actions">
+          <button id="examListRecover" class="ghost hidden" type="button">이 브라우저의 이전 작업 열기</button>
+          <button id="examListNew" class="primary" type="button">새 시험지 만들기</button>
+        </div>
+      </div>
     </div>
 
     <div id="aiSettingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="aiSettingsTitle">
@@ -541,6 +565,6 @@
     </div>
     <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
     <script src="/static/layout-planner.js?v=1"></script>
-    <script src="/static/app.js?v=33" type="module"></script>
+    <script src="/static/app.js?v=34" type="module"></script>
   </body>
 </html>
