@@ -46,7 +46,7 @@ function harness() {
   });
   for (const name of ["isPremiumWorkspace", "isPdfFile", "simpleFileExtension", "formatSimpleFileSize", "assignSingleFile",
     "setSimpleConversionStatus", "renderWorkspaceStage", "setSimpleFile", "recognizeSimpleFile",
-    "refreshSession", "authenticateLocalSession", "enterPremiumEditor", "applyUiMode", "runSimpleConversion"]) {
+    "refreshSession", "authenticateLocalSession", "enterPremiumEditor", "applyUiMode", "preferredDocumentFormat", "runSimpleConversion"]) {
     vm.runInContext(implementation(name), c);
   }
   return c;
@@ -111,6 +111,7 @@ async function run() {
   assert.deepEqual(plain(exported[0]), [1, 2], "basic output uses source recognition order, not edited basket");
   // 2026-10-03 4단계: 간단 변환은 전용 'simple' 양식으로 내보낸다(스튜디오 기본 양식 basic 과 별개).
   assert.equal(exported[1].templateKey, "simple");
+  assert.equal(exported[1].format, "hwpx", "without the rhwp tool the basic output stays HWPX");
   assert.equal(state.workspaceStage, "results");
   assert.equal(requests.filter(r => r.url === "/api/import").length, 1, "basic output never imports the same File twice");
 

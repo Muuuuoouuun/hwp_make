@@ -10,3 +10,6 @@ venv/
 tmp/
 /dist/
 assets/fonts/shinmyeong-jungmyeongjo/
+
+# rhwp CLI binary (scripts/fetch_rhwp_cli.py)
+/packaging/rhwp-cli/

@@ -171,6 +171,11 @@ FORMULA_CASES: tuple[FormulaCase, ...] = (
     FormulaCase("overbrace_label", r"$\overbrace{a+b}^{n}$", "OVERBRACE {a+b} {n}"),
     FormulaCase("prime_command", r"$f^\prime(x)$", "f^{prime}(x)"),
     FormulaCase("norm_bars", r"$\Vert x\Vert$", "∥ x∥"),
+    # Combining accent marks from PDF/text layers (U+20D7 arrow, U+0305 bar).
+    FormulaCase("combining_vector_segment", "$AB\u20d7$", "vec {AB}"),
+    FormulaCase("combining_vector_sum", "$a\u20d7+b\u20d7$", "vec {a}+vec {b}"),
+    FormulaCase("combining_vector_primes", "$P'Q'\u20d7$", "vec {P'Q'}"),
+    FormulaCase("combining_overline", "$AB\u0305$", "bar {AB}"),
     FormulaCase("long_hancom_eqn", f"${LONG_HANCOM_EQN}$", LONG_HANCOM_EQN),
 )
 

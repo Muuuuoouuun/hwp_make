@@ -8,7 +8,7 @@ from typing import Any
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Cm, Pt
+from docx.shared import Cm, Pt, RGBColor
 
 from . import storage
 from .exam_templates import (
@@ -719,8 +719,22 @@ def _add_table(
     col_cnt = max(len(row) for row in rows)
     if spans:
         col_cnt = max(col_cnt, max(int(c) + int(cs) for _, c, _, cs in spans))
+    body = document.element.body
+    previous = body[-2] if len(body) > 1 else None
+    if previous is not None and previous.tag == qn("w:tbl"):
+        # Word joins tables with nothing between them into one table.
+        document.add_paragraph("")
     table = document.add_table(rows=len(rows), cols=col_cnt)
     table.style = "Table Grid"
+    # Fit the table to the text column: python-docx sizes it to the full page,
+    # which overflows a two-column exam layout.
+    table.autofit = False
+    column_width = _docx_text_width(document) // col_cnt
+    for column in table.columns:
+        column.width = column_width * 635
+    for row_cells in table.rows:
+        for table_cell in row_cells.cells:
+            table_cell.width = column_width * 635
     for r, row in enumerate(rows):
         for c in range(col_cnt):
             cell = table.rows[r].cells[c]
@@ -821,6 +835,67 @@ def _set_section_columns(document: Document, columns: int) -> None:
     cols.set(qn("w:space"), "567")
 
 
+def _apply_exam_document_defaults(document: Document) -> None:
+    """A4 page and exam-paper spacing instead of python-docx's template.
+
+    The bundled template is US Letter with 10pt after every paragraph
+    (1.15 lines), blue theme headings and Word 2010 compatibility mode. The
+    HWPX export is A4, and each choice line is its own paragraph here, so the
+    defaults spread a question over twice the height. Values follow Filee's
+    DOCX writer (MIT): A4, compatibility mode 15, tight spacing and an
+    explicit East Asian font.
+    """
+    for section in document.sections:
+        section.page_width = Cm(21.0)
+        section.page_height = Cm(29.7)
+    normal = document.styles["Normal"]
+    normal.paragraph_format.space_after = Pt(2)
+    normal.paragraph_format.line_spacing = 1.2
+    r_fonts = normal.element.get_or_add_rPr().get_or_add_rFonts()
+    r_fonts.set(qn("w:eastAsia"), "Malgun Gothic")
+    for style_name in ("Heading 1", "Heading 2", "Title"):
+        try:
+            heading = document.styles[style_name]
+        except KeyError:
+            continue
+        heading.font.color.rgb = RGBColor(0, 0, 0)
+        heading.font.name = "Malgun Gothic"
+        heading.element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "Malgun Gothic")
+        heading.paragraph_format.space_before = Pt(0)
+        heading.paragraph_format.space_after = Pt(4)
+    settings = document.settings.element
+    for compat in settings.iter(qn("w:compatSetting")):
+        if compat.get(qn("w:name")) == "compatibilityMode":
+            compat.set(qn("w:val"), "15")
+
+
+def _docx_text_width(document: Document) -> int:
+    """Usable width of one text column in twips (columns from w:cols)."""
+    section = document.sections[-1]
+    width = int((section.page_width - section.left_margin - section.right_margin) / 635)
+    cols = section._sectPr.find(qn("w:cols"))
+    count = int(cols.get(qn("w:num"), "1")) if cols is not None else 1
+    gap = int(cols.get(qn("w:space"), "0")) if cols is not None else 0
+    return max(1440, (width - gap * (count - 1)) // max(1, count))
+
+
+def _docx_picture_source(path: Path) -> Any:
+    """Path, or PNG bytes for formats Word/python-docx cannot embed (WebP, ...)."""
+    if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".bmp"}:
+        return str(path)
+    from io import BytesIO
+
+    from PIL import Image
+
+    with Image.open(path) as image:
+        image.seek(0)
+        converted = image.convert("RGBA" if image.mode in {"RGBA", "LA", "P"} else "RGB")
+        buffer = BytesIO()
+        converted.save(buffer, "PNG")
+    buffer.seek(0)
+    return buffer
+
+
 def _docx_image_width(template: ExamTemplate) -> Cm:
     return Cm(7.0 if template.columns > 1 else 14.5)
 
@@ -840,6 +915,7 @@ def write_docx(
     styles = document.styles
     styles["Normal"].font.name = "Malgun Gothic"
     styles["Normal"].font.size = Pt(10)
+    _apply_exam_document_defaults(document)
     _set_section_columns(document, max(1, min(template.columns, 2)))
 
     _add_masthead(document, title, template)
@@ -905,7 +981,7 @@ def write_docx(
             if full_path is None:
                 continue
             try:
-                document.add_picture(str(full_path), width=_docx_image_width(template))
+                document.add_picture(_docx_picture_source(full_path), width=_docx_image_width(template))
             except Exception:
                 _add_text_paragraph(document, f"[이미지 삽입 실패: {Path(str(image_path)).name}]")
 

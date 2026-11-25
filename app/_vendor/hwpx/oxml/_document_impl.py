@@ -3912,7 +3912,8 @@ class HwpxOxmlParagraph:
             "type": col_type,
             "layout": layout,
             "colCount": str(col_count),
-            "sameSz": str(same_size).lower(),
+            # Hancom writes 1/0 (python-hwpx 6.7 and HwpForge reject "true").
+            "sameSz": "1" if same_size else "0",
             "sameGap": str(same_gap) if same_size else "0",
         }
         col_pr = _append_child(ctrl, f"{_HP}colPr", col_pr_attrs)

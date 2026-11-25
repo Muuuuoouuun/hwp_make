@@ -66,6 +66,26 @@ PT_BODY = 10.0     # char 0 (1000)
 PT_SMALL = 9.0     # char 4 (900)
 
 _IMG_FORMATS = {".jpg": "jpeg", ".jpeg": "jpeg", ".png": "png", ".gif": "gif", ".bmp": "bmp"}
+
+
+def _embeddable_image(path: Path) -> tuple[bytes, str]:
+    """Image bytes and BinData format Hancom reads.
+
+    Uploads may be TIFF or WebP (storage.IMAGE_EXTENSIONS); their bytes used to
+    be stored under a png label. Other formats are re-encoded as PNG, the way
+    Filee (MIT) prepares pictures for HWPX.
+    """
+    fmt = _IMG_FORMATS.get(path.suffix.lower())
+    if fmt is not None:
+        return path.read_bytes(), fmt
+    from io import BytesIO
+
+    with Image.open(path) as image:
+        image.seek(0)
+        converted = image.convert("RGBA" if image.mode in {"RGBA", "LA", "P"} else "RGB")
+        buffer = BytesIO()
+        converted.save(buffer, "PNG")
+    return buffer.getvalue(), "png"
 _HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
 _HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 _SECTION_PART_RE = re.compile(r"^Contents/section\d+\.xml$")
@@ -2790,7 +2810,7 @@ def _add_table(
         if size is None:
             raise ValueError("native table figure size is invalid")
         paragraph = cell.add_paragraph("", char_pr_id_ref=char_pr_id_ref)
-        binary_id = doc.add_image(path.read_bytes(), _IMG_FORMATS.get(path.suffix.lower(), "png"))
+        binary_id = doc.add_image(*_embeddable_image(path))
         picture = paragraph.add_picture(binary_id, width=size[0], height=size[1],
                                         char_pr_id_ref=char_pr_id_ref, treat_as_char=True)
         margin = picture.element.find(f"{_HP}outMargin")
@@ -2915,7 +2935,7 @@ def _add_native_picture_row(
             if count:
                 paragraph.add_run(" " * count, char_pr_id_ref=space_style)
                 remaining_gap_width -= count * space_width
-        binary_id = doc.add_image(path.read_bytes(), _IMG_FORMATS.get(path.suffix.lower(), "png"))
+        binary_id = doc.add_image(*_embeddable_image(path))
         picture = paragraph.add_picture(binary_id, width=width, height=height,
                                         char_pr_id_ref=char_pr_id_ref, treat_as_char=True)
         margin = picture.element.find(f"{_HP}outMargin")
@@ -2945,9 +2965,9 @@ def _add_picture(
     if size is None:
         return
     width, height = size
-    fmt = _IMG_FORMATS.get(full_path.suffix.lower(), "png")
+    image_bytes, fmt = _embeddable_image(full_path)
     picture = doc.add_picture(
-        full_path.read_bytes(),
+        image_bytes,
         fmt,
         width=width,
         height=height,
