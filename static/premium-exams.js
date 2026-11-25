@@ -33,26 +33,50 @@ export function createExamSync({ api, snapshot, onStatus, onConflict, delay = 80
   let inflight = null;
   let generation = 0;
 
+  let copying = null;
+  let failed = false; // the last request failed (not a conflict); flush stops retrying
+
   function cancelTimer() { if (timer !== null) clearTimer(timer); timer = null; }
 
   function accept(result) {
     exam = { id: result.id, revision: result.revision };
+    failed = false;
     saved = JSON.stringify(pickDraft(result));
     savedText = `저장됨 · ${savedTime(result.updated_at)}`;
-    onStatus("saved", savedText);
+  }
+
+  // Emit exactly one status for what is on screen now versus the server copy.
+  function settle() {
+    const now = snapshot();
+    if (!now) { onStatus("invalid", "번호 확인 필요"); return false; }
+    if (JSON.stringify(pickDraft(now)) === saved) { onStatus("saved", savedText); return true; }
+    onStatus("pending", "저장 전 변경 있음");
+    cancelTimer();
+    timer = setTimer(() => { timer = null; save(); }, delay);
+    return false;
+  }
+
+  function matchesScreen() {
+    const now = snapshot();
+    return Boolean(now) && JSON.stringify(pickDraft(now)) === saved;
   }
 
   async function save() {
     cancelTimer();
     if (!ready || conflict) return !conflict;
-    if (inflight) { await inflight; return save(); }
+    if (inflight) {
+      const waitingFor = generation;
+      await inflight;
+      return waitingFor === generation ? save() : false;
+    }
     const raw = snapshot();
-    if (!raw) { onStatus("invalid", "번호 설정을 확인하면 저장됩니다"); return false; }
+    if (!raw) { onStatus("invalid", "번호 확인 필요"); return false; }
     const draft = pickDraft(raw);
     const body = JSON.stringify(draft);
-    if (exam && body === saved) { onStatus("saved", savedText); return true; }
+    if (exam && body === saved) return settle();
     const run = generation;
-    onStatus("saving", "저장 중…");
+    // Fast saves never flash "저장 중"; only a slow one shows it.
+    const slow = setTimer(() => { if (run === generation) onStatus("saving", "저장 중"); }, 400);
     inflight = (async () => {
       try {
         const result = exam
@@ -60,23 +84,22 @@ export function createExamSync({ api, snapshot, onStatus, onConflict, delay = 80
           : await api("/api/exams", { method: "POST", body });
         if (run !== generation) return false;
         accept(result);
-        // Edits made while this request was in flight are not on the server yet.
-        const now = snapshot();
-        if (!now || JSON.stringify(pickDraft(now)) !== saved) onStatus("pending", "저장 전 변경 있음");
-        // The result may differ from what we sent only by server normalization.
-        return JSON.stringify(pickDraft(raw)) === saved;
+        return settle();
       } catch (error) {
         if (run !== generation) return false;
         if (error.status === 409) {
           conflict = true;
-          onStatus("conflict", "다른 화면에서 먼저 저장됨");
+          onStatus("conflict", "자동 저장 멈춤");
           onConflict(error.detail?.exam || null);
         } else {
+          failed = true;
           onStatus("error", error.status === 401 ? "로그인이 만료되어 저장하지 못했습니다" : "저장하지 못했습니다");
         }
         return false;
       } finally {
-        inflight = null;
+        clearTimer(slow);
+        // A request from an exam that was since closed must not clear the new exam's request.
+        if (run === generation) inflight = null;
       }
     })();
     return inflight;
@@ -84,43 +107,69 @@ export function createExamSync({ api, snapshot, onStatus, onConflict, delay = 80
 
   return {
     // Forget the current exam; nothing saves until begin() or start().
-    reset() { generation += 1; cancelTimer(); ready = false; exam = null; saved = ""; conflict = false; inflight = null; onStatus("idle", ""); },
+    reset() { generation += 1; cancelTimer(); ready = false; exam = null; saved = ""; conflict = false; failed = false; inflight = null; copying = null; onStatus("idle", ""); },
     // Continue an exam loaded from the server.
-    begin(loaded) { generation += 1; cancelTimer(); inflight = null; ready = true; conflict = false; accept(loaded); },
+    begin(loaded) { generation += 1; cancelTimer(); inflight = null; copying = null; ready = true; conflict = false; accept(loaded); onStatus("saved", savedText); },
     // Save the current composition, creating the exam if there is none yet.
     start() { ready = true; return save(); },
     // "저장됨" stays only while the server holds exactly what is on screen.
     schedule() {
       if (!ready || conflict) return;
       const raw = snapshot();
-      if (raw && exam && JSON.stringify(pickDraft(raw)) === saved) return;
+      // While a request is in flight the server copy is about to change, so never skip.
+      if (!inflight && raw && exam && JSON.stringify(pickDraft(raw)) === saved) return;
       cancelTimer();
       onStatus("pending", "저장 전 변경 있음");
       timer = setTimer(() => { timer = null; save(); }, delay);
     },
-    // Resolves true only when the server holds the current draft.
-    flush() { return ready ? save() : Promise.resolve(true); },
+    // Resolves true only when the server holds what is on screen at that moment.
+    async flush() {
+      if (!ready) return true;
+      const started = generation;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        // Success only if the screen still matches after the await (it may have changed meanwhile).
+        if (await save() && started === generation && matchesScreen()) return true;
+        // A flush begun for one exam never continues into the next one.
+        if (started !== generation) return false;
+        if (conflict || failed || !snapshot()) return false; // a real failure, not just newer edits
+      }
+      return false;
+    },
     // Conflict escape: keep this tab's draft as a separate exam. Returns it, or null.
-    async keepAsCopy() {
+    // `applied(copy)` runs before comparing, so the caller can show the copy's title first.
+    keepAsCopy(applied = () => {}) {
+      // A second click while the copy is being made reuses the same request.
+      if (copying) return copying;
       const raw = snapshot();
-      if (!raw) return null;
+      if (!raw) return Promise.resolve(null);
       const run = ++generation;
       cancelTimer();
       inflight = null;
       const draft = pickDraft(raw);
       draft.title = `${draft.title} (내 변경)`.slice(0, 300);
-      try {
-        const result = await api("/api/exams", { method: "POST", body: JSON.stringify(draft) });
-        if (run !== generation) return null;
-        ready = true;
-        conflict = false;
-        accept(result);
-        return result;
-      } catch {
-        if (run === generation) onStatus("error", "새 시험지로 저장하지 못했습니다");
-        return null;
-      }
+      copying = (async () => {
+        try {
+          const result = await api("/api/exams", { method: "POST", body: JSON.stringify(draft) });
+          if (run !== generation) return null;
+          ready = true;
+          conflict = false;
+          accept(result);
+          applied(result);
+          // Edits made while the copy was being created are saved next, not hidden.
+          settle();
+          return result;
+        } catch {
+          // Stay in the conflict so both ways out remain on screen.
+          if (run === generation) onStatus("conflict", "자동 저장 멈춤");
+          return null;
+        } finally {
+          copying = null;
+        }
+      })();
+      return copying;
     },
+    // True while something on screen is not confirmed by the server.
+    dirty() { return ready && (timer !== null || inflight !== null || copying !== null || conflict || failed || !matchesScreen()); },
     current() { return exam ? { ...exam } : null; },
   };
 }

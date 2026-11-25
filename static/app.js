@@ -113,6 +113,7 @@ const els = {
   sessionLogout: document.querySelector("#sessionLogout"),
   sessionResume: document.querySelector("#sessionResume"),
   examSaveStatus: document.querySelector("#examSaveStatus"),
+  examSaveAnnounce: document.querySelector("#examSaveAnnounce"),
   examSaveRetry: document.querySelector("#examSaveRetry"),
   examConflict: document.querySelector("#examConflict"),
   examReloadLatest: document.querySelector("#examReloadLatest"),
@@ -3819,6 +3820,11 @@ async function logoutLocalSession() {
     els.sessionStatus.textContent = "편집 내용을 저장하지 못했습니다. 저장한 뒤 로그아웃해 주세요.";
     return;
   }
+  // Logging out clears this browser's copy, so the exam must be on the server first.
+  if (!(await examSync.flush())) {
+    els.sessionStatus.textContent = "시험지 변경을 저장하지 못했습니다. 위쪽 저장 상태를 확인한 뒤 로그아웃해 주세요.";
+    return;
+  }
   state.sessionBusy = true;
   els.sessionLogout.disabled = true;
   try {
@@ -4674,7 +4680,7 @@ window.addEventListener("blur", () => {
   els.paperStage?.classList.remove("pan-ready", "panning");
 });
 window.addEventListener("beforeunload", (event) => {
-  if (!state.draftDirty && !state.savingDraft && !state.simpleConversionBusy && !state.importController && !state.recognitionController && !state.conversionBusy) return;
+  if (!state.draftDirty && !state.savingDraft && !state.simpleConversionBusy && !state.importController && !state.recognitionController && !state.conversionBusy && !examSync.dirty()) return;
   event.preventDefault();
   event.returnValue = "";
 });
@@ -4914,12 +4920,17 @@ function applySavedExam(exam) {
   syncTemplatePreview();
 }
 
+let lastExamStatus = "idle";
 function showExamStatus(kind, text) {
   if (!els.examSaveStatus) return; // A page cached before this feature has no status row.
   els.examSaveStatus.textContent = text;
   els.examSaveStatus.dataset.state = kind;
   els.examSaveRetry.classList.toggle("hidden", kind !== "error");
   els.examConflict.classList.toggle("hidden", kind !== "conflict");
+  // Read aloud only what needs action or ends a slow save; the conflict bar is role=alert.
+  const announce = kind === "error" ? text : kind === "saved" && lastExamStatus === "saving" ? "저장했습니다." : "";
+  if (announce && els.examSaveAnnounce) els.examSaveAnnounce.textContent = announce;
+  lastExamStatus = kind;
 }
 
 const examSync = createExamSync({ api, snapshot: examDraft, onStatus: showExamStatus, onConflict() {} });
@@ -5008,10 +5019,14 @@ async function createBlankExam() {
 }
 
 async function keepExamAsCopy() {
-  const copy = await examSync.keepAsCopy();
-  if (!copy) return;
-  els.exportTitle.value = copy.title;
-  syncPaperPreviewMeta();
+  const copy = await examSync.keepAsCopy((created) => {
+    els.exportTitle.value = created.title;
+    syncPaperPreviewMeta();
+  });
+  if (!copy) {
+    toast("새 시험지로 저장하지 못했습니다. 다시 시도하거나 최신본을 여세요. 이 화면의 변경은 그대로 있습니다.");
+    return;
+  }
   toast(`내 변경을 '${copy.title}'로 저장했습니다. 다른 화면의 시험지는 그대로입니다.`);
 }
 
