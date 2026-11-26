@@ -171,7 +171,12 @@ export function createStudioViews(api) {
   const original = String(problem?.number ?? "").trim();
   if (!/^\d{1,3}$/.test(original)) return title;
   const withoutSuffix = title.replace(new RegExp("\\s*#\\s*" + original + "\\s*$"), "");
-  return withoutSuffix.replace(new RegExp("^[ \\t]*(?:문제[ \\t]*)?" + original + "[ \\t]*[.)](?:[ \\t]+|(?=\\r?\\n|$))"), "").trim() || "문제";
+  return stripKnownSourceLabel(withoutSuffix, original).trim() || "문제";
+}
+
+function stripKnownSourceLabel(text, original) {
+  if (!/^\d{1,3}$/.test(original)) return text;
+  return text.replace(new RegExp("^[ \\t]*(?:문제[ \\t]*)?" + original + "[ \\t]*[.)](?:[ \\t]+|(?=\\r?\\n|$))"), "");
 }
 
 function textNode(tag, className, text) {
@@ -229,6 +234,12 @@ function textNode(tag, className, text) {
       number.textContent = String(api.outputNumber(item, index) || "—").padStart(2, "0");
       number.setAttribute("aria-label", `출력 번호 ${number.textContent}`);
       row.querySelector(".basket-label").textContent = `원본 ${item?.number || "번호 없음"} · ${displayQuestionTitle(item, entry.label)}`;
+      const snippet = row.querySelector(".basket-snippet");
+      if (snippet && item?.stem) {
+        const stem = stripKnownSourceLabel(String(item.stem), String(item.number ?? "").trim());
+        const excerpt = stem.replace(/\s+/g, " ").trim();
+        snippet.textContent = excerpt.length > 120 ? excerpt.slice(0, 120) + "…" : excerpt;
+      }
       row.classList.toggle("studio-selected", entry?.id === state.activeId);
     }
     if (view === "paper") renderDocument();
