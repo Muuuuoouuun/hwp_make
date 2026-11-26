@@ -198,6 +198,8 @@ def prepare_export_problems(
         # title as the heading, so the stale source number would sit beside the new one.
         if original and isinstance(problem.get("title"), str):
             problem["title"] = re.sub(r"\s*#\s*" + re.escape(original) + r"\s*$", "", problem["title"])
+            # Manually titled questions can carry the same original marker as the stem.
+            problem["title"] = _strip_original_prefix(problem["title"], original)
         if numbering_mode == "sequential":
             problem["number"] = str(start_number + offset)
         problem["_numbering_prepared"] = True

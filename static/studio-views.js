@@ -166,7 +166,15 @@ export function createStudioViews(api) {
     api.openModal(byId("studioSourceModal"), byId("studioAddSource"), byId("sourceTab"));
   }
 
-  function textNode(tag, className, text) {
+  function displayQuestionTitle(problem, fallback) {
+  const title = String(problem?.title || fallback || "문제");
+  const original = String(problem?.number ?? "").trim();
+  if (!/^\d{1,3}$/.test(original)) return title;
+  const withoutSuffix = title.replace(new RegExp("\\s*#\\s*" + original + "\\s*$"), "");
+  return withoutSuffix.replace(new RegExp("^[ \\t]*(?:문제[ \\t]*)?" + original + "[ \\t]*[.)](?:[ \\t]+|(?=\\r?\\n|$))"), "").trim() || "문제";
+}
+
+function textNode(tag, className, text) {
     const node = document.createElement(tag);
     node.className = className;
     node.textContent = text;
@@ -195,7 +203,7 @@ export function createStudioViews(api) {
       row.append(textNode("span", "studio-nav-number", number.padStart(2, "0")));
       const copy = document.createElement("span");
       copy.className = "studio-nav-copy";
-      copy.append(textNode("span", "studio-nav-title", problem?.title || (problem?.stem || entry.label).slice(0, 70)),
+      copy.append(textNode("span", "studio-nav-title", displayQuestionTitle(problem, (problem?.stem || entry.label).slice(0, 70))),
         textNode("small", "studio-nav-source", problem ? `원본 ${problem.number || "번호 없음"}` : "문항 확인 필요"));
       row.append(copy);
       row.addEventListener("click", async () => { await api.selectProblem(entry.id); refresh(); });
@@ -220,7 +228,7 @@ export function createStudioViews(api) {
       }
       number.textContent = String(api.outputNumber(item, index) || "—").padStart(2, "0");
       number.setAttribute("aria-label", `출력 번호 ${number.textContent}`);
-      row.querySelector(".basket-label").textContent = `원본 ${item?.number || "번호 없음"} · ${item?.title || entry.label}`;
+      row.querySelector(".basket-label").textContent = `원본 ${item?.number || "번호 없음"} · ${displayQuestionTitle(item, entry.label)}`;
       row.classList.toggle("studio-selected", entry?.id === state.activeId);
     }
     if (view === "paper") renderDocument();

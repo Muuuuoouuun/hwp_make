@@ -163,6 +163,13 @@ def verify_documents(folder):
         writer(path, "Title test", prepare_export_problems(raw, "sequential", 21), "basic")
         text = " ".join(document_text(path).split())
         assert "21. 기출" in text and "#27" not in text and raw[0]["title"] == "기출 #27", text
+        raw = [{"number": "27", "title": "27. 문항 제목", "stem": "27. 본문 3.14"},
+               {"number": "12", "title": "12.5 단원", "stem": "수의 값"}]
+        path = Path(folder) / f"leading_title.{extension}"
+        writer(path, "Leading title", prepare_export_problems(raw, "sequential", 41), "basic")
+        text = " ".join(document_text(path).split())
+        assert "41. 문항 제목" in text and "41. 27." not in text and "3.14" in text, text
+        assert "42. 12.5 단원" in text and raw[0]["title"] == "27. 문항 제목", text
     print("PASS both writers: decimal content survives, missing answers/explanations accepted, no stale title number")
 
     shared_sources = [{
