@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
-  <!-- HWP Make 아이콘 세트 v1 (30) — 20×20, stroke 1.8, round cap/join, 내용은 2~18 안. 점 아이콘(grip·more)만 채움.
+  <!-- HWP Make 아이콘 세트 v2 (43, 2026-11-26 시안 B·C용 13개 추가) — 20×20, stroke 1.8, round cap/join, 내용은 2~18 안. 점 아이콘(grip·more)만 채움.
        사용: <svg class="icon" aria-hidden="true"><use href="#i-이름"/></svg>. 이 파일이 원본이며 화면·시안은 복사본을 쓴다. -->
   <defs>
     <symbol id="i-grip" viewBox="0 0 20 20"><g fill="currentColor" stroke="none"><circle cx="7.5" cy="5" r="1.2"></circle><circle cx="12.5" cy="5" r="1.2"></circle><circle cx="7.5" cy="10" r="1.2"></circle><circle cx="12.5" cy="10" r="1.2"></circle><circle cx="7.5" cy="15" r="1.2"></circle><circle cx="12.5" cy="15" r="1.2"></circle></g></symbol>
@@ -32,5 +32,19 @@
     <symbol id="i-trash" viewBox="0 0 20 20"><path d="M3.5 5.5h13M8 5.5v-2h4v2M5.5 5.5l.8 11h7.4l.8-11M8.5 8.5v5M11.5 8.5v5"></path></symbol>
     <symbol id="i-download" viewBox="0 0 20 20"><path d="M10 3v9.5M6 9l4 4 4-4M4 16.5h12"></path></symbol>
     <symbol id="i-eye" viewBox="0 0 20 20"><path d="M2 10s3-5.5 8-5.5S18 10 18 10s-3 5.5-8 5.5S2 10 2 10z"></path><circle cx="10" cy="10" r="2.5"></circle></symbol>
+    <!-- v2: 시안 B(종이 편집)·C(검수·받기)용 -->
+    <symbol id="i-move-to" viewBox="0 0 20 20"><path d="M3 10h9.5M9 6.5l3.5 3.5L9 13.5M16 4v12"></path></symbol>
+    <symbol id="i-drop-here" viewBox="0 0 20 20"><path d="M3 4.5h14M3 15.5h14M6.3 10H17"></path><circle cx="4.5" cy="10" r="1.8"></circle></symbol>
+    <symbol id="i-edit" viewBox="0 0 20 20"><path d="M12.5 4.5l3 3L7 16H4v-3z"></path><path d="M11 6l3 3"></path></symbol>
+    <symbol id="i-filter" viewBox="0 0 20 20"><path d="M3 4.5h14l-5.5 6.5v5l-3 1.5v-6.5z"></path></symbol>
+    <symbol id="i-lock" viewBox="0 0 20 20"><rect x="4" y="9" width="12" height="8.5" rx="1.5"></rect><path d="M6.5 9V6.5a3.5 3.5 0 0 1 7 0V9"></path></symbol>
+    <symbol id="i-columns" viewBox="0 0 20 20"><rect x="3" y="3.5" width="14" height="13" rx="1.5"></rect><path d="M10 3.5v13"></path></symbol>
+    <symbol id="i-page-break" viewBox="0 0 20 20"><path d="M5 2.5v5h10v-5M5 17.5v-5h10v5M2.5 10H5M8.75 10h2.5M15 10h2.5"></path></symbol>
+    <symbol id="i-compare" viewBox="0 0 20 20"><rect x="2.5" y="4" width="6.5" height="12" rx="1"></rect><rect x="11" y="4" width="6.5" height="12" rx="1"></rect><path d="M4.5 7.5h2.5M4.5 10h2.5M13 7.5h2.5M13 10h2.5"></path></symbol>
+    <symbol id="i-files-two" viewBox="0 0 20 20"><path d="M7 2.5h5l3.5 3.5v8.5H7z"></path><path d="M12 2.5V6h3.5"></path><path d="M4.5 5.5v12h8"></path></symbol>
+    <symbol id="i-sum" viewBox="0 0 20 20"><path d="M15 4.5H5.5l5 5.5-5 5.5H15"></path></symbol>
+    <symbol id="i-tag" viewBox="0 0 20 20"><path d="M3 3h6.5l7.5 7.5-6.5 6.5L3 9.5z"></path><circle cx="6.5" cy="6.5" r="1.2"></circle></symbol>
+    <symbol id="i-history" viewBox="0 0 20 20"><path d="M3.5 10a6.5 6.5 0 1 0 1.9-4.6"></path><path d="M3.5 3.5v3.5H7"></path><path d="M10 6.5V10l2.5 1.5"></path></symbol>
+    <symbol id="i-keyboard" viewBox="0 0 20 20"><rect x="2.5" y="5" width="15" height="10" rx="1.5"></rect><path d="M5.5 8h.1M8.5 8h.1M11.5 8h.1M14.5 8h.1M6.5 12h7"></path></symbol>
   </defs>
 </svg>
